@@ -12,6 +12,8 @@ loop are reported separately:
   0x0-0x8 1.20
   0x2-0x6 1.00
 
+Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
+
 Usage:
   python3 analyze.py <elf-binary>
 """
@@ -22,29 +24,106 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import namedtuple
 
 
 # ---------------------------------------------------------------------------
-# Branch / jump detection
+# Architecture info
 # ---------------------------------------------------------------------------
 
-# Mnemonic prefixes that indicate an instruction with a branch target.
-# "call" is included so its target operand is replaced when building the
-# llvm-mca assembly snippet; however "call" does *not* end a basic block
-# (execution continues at the return address).
-_BRANCH_PREFIXES = ("j", "call", "loop")
+# _ArchInfo bundles all per-architecture settings needed during analysis.
+#   name     : short arch tag used for branch-detection dispatch
+#   objdump  : objdump executable that can disassemble this architecture
+#   mca_args : extra arguments forwarded to llvm-mca
+_ArchInfo = namedtuple("_ArchInfo", ["name", "objdump", "mca_args"])
 
 
-def _is_branch(mnemonic: str) -> bool:
-    """Return True if *mnemonic* is a branch/jump/call instruction."""
+def _find_cross_tool(preferred: str) -> str:
+    """Return *preferred* tool if it exists on PATH, else fall back to plain objdump."""
+    return preferred if shutil.which(preferred) else "objdump"
+
+
+def _detect_arch(binary: str) -> "_ArchInfo":
+    """Detect the architecture of *binary* and return an ``_ArchInfo``."""
+    try:
+        file_out = subprocess.run(
+            ["file", binary], capture_output=True, text=True
+        ).stdout.lower()
+    except Exception:
+        file_out = ""
+
+    if "ucb risc-v" in file_out:
+        objdump = _find_cross_tool("riscv64-linux-gnu-objdump")
+        if "32-bit" in file_out:
+            return _ArchInfo("riscv", objdump,
+                             ["-march=riscv32", "-mcpu=sifive-e31"])
+        return _ArchInfo("riscv", objdump,
+                         ["-march=riscv64", "-mcpu=sifive-u74"])
+
+    if "aarch64" in file_out or "arm64" in file_out:
+        objdump = _find_cross_tool("aarch64-linux-gnu-objdump")
+        return _ArchInfo("aarch64", objdump,
+                         ["-march=aarch64", "-mcpu=cortex-a57"])
+
+    if re.search(r"\barm\b", file_out):
+        objdump = _find_cross_tool("arm-linux-gnueabihf-objdump")
+        return _ArchInfo("arm", objdump, ["-march=arm"])
+
+    return _ArchInfo("x86", "objdump", [])
+
+
+# ---------------------------------------------------------------------------
+# Branch / jump detection (architecture-aware)
+# ---------------------------------------------------------------------------
+
+def _is_branch(mnemonic: str, arch: str = "x86") -> bool:
+    """Return True if *mnemonic* is a branch/jump/call instruction.
+
+    Recognises:
+    * x86/x86-64 : ``j*``, ``call``, ``loop*``
+    * AArch64    : ``b*``, ``cb*``, ``tb*``
+      (covers b, b.cond, bl, blr, br, cbz, cbnz, tbz, tbnz)
+    * RISC-V     : ``b*``, ``j*``, ``call``
+      (covers beq/bne/blt/bge/…, jal, jalr, j, jr)
+    """
     m = mnemonic.lower()
-    return any(m.startswith(p) for p in _BRANCH_PREFIXES)
+    if arch == "aarch64":
+        return m.startswith(("b", "cb", "tb"))
+    if arch == "riscv":
+        return m.startswith("b") or m.startswith("j") or m == "call"
+    # x86 / arm default
+    return m.startswith(("j", "call", "loop"))
 
 
-def _ends_basic_block(mnemonic: str, operands: str = "") -> bool:
-    """Return True if *mnemonic* (and *operands*) end a basic block."""
+def _ends_basic_block(mnemonic: str, operands: str = "",
+                      arch: str = "x86") -> bool:
+    """Return True if this instruction ends a basic block."""
     m = mnemonic.lower()
     op = operands.lower()
+
+    if arch == "aarch64":
+        # bl / blr are calls (fall-through continues) — they do NOT end a BB.
+        # Everything else that changes control flow does.
+        return (
+            (m.startswith("b") and not m.startswith("bl"))
+            or m.startswith(("cb", "tb"))
+            or m == "ret"
+        )
+
+    if arch == "riscv":
+        # All conditional branches (beq/bne/blt/bge/bltu/bgeu/…) end a BB.
+        # j/jr are unconditional pseudo-jumps; ret is a return.
+        # jal/jalr: objdump typically shows `j target` (not `jal x0, target`)
+        # for unconditional jumps, and `ret` (not `jalr x0, 0(ra)`) for
+        # returns, so the distinction is handled by the pseudo-instruction
+        # names rather than inspecting the destination register.
+        return (
+            m.startswith("b")
+            or m in ("j", "jr", "ret")
+            or m.startswith("jal")
+        )
+
+    # x86 / arm
     return (
         m.startswith("j")
         or m.startswith("loop")
@@ -58,40 +137,76 @@ def _ends_basic_block(mnemonic: str, operands: str = "") -> bool:
 def _get_branch_target(operands: str):
     """Return the numeric branch target from *operands*, or None.
 
-    Handles:
-    * Direct jumps:  ``4016``  or  ``0x4016``
-    * Indirect jumps start with ``*`` in AT&T syntax → return None.
+    Handles single-operand branches (x86: ``jne 4016``) as well as
+    multi-operand branches (RISC-V: ``bne a4,a5,314``; AArch64:
+    ``cbz x0, 2dc``; ``tbz x0, #0, 2dc``).
+
+    The branch target is always the LAST address-like value in the operand
+    string.  Values preceded by ``#`` (immediate field in tbz/tbnz etc.) are
+    excluded so they are not mistaken for the target address.
+
+    Returns None for indirect branches (operands starting with ``*``).
     """
     op = operands.strip()
-    # Indirect jump/call: *%reg or *offset(%reg)
+    # Indirect jump/call in AT&T syntax: *%reg or *offset(%reg)
     if op.startswith("*"):
         return None
-    # With explicit 0x prefix
-    m = re.match(r"0x([0-9a-fA-F]+)", op)
-    if m:
-        return int(m.group(1), 16)
-    # Plain hex address (objdump default — no 0x prefix)
-    m = re.match(r"([0-9a-fA-F]{3,})\b", op)
-    if m:
-        try:
-            return int(m.group(1), 16)
-        except ValueError:
-            pass
-    return None
+
+    candidates = []
+
+    # 1. Explicit 0x-prefixed addresses not preceded by # (AArch64 immediates
+    #    like #0x10 start with #, so the lookbehind filters them out).
+    for mo in re.finditer(r"(?<![#\w])0x([0-9a-fA-F]+)\b", op):
+        candidates.append(int(mo.group(1), 16))
+
+    if not candidates:
+        # 2. Plain hex addresses of at least 3 digits (to avoid matching
+        #    short register names like a0, t0, x0, w0).
+        #    ValueError from int(..., 16) cannot occur since the regex only
+        #    captures [0-9a-fA-F]+ characters; the try/except is defensive.
+        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]{3,})\b", op):
+            try:
+                candidates.append(int(mo.group(1), 16))
+            except ValueError:  # pragma: no cover
+                pass
+
+    # Return the last candidate — for multi-operand instructions the target
+    # is always the final operand.
+    return candidates[-1] if candidates else None
+
+
+def _replace_branch_target(operands: str, target: int,
+                            replacement: str) -> str:
+    """Replace the branch target address in *operands* with *replacement*.
+
+    Works for both single-operand (``4016``) and multi-operand
+    (``a4,a5,314``, ``x0, 2dc``) branch instructions.
+    """
+    hex_t = f"{target:x}"
+    # Try 0x-prefixed form first, then plain hex.
+    for pattern in (
+        rf"(?<![#\w])0x{re.escape(hex_t)}\b",
+        rf"(?<![#\w]){re.escape(hex_t)}\b",
+    ):
+        new_ops, n = re.subn(pattern, replacement, operands,
+                             flags=re.IGNORECASE)
+        if n:
+            return new_ops
+    return operands  # fallback: no replacement found
 
 
 # ---------------------------------------------------------------------------
 # Disassembly
 # ---------------------------------------------------------------------------
 
-def disassemble(binary: str):
-    """Disassemble *binary* with objdump.
+def disassemble(binary: str, objdump: str = "objdump", arch: str = "x86"):
+    """Disassemble *binary* with *objdump*.
 
     Returns a list of ``(func_name, instructions)`` pairs where
     *instructions* is a list of ``(addr, mnemonic, operands)`` triples.
     """
     proc = subprocess.run(
-        ["objdump", "-d", "--no-show-raw-insn", binary],
+        [objdump, "-d", "--no-show-raw-insn", binary],
         capture_output=True,
         text=True,
         check=True,
@@ -117,9 +232,16 @@ def disassemble(binary: str):
         if im and cur_name is not None:
             addr = int(im.group(1), 16)
             text = im.group(2)
-            # Remove symbol annotations like <name+0x10> and inline comments
+            # Remove symbol annotations like <name+0x10>
             text = re.sub(r"<[^>]+>", "", text)
-            text = re.sub(r"#.*$", "", text).strip()
+            # Remove inline comments.
+            # AArch64 uses # for immediate operands (e.g. #0x1), so only
+            # strip // style comments there.  All other architectures use
+            # # style inline annotations (e.g. x86 "# addr", RISC-V "# addr").
+            if arch == "aarch64":
+                text = re.sub(r"//.*$", "", text).strip()
+            else:
+                text = re.sub(r"#.*$", "", text).strip()
             if not text:
                 continue
             parts = text.split(None, 1)
@@ -137,7 +259,7 @@ def disassemble(binary: str):
 # Loop detection
 # ---------------------------------------------------------------------------
 
-def _find_loops(instrs):
+def _find_loops(instrs, arch: str = "x86"):
     """Detect loops via backward branches.
 
     Returns a list of ``(start_addr, end_addr)`` pairs, one per detected
@@ -149,7 +271,7 @@ def _find_loops(instrs):
     loops = []
 
     for addr, mnemonic, operands in instrs:
-        if _is_branch(mnemonic):
+        if _is_branch(mnemonic, arch):
             target = _get_branch_target(operands)
             if target is not None and target < addr and target in addr_set:
                 loops.append((target, addr))
@@ -167,15 +289,17 @@ def _in_any_loop(addr: int, loops) -> bool:
 # Assembly formatting for llvm-mca
 # ---------------------------------------------------------------------------
 
-def _format_asm(instrs) -> str:
-    """Format *instrs* as AT&T assembly for llvm-mca.
+def _format_asm(instrs, arch: str = "x86") -> str:
+    """Format *instrs* as assembly for llvm-mca.
 
-    * Instructions whose address is a jump target within this region are
+    * Instructions whose address is a branch target within this region are
       preceded by a local label ``.Lmca_ADDR:``.
     * Branch instructions with an in-region target are rewritten to use the
-      corresponding label.
-    * Branch instructions with an out-of-region target (or an indirect
-      target that couldn't be resolved) are redirected to ``.Lmca_end``.
+      corresponding label (preserving any non-target operands for
+      multi-operand architectures like RISC-V and AArch64).
+    * Branch instructions with an out-of-region direct target are redirected
+      to ``.Lmca_end``.
+    * Indirect branches (no resolvable target) are kept as-is.
     * A ``.Lmca_end:`` label is appended after the last instruction so that
       all forward/external branch targets resolve without assembler errors.
     """
@@ -184,7 +308,7 @@ def _format_asm(instrs) -> str:
     # Determine which addresses need a label
     labeled: set = set()
     for addr, mnemonic, operands in instrs:
-        if _is_branch(mnemonic):
+        if _is_branch(mnemonic, arch):
             t = _get_branch_target(operands)
             if t is not None and t in addr_set:
                 labeled.add(t)
@@ -193,13 +317,23 @@ def _format_asm(instrs) -> str:
     for addr, mnemonic, operands in instrs:
         if addr in labeled:
             lines.append(f".Lmca_{addr:x}:")
-        if _is_branch(mnemonic):
+        if _is_branch(mnemonic, arch):
             t = _get_branch_target(operands)
             if t is not None and t in addr_set:
-                lines.append(f"\t{mnemonic} .Lmca_{t:x}")
+                # In-region branch: replace target with a local label,
+                # keeping any other operands (e.g. registers in cbz/bne).
+                new_ops = _replace_branch_target(operands, t,
+                                                 f".Lmca_{t:x}")
+                lines.append(f"\t{mnemonic} {new_ops}")
+            elif t is not None:
+                # Out-of-region direct branch: redirect to the end label.
+                new_ops = _replace_branch_target(operands, t, ".Lmca_end")
+                lines.append(f"\t{mnemonic} {new_ops}")
             else:
-                # Indirect or out-of-region target — redirect to end label
-                lines.append(f"\t{mnemonic} .Lmca_end")
+                # Indirect branch (register target) — keep the original
+                # instruction so the assembler does not error out.
+                tail = f" {operands}" if operands else ""
+                lines.append(f"\t{mnemonic}{tail}")
         else:
             tail = f" {operands}" if operands else ""
             lines.append(f"\t{mnemonic}{tail}")
@@ -228,7 +362,7 @@ def _find_llvm_mca() -> str:
 _LLVM_MCA = None  # resolved lazily
 
 
-def _run_mca(instrs, extra_args=()):
+def _run_mca(instrs, mca_args=(), arch: str = "x86"):
     """Run llvm-mca on *instrs* and return IPC as a float, or None."""
     global _LLVM_MCA
     if not instrs:
@@ -240,12 +374,12 @@ def _run_mca(instrs, extra_args=()):
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    asm = _format_asm(instrs)
+    asm = _format_asm(instrs, arch)
     fd, path = tempfile.mkstemp(suffix=".s", prefix="llvm_mca_")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(asm)
-        cmd = [_LLVM_MCA, *extra_args, path]
+        cmd = [_LLVM_MCA, *mca_args, path]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             return None
@@ -259,19 +393,19 @@ def _run_mca(instrs, extra_args=()):
 # Per-function analysis
 # ---------------------------------------------------------------------------
 
-def _analyze_function(instrs, extra_args=()):
+def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     """Analyse one function's instructions.
 
     Yields ``(start_addr, end_addr, ipc)`` triples for every loop and every
     basic block that is not part of a loop.
     """
-    loops = _find_loops(instrs)
+    loops = _find_loops(instrs, arch)
 
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
         if region:
-            ipc = _run_mca(region, extra_args)
+            ipc = _run_mca(region, mca_args, arch)
             if ipc is not None:
                 yield ls, le, ipc
 
@@ -281,14 +415,14 @@ def _analyze_function(instrs, extra_args=()):
     for instr in non_loop:
         addr, mnemonic, operands = instr
         bb.append(instr)
-        if _ends_basic_block(mnemonic, operands):
+        if _ends_basic_block(mnemonic, operands, arch):
             if bb:
-                ipc = _run_mca(bb, extra_args)
+                ipc = _run_mca(bb, mca_args, arch)
                 if ipc is not None:
                     yield bb[0][0], bb[-1][0], ipc
             bb = []
     if bb:
-        ipc = _run_mca(bb, extra_args)
+        ipc = _run_mca(bb, mca_args, arch)
         if ipc is not None:
             yield bb[0][0], bb[-1][0], ipc
 
@@ -299,21 +433,12 @@ def _analyze_function(instrs, extra_args=()):
 
 def analyze(binary: str):
     """Analyse *binary* and yield ``(start, end, ipc)`` triples."""
-    # Detect architecture-specific llvm-mca flags
-    extra_args = []
-    try:
-        file_out = subprocess.run(
-            ["file", binary], capture_output=True, text=True
-        ).stdout.lower()
-        if "aarch64" in file_out or "arm64" in file_out:
-            extra_args = ["-march=aarch64"]
-        elif re.search(r"\barm\b", file_out):
-            extra_args = ["-march=arm"]
-    except Exception:
-        pass
+    arch_info = _detect_arch(binary)
 
-    for _func_name, instrs in disassemble(binary):
-        yield from _analyze_function(instrs, extra_args)
+    for _func_name, instrs in disassemble(binary, arch_info.objdump,
+                                          arch_info.name):
+        yield from _analyze_function(instrs, arch_info.mca_args,
+                                     arch_info.name)
 
 
 # ---------------------------------------------------------------------------
