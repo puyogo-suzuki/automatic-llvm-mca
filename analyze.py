@@ -24,7 +24,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections import namedtuple
 
 
@@ -403,18 +402,13 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86"):
             sys.exit(1)
 
     asm = _format_asm(instrs, arch)
-    fd, path = tempfile.mkstemp(suffix=".s", prefix="llvm_mca_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(asm)
-        cmd = [_LLVM_MCA, *mca_args, path]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            return None
-        m = re.search(r"\bIPC:\s+([\d.]+)", proc.stdout)
-        return float(m.group(1)) if m else None
-    finally:
-        os.unlink(path)
+    # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
+    cmd = [_LLVM_MCA, *mca_args, "-"]
+    proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    m = re.search(r"\bIPC:\s+([\d.]+)", proc.stdout)
+    return float(m.group(1)) if m else None
 
 
 def _yield_mca_result(instrs, mca_args, arch):
