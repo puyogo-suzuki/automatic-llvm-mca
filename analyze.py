@@ -15,9 +15,10 @@ loop are reported separately:
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
 Usage:
-  python3 analyze.py <elf-binary>
+  python3 analyze.py [--mcpu <cpu>] <elf-binary>
 """
 
+import argparse
 import os
 import re
 import shutil
@@ -458,14 +459,23 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
-def analyze(binary: str):
-    """Analyse *binary* and yield ``(start, end, ipc)`` triples."""
+def analyze(binary: str, mcpu: str = ""):
+    """Analyse *binary* and yield ``(start, end, ipc)`` triples.
+
+    If *mcpu* is non-empty it overrides the default ``-mcpu`` value chosen by
+    ``_detect_arch`` and is forwarded to llvm-mca.
+    """
     arch_info = _detect_arch(binary)
+
+    mca_args = arch_info.mca_args
+    if mcpu:
+        # Replace any existing -mcpu=... entry with the user-supplied value.
+        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
+        mca_args = mca_args + [f"-mcpu={mcpu}"]
 
     for _func_name, instrs in disassemble(binary, arch_info.objdump,
                                           arch_info.name):
-        yield from _analyze_function(instrs, arch_info.mca_args,
-                                     arch_info.name)
+        yield from _analyze_function(instrs, mca_args, arch_info.name)
 
 
 # ---------------------------------------------------------------------------
@@ -473,18 +483,29 @@ def analyze(binary: str):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <elf-binary>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Estimate throughput for an ELF binary using llvm-mca."
+    )
+    parser.add_argument("binary", help="Path to the ELF binary to analyse")
+    parser.add_argument(
+        "--mcpu",
+        default="",
+        metavar="CPU",
+        help=(
+            "Target CPU passed to llvm-mca via -mcpu (e.g. cortex-a72, "
+            "neoverse-n1, sifive-u74). Overrides the default CPU chosen by "
+            "architecture auto-detection."
+        ),
+    )
+    args = parser.parse_args()
 
-    binary = sys.argv[1]
-    if not os.path.isfile(binary):
-        print(f"Error: {binary}: no such file", file=sys.stderr)
-        sys.exit(1)
+    if not os.path.isfile(args.binary):
+        parser.error(f"{args.binary}: no such file")
 
     # Sort: by start address ascending; for equal starts, larger span first
     # (outer loops before inner loops at the same start address).
-    results = sorted(analyze(binary), key=lambda x: (x[0], -(x[1] - x[0])))
+    results = sorted(analyze(args.binary, args.mcpu),
+                     key=lambda x: (x[0], -(x[1] - x[0])))
     for start, end, ipc in results:
         print(f"0x{start:x}-0x{end:x} {ipc:.2f}")
 
