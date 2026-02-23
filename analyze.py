@@ -76,21 +76,54 @@ def _detect_arch(binary: str) -> "_ArchInfo":
 # Branch / jump detection (architecture-aware)
 # ---------------------------------------------------------------------------
 
+# RISC-V branch/jump mnemonics (base ISA + standard pseudo-instructions).
+# Using an explicit set avoids false positives from the B (bit-manipulation)
+# extension whose instructions also start with "b" (bclr, bset, bext, …).
+_RISCV_BRANCHES = frozenset({
+    # RV32I/RV64I conditional branches
+    "beq", "bne", "blt", "bge", "bltu", "bgeu",
+    # Pseudo conditional branches (assembled from the above)
+    "beqz", "bnez", "blez", "bgez", "bltz", "bgtz",
+    "bgt", "ble", "bgtu", "bleu",
+    # Unconditional jumps
+    "j", "jr", "jal", "jalr",
+    # Pseudo-call / pseudo-tail (resolve to auipc + jalr)
+    "call", "tail",
+    # Return pseudo-instruction (= jalr x0, 0(ra))
+    "ret",
+})
+
+# AArch64 branch mnemonics.
+# Conditional branches always use the "b." prefix (b.eq, b.ne, …) which is
+# disjoint from non-branch instructions like bic, bfm, bfmlalt, etc.
+_AARCH64_BRANCHES = frozenset({
+    "b",       # unconditional branch
+    "bl",      # branch with link (call)
+    "br",      # branch to register
+    "blr",     # branch with link to register (call)
+    "ret",     # return
+    "cbz",     # compare and branch if zero
+    "cbnz",    # compare and branch if non-zero
+    "tbz",     # test bit and branch if zero
+    "tbnz",    # test bit and branch if non-zero
+})
+
+
 def _is_branch(mnemonic: str, arch: str = "x86") -> bool:
     """Return True if *mnemonic* is a branch/jump/call instruction.
 
     Recognises:
     * x86/x86-64 : ``j*``, ``call``, ``loop*``
-    * AArch64    : ``b*``, ``cb*``, ``tb*``
-      (covers b, b.cond, bl, blr, br, cbz, cbnz, tbz, tbnz)
-    * RISC-V     : ``b*``, ``j*``, ``call``
-      (covers beq/bne/blt/bge/…, jal, jalr, j, jr)
+    * AArch64    : explicit set + ``b.`` prefix (conditional branches like
+      b.eq, b.ne, …)
+    * RISC-V     : explicit set (avoids false positives from B-extension
+      instructions bclr, bset, bext, …)
     """
     m = mnemonic.lower()
     if arch == "aarch64":
-        return m.startswith(("b", "cb", "tb"))
+        return m in _AARCH64_BRANCHES or m.startswith("b.")
     if arch == "riscv":
-        return m.startswith("b") or m.startswith("j") or m == "call"
+        return m in _RISCV_BRANCHES
     # x86 / arm default
     return m.startswith(("j", "call", "loop"))
 
@@ -103,11 +136,9 @@ def _ends_basic_block(mnemonic: str, operands: str = "",
 
     if arch == "aarch64":
         # bl / blr are calls (fall-through continues) — they do NOT end a BB.
-        # Everything else that changes control flow does.
         return (
-            (m.startswith("b") and not m.startswith("bl"))
-            or m.startswith(("cb", "tb"))
-            or m == "ret"
+            m in ("b", "br", "ret", "cbz", "cbnz", "tbz", "tbnz")
+            or m.startswith("b.")  # b.eq, b.ne, b.lt, etc.
         )
 
     if arch == "riscv":
@@ -117,11 +148,7 @@ def _ends_basic_block(mnemonic: str, operands: str = "",
         # for unconditional jumps, and `ret` (not `jalr x0, 0(ra)`) for
         # returns, so the distinction is handled by the pseudo-instruction
         # names rather than inspecting the destination register.
-        return (
-            m.startswith("b")
-            or m in ("j", "jr", "ret")
-            or m.startswith("jal")
-        )
+        return m in _RISCV_BRANCHES and m not in ("call", "tail")
 
     # x86 / arm
     return (
