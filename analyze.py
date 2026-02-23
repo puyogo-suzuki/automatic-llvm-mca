@@ -417,6 +417,17 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86"):
         os.unlink(path)
 
 
+def _yield_mca_result(instrs, mca_args, arch):
+    """Run llvm-mca on *instrs* and yield a ``(start, end, ipc)`` triple.
+
+    Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
+    """
+    if instrs:
+        ipc = _run_mca(instrs, mca_args, arch)
+        if ipc is not None:
+            yield instrs[0][0], instrs[-1][0], ipc
+
+
 # ---------------------------------------------------------------------------
 # Per-function analysis
 # ---------------------------------------------------------------------------
@@ -432,10 +443,7 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        if region:
-            ipc = _run_mca(region, mca_args, arch)
-            if ipc is not None:
-                yield ls, le, ipc
+        yield from _yield_mca_result(region, mca_args, arch)
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -444,15 +452,9 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
         addr, mnemonic, operands = instr
         bb.append(instr)
         if _ends_basic_block(mnemonic, operands, arch):
-            if bb:
-                ipc = _run_mca(bb, mca_args, arch)
-                if ipc is not None:
-                    yield bb[0][0], bb[-1][0], ipc
+            yield from _yield_mca_result(bb, mca_args, arch)
             bb = []
-    if bb:
-        ipc = _run_mca(bb, mca_args, arch)
-        if ipc is not None:
-            yield bb[0][0], bb[-1][0], ipc
+    yield from _yield_mca_result(bb, mca_args, arch)
 
 
 # ---------------------------------------------------------------------------
