@@ -45,6 +45,12 @@ def _find_cross_tool(preferred: str) -> str:
 
 def _detect_arch(binary: str) -> "_ArchInfo":
     """Detect the architecture of *binary* and return an ``_ArchInfo``."""
+    if not shutil.which("file"):
+        print(
+            "Warning: 'file' command not found; defaulting to x86.",
+            file=sys.stderr,
+        )
+        return _ArchInfo("x86", "objdump", [])
     try:
         file_out = subprocess.run(
             ["file", binary], capture_output=True, text=True
