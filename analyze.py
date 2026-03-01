@@ -9,8 +9,8 @@ Procedure:
 
 For nested loops the outer loop (including the inner loop body) and the inner
 loop are reported separately:
-  0x0-0x8 1.20
   0x2-0x6 1.00
+  0x0-0x8 1.20
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
@@ -328,9 +328,9 @@ def _find_loops(instrs, arch: str = "x86"):
     """Detect loops via backward branches.
 
     Returns a list of ``(start_addr, end_addr)`` pairs, one per detected
-    loop.  Nested loops appear as separate entries — the outer loop has a
-    larger span.  The list is sorted so that outer loops come first
-    (ascending start address; descending span for equal start addresses).
+    loop.  Nested loops appear as separate entries — the inner loop has a
+    smaller span.  The list is sorted so that inner loops come first
+    (ascending end address; descending start address for equal end addresses).
     """
     addr_set = {a for a, _, _ in instrs}
     loops = []
@@ -341,8 +341,8 @@ def _find_loops(instrs, arch: str = "x86"):
             if target is not None and target < addr and target in addr_set:
                 loops.append((target, addr))
 
-    # Outer loops first (smaller start, larger span)
-    loops.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    # Inner loops first (smaller end address; for equal end, larger start = smaller span)
+    loops.sort(key=lambda x: (x[1], -x[0]))
     return loops
 
 
@@ -536,10 +536,10 @@ def main():
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
 
-    # Sort: by start address ascending; for equal starts, larger span first
-    # (outer loops before inner loops at the same start address).
+    # Sort: inner loops first (ascending end address; for equal end, larger
+    # start = smaller span comes first).
     results = sorted(analyze(args.binary, args.mcpu),
-                     key=lambda x: (x[0], -(x[1] - x[0])))
+                     key=lambda x: (x[1], -x[0]))
     for start, end, ipc in results:
         print(f"0x{start:x}-0x{end:x} {ipc:.2f}")
 
