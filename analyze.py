@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -43,8 +44,45 @@ def _find_cross_tool(preferred: str) -> str:
     return preferred if shutil.which(preferred) else "objdump"
 
 
+def _arch_from_platform() -> "_ArchInfo":
+    """Return an ``_ArchInfo`` based on the host machine's architecture.
+
+    Used as a fallback when the ``file`` command is not available.
+    ``platform.machine()`` provides the CPU type (e.g. ``x86_64``,
+    ``aarch64``, ``riscv64``) and ``platform.architecture()`` provides the
+    pointer-size bit width, which is used to distinguish RV32 from RV64.
+    """
+    machine = platform.machine().lower()
+    bits, _ = platform.architecture()
+
+    if "riscv" in machine:
+        objdump = _find_cross_tool("riscv64-linux-gnu-objdump")
+        if bits == "32bit":
+            return _ArchInfo("riscv", objdump,
+                             ["-march=riscv32", "-mcpu=sifive-e31"])
+        return _ArchInfo("riscv", objdump,
+                         ["-march=riscv64", "-mcpu=sifive-u74"])
+
+    if machine in ("aarch64", "arm64"):
+        objdump = _find_cross_tool("aarch64-linux-gnu-objdump")
+        return _ArchInfo("aarch64", objdump,
+                         ["-march=aarch64", "-mcpu=cortex-a57"])
+
+    if machine.startswith("arm"):
+        objdump = _find_cross_tool("arm-linux-gnueabihf-objdump")
+        return _ArchInfo("arm", objdump, ["-march=arm"])
+
+    return _ArchInfo("x86", "objdump", [])
+
+
 def _detect_arch(binary: str) -> "_ArchInfo":
     """Detect the architecture of *binary* and return an ``_ArchInfo``."""
+    if not shutil.which("file"):
+        print(
+            "Warning: 'file' command not found; falling back to host architecture.",
+            file=sys.stderr,
+        )
+        return _arch_from_platform()
     try:
         file_out = subprocess.run(
             ["file", binary], capture_output=True, text=True
