@@ -534,21 +534,36 @@ class TestDisassembleAarch64:
 
 @_NEED_AARCH64
 class TestAnalyzeAarch64:
-    """analyze() end-to-end tests for AArch64 object files."""
+    """analyze() end-to-end tests for AArch64 object files.
+
+    ``analyze()`` yields ``(start, end, ipc, load_proportion)`` tuples.
+    """
 
     def test_no_loop_function_produces_results(self, tmp_path):
         obj = _compile_aarch64(tmp_path, "add", _NO_LOOP_C)
         results = list(analyze(obj))
         assert results, "expected at least one result for no-loop function"
 
+    def test_result_tuples_have_four_elements(self, tmp_path):
+        obj = _compile_aarch64(tmp_path, "add", _NO_LOOP_C)
+        for result in analyze(obj):
+            assert len(result) == 4, \
+                f"expected (start, end, ipc, load_proportion), got {result!r}"
+
     def test_no_loop_results_have_positive_ipc(self, tmp_path):
         obj = _compile_aarch64(tmp_path, "add", _NO_LOOP_C)
-        for start, end, ipc in analyze(obj):
+        for start, end, ipc, _load in analyze(obj):
             assert ipc > 0, f"IPC must be positive, got {ipc} for 0x{start:x}-0x{end:x}"
+
+    def test_load_proportion_between_0_and_1(self, tmp_path):
+        obj = _compile_aarch64(tmp_path, "add", _NO_LOOP_C)
+        for start, end, _ipc, load in analyze(obj):
+            assert 0.0 <= load <= 1.0, \
+                f"load_proportion {load} out of [0, 1] for 0x{start:x}-0x{end:x}"
 
     def test_no_loop_addresses_are_ordered(self, tmp_path):
         obj = _compile_aarch64(tmp_path, "add", _NO_LOOP_C)
-        for start, end, _ipc in analyze(obj):
+        for start, end, _ipc, _load in analyze(obj):
             assert start <= end, f"start 0x{start:x} > end 0x{end:x}"
 
     def test_loop_function_detects_loop_region(self, tmp_path):
@@ -570,8 +585,27 @@ class TestAnalyzeAarch64:
 
     def test_loop_region_ipc_is_positive(self, tmp_path):
         obj = _compile_aarch64(tmp_path, "sum", _SUM_C)
-        for start, end, ipc in analyze(obj):
+        for start, end, ipc, _load in analyze(obj):
             assert ipc > 0, f"IPC must be positive, got {ipc} for 0x{start:x}-0x{end:x}"
+
+    def test_load_proportion_for_load_heavy_loop(self, tmp_path):
+        """A loop body that loads array elements should have a non-zero load proportion."""
+        obj = _compile_aarch64(tmp_path, "sum", _SUM_C)
+        funcs = disassemble(obj, "aarch64-linux-gnu-objdump", "aarch64")
+        func_map = dict(funcs)
+        loops = _find_loops(func_map["sum"], "aarch64")
+        assert loops, "expected a loop in sum()"
+        # Collect results for regions that overlap the detected loop
+        loop_start, loop_end = loops[0]
+        loop_results = [
+            (s, e, ipc, load)
+            for s, e, ipc, load in analyze(obj)
+            if s >= loop_start and e <= loop_end
+        ]
+        assert loop_results, "expected at least one result covering the loop"
+        # The loop loads from the array — load_proportion must be > 0
+        assert any(load > 0 for _, _, _, load in loop_results), \
+            "expected non-zero load_proportion for a loop with array loads"
 
     def test_nested_loops_produce_two_loop_regions(self, tmp_path):
         """Both the inner and outer loops must be reported separately."""
@@ -597,8 +631,3 @@ class TestAnalyzeAarch64:
             f"inner ({hex(inner_start)}-{hex(inner_end)}) not inside "
             f"outer ({hex(outer_start)}-{hex(outer_end)})"
         )
-
-    def test_analyze_result_tuples_have_three_elements(self, tmp_path):
-        obj = _compile_aarch64(tmp_path, "sum", _SUM_C)
-        for result in analyze(obj):
-            assert len(result) == 3, f"expected (start, end, ipc), got {result!r}"
