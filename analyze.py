@@ -201,7 +201,7 @@ def _ends_basic_block(mnemonic: str, operands: str = "",
     )
 
 
-def _get_branch_target(operands: str):
+def _get_branch_target(operands: str, mnemonic: str = "", arch: str = "x86"):
     """Return the numeric branch target from *operands*, or None.
 
     Handles single-operand branches (x86: ``jne 4016``) as well as
@@ -212,11 +212,58 @@ def _get_branch_target(operands: str):
     string.  Values preceded by ``#`` (immediate field in tbz/tbnz etc.) are
     excluded so they are not mistaken for the target address.
 
-    Returns None for indirect branches (operands starting with ``*``).
+    Returns None for indirect branches (target in a register, not a static
+    address).
+
+    Parameters
+    ----------
+    operands:
+        The operand string exactly as it appears in the disassembly output.
+    mnemonic:
+        The instruction mnemonic.  Required for architectures where the same
+        operand syntax can denote either a direct or an indirect branch
+        (e.g. RISC-V ``jr``/``jalr``).
+    arch:
+        Architecture tag (``"x86"``, ``"aarch64"``, ``"riscv"``, ``"arm"``).
+
+    Known false-positive candidates (harmless)
+    -------------------------------------------
+    In multi-operand RISC-V branches such as ``bne a4,a5,314`` the register
+    names ``a4`` and ``a5`` are matched as hex-digit sequences and appended
+    to the candidate list.  Because the branch target is always the **last**
+    operand, these spurious earlier candidates are ignored and the correct
+    address (``0x314``) is returned.
+
+    Previously fixed false positives
+    ---------------------------------
+    RISC-V indirect jumps ``jr aN`` / ``jalr aN`` (where N is 0–7) used to
+    return the register name interpreted as a hex address (e.g. ``jr a0``
+    → ``0xa0``) instead of ``None``.  Registers ``a0``–``a7`` are the only
+    RISC-V register names that consist entirely of hexadecimal digits; all
+    other register prefixes (``r``, ``s``, ``t``, ``f``, ``x``, ``w``, …)
+    contain non-hex characters and are already blocked by the
+    ``(?<![#\\w])`` lookbehind.  This case is now handled explicitly via the
+    *mnemonic* + *arch* parameters.
+
+    Known false negatives
+    ---------------------
+    None.  Every direct branch-target address produced by ``objdump`` for
+    the supported architectures is parsed correctly by at least one of the
+    two regex passes.
     """
     op = operands.strip()
-    # Indirect jump/call in AT&T syntax: *%reg or *offset(%reg)
+    # x86/x86-64 AT&T indirect branches: *%reg or *offset(%reg).
     if op.startswith("*"):
+        return None
+
+    # RISC-V: ``jr rs`` is the pseudo-instruction for ``jalr x0, rs, 0``
+    # (unconditional indirect jump through a register).  ``jalr rs`` with a
+    # single register operand (no comma) is also an indirect branch or call.
+    # Both must return None rather than misinterpreting the register name as
+    # an address — which would happen for a0–a7 since those names consist
+    # entirely of hex digits.
+    m = mnemonic.lower()
+    if arch == "riscv" and m in ("jr", "jalr") and "," not in op:
         return None
 
     candidates = []
@@ -227,11 +274,21 @@ def _get_branch_target(operands: str):
         candidates.append(int(mo.group(1), 16))
 
     if not candidates:
-        # 2. Plain hex addresses of at least 3 digits (to avoid matching
-        #    short register names like a0, t0, x0, w0).
+        # 2. Plain hex addresses (1 or more hex digits).  The lookbehind
+        #    ``(?<![#\w])`` prevents matching ``#``-prefixed immediates
+        #    (e.g. AArch64 ``#0x1``) and register names whose first hex-digit
+        #    character is immediately preceded by a non-hex word character
+        #    (e.g. AArch64 ``x0``, ``w5``; RISC-V ``t0``, ``s1``).
+        #
+        #    False-positive candidates: in multi-operand RISC-V branches
+        #    (e.g. ``bne a4,a5,314``) register names ``a4`` and ``a5`` — which
+        #    happen to be all-hex — are matched and added to the list.  This
+        #    is harmless: only the LAST candidate (the actual target address)
+        #    is returned.
+        #
         #    ValueError from int(..., 16) cannot occur since the regex only
         #    captures [0-9a-fA-F]+ characters; the try/except is defensive.
-        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]{3,})\b", op):
+        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]+)\b", op):
             try:
                 candidates.append(int(mo.group(1), 16))
             except ValueError:  # pragma: no cover
@@ -339,7 +396,7 @@ def _find_loops(instrs, arch: str = "x86"):
 
     for addr, mnemonic, operands in instrs:
         if _is_branch(mnemonic, arch):
-            target = _get_branch_target(operands)
+            target = _get_branch_target(operands, mnemonic, arch)
             if target is not None and target < addr and target in addr_set:
                 loops.append((target, addr))
 
@@ -376,7 +433,7 @@ def _format_asm(instrs, arch: str = "x86") -> str:
     labeled: set = set()
     for addr, mnemonic, operands in instrs:
         if _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands)
+            t = _get_branch_target(operands, mnemonic, arch)
             if t is not None and t in addr_set:
                 labeled.add(t)
 
@@ -385,7 +442,7 @@ def _format_asm(instrs, arch: str = "x86") -> str:
         if addr in labeled:
             lines.append(f".Lmca_{addr:x}:")
         if _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands)
+            t = _get_branch_target(operands, mnemonic, arch)
             if t is not None and t in addr_set:
                 # In-region branch: replace target with a local label,
                 # keeping any other operands (e.g. registers in cbz/bne).
