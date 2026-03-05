@@ -225,11 +225,22 @@ def _get_branch_target(operands: str):
         candidates.append(int(mo.group(1), 16))
 
     if not candidates:
-        # 2. Plain hex addresses of at least 3 digits (to avoid matching
-        #    short register names like a0, t0, x0, w0).
+        # 2. Plain hex addresses with no minimum digit length.
+        #    AArch64 / ARM object-file branch targets can be as short as one
+        #    hex digit (e.g. ``0``, ``4``, ``c``) because instruction addresses
+        #    in ``.o`` files start at zero.
+        #    The lookbehind ``(?<![#\w])`` prevents matching digits that are
+        #    part of a register name (e.g. ``x30``, ``w1``, ``t0``) because
+        #    those register-name letters are ``\w`` characters and directly
+        #    precede the digit.  It also prevents matching ``#``-prefixed
+        #    AArch64/RISC-V immediates like ``#0`` or ``#4``.
+        #    For RISC-V branches such as ``bne a4,a5,14`` the register names
+        #    ``a4`` / ``a5`` start with the hex character ``a``, so they would
+        #    be matched, but as they are never the LAST candidate the correct
+        #    target (``14``) is still returned.
         #    ValueError from int(..., 16) cannot occur since the regex only
         #    captures [0-9a-fA-F]+ characters; the try/except is defensive.
-        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]{3,})\b", op):
+        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]+)\b", op):
             try:
                 candidates.append(int(mo.group(1), 16))
             except ValueError:  # pragma: no cover
