@@ -8,12 +8,18 @@ python3 analyze.py [--mcpu <cpu>] <elf-binary>
 ```
 
 The program disassembles the ELF binary with `objdump`, splits each function
-into loops and basic blocks, runs `llvm-mca` on each region, and prints the
-estimated IPC for every region:
+into loops and basic blocks, runs `llvm-mca` on each region, and prints a CSV
+with the estimated throughput and proportion of load instructions for every
+region:
 
 ```
-0xSTART-0xEND IPC
+start_address,end_address,throughput,load_proportion
+0xSTART,0xEND,IPC,LOAD_PROPORTION
 ```
+
+`load_proportion` is the fraction of instructions in the region that carry the
+`MayLoad` attribute as reported by `llvm-mca -instruction-info` (e.g. `0.2500`
+means 25 % of instructions may perform a memory load).
 
 For nested loops the outer loop (including the inner body) and the inner loop
 are reported separately.

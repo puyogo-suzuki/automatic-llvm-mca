@@ -4,13 +4,15 @@
 Procedure:
   1. Disassemble the ELF binary with objdump.
   2. Decompose each function into loops and (for non-loop code) basic blocks.
-  3. Run llvm-mca on each region to estimate IPC.
-  4. Print address range and estimated IPC for every region.
+  3. Run llvm-mca on each region to estimate IPC and the proportion of load
+     instructions (those with the MayLoad attribute).
+  4. Print a CSV with start address, end address, estimated throughput and
+     proportion of load instructions for every region.
 
 For nested loops the outer loop (including the inner loop body) and the inner
 loop are reported separately:
-  0x2-0x6 1.00
-  0x0-0x8 1.20
+  0x2,0x6,1.00,0.2500
+  0x0,0x8,1.20,0.1250
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
@@ -427,8 +429,56 @@ def _find_llvm_mca() -> str:
 _LLVM_MCA = None  # resolved lazily
 
 
+def _parse_load_proportion(mca_output: str) -> float:
+    """Parse the Instruction Information section of llvm-mca output.
+
+    Returns the proportion of instructions with the MayLoad attribute set,
+    or 0.0 if the section is absent or no instructions are listed.
+
+    llvm-mca emits a table like::
+
+        [1]    [2]    [3]    [4]    [5]    [6]    Instructions:
+         1      4     1.00    *                    mov rax, qword ptr [rdi]
+         1      1     0.25                         inc rax
+
+    where column [4] contains ``*`` when the instruction may perform a load.
+    The column position is determined from the header line so that it remains
+    correct regardless of the exact whitespace used by different llvm-mca
+    versions.
+    """
+    lines = mca_output.splitlines()
+    col4_pos = None
+    in_table = False
+    total = 0
+    loads = 0
+    for line in lines:
+        if not in_table:
+            # Locate the table header to determine the MayLoad column position.
+            if "[4]" in line and "[1]" in line:
+                m = re.search(r"\[4\]", line)
+                if m:
+                    col4_pos = m.start()
+                    in_table = True
+            continue
+        # A blank line signals the end of the instruction-info table.
+        if not line.strip():
+            break
+        # Instruction data rows start with optional whitespace then a digit.
+        if re.match(r"^\s+\d", line):
+            total += 1
+            if col4_pos is not None:
+                # Each column in the instruction-info table is 7 characters
+                # wide, matching the header pattern "[N]    " (3 chars for the
+                # bracket notation plus 4 spaces).  A '*' anywhere within that
+                # range indicates a load instruction.
+                field = line[col4_pos:col4_pos + 7] if len(line) > col4_pos else ""
+                if "*" in field:
+                    loads += 1
+    return loads / total if total > 0 else 0.0
+
+
 def _run_mca(instrs, mca_args=(), arch: str = "x86"):
-    """Run llvm-mca on *instrs* and return IPC as a float, or None."""
+    """Run llvm-mca on *instrs* and return ``(ipc, load_proportion)``, or None."""
     global _LLVM_MCA
     if not instrs:
         return None
@@ -441,23 +491,29 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86"):
 
     asm = _format_asm(instrs, arch)
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
-    cmd = [_LLVM_MCA, *mca_args, "-"]
+    # -instruction-info adds the per-instruction table used to extract MayLoad.
+    cmd = [_LLVM_MCA, *mca_args, "-instruction-info", "-"]
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None
     m = re.search(r"\bIPC:\s+([\d.]+)", proc.stdout)
-    return float(m.group(1)) if m else None
+    if m is None:
+        return None
+    ipc = float(m.group(1))
+    load_proportion = _parse_load_proportion(proc.stdout)
+    return ipc, load_proportion
 
 
 def _yield_mca_result(instrs, mca_args, arch):
-    """Run llvm-mca on *instrs* and yield a ``(start, end, ipc)`` triple.
+    """Run llvm-mca on *instrs* and yield a ``(start, end, ipc, load_proportion)`` tuple.
 
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
-        ipc = _run_mca(instrs, mca_args, arch)
-        if ipc is not None:
-            yield instrs[0][0], instrs[-1][0], ipc
+        result = _run_mca(instrs, mca_args, arch)
+        if result is not None:
+            ipc, load_proportion = result
+            yield instrs[0][0], instrs[-1][0], ipc, load_proportion
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +523,8 @@ def _yield_mca_result(instrs, mca_args, arch):
 def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, ipc)`` triples for every loop and every
-    basic block that is not part of a loop.
+    Yields ``(start_addr, end_addr, ipc, load_proportion)`` tuples for every
+    loop and every basic block that is not part of a loop.
     """
     loops = _find_loops(instrs, arch)
 
@@ -494,7 +550,7 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
 # ---------------------------------------------------------------------------
 
 def analyze(binary: str, mcpu: str = ""):
-    """Analyse *binary* and yield ``(start, end, ipc)`` triples.
+    """Analyse *binary* and yield ``(start, end, ipc, load_proportion)`` tuples.
 
     If *mcpu* is non-empty it overrides the default ``-mcpu`` value chosen by
     ``_detect_arch`` and is forwarded to llvm-mca.
@@ -540,8 +596,9 @@ def main():
     # start = smaller span comes first).
     results = sorted(analyze(args.binary, args.mcpu),
                      key=lambda x: (x[1], -x[0]))
-    for start, end, ipc in results:
-        print(f"0x{start:x}-0x{end:x} {ipc:.2f}")
+    print("start_address,end_address,throughput,load_proportion")
+    for start, end, ipc, load_proportion in results:
+        print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
 
 
 if __name__ == "__main__":
