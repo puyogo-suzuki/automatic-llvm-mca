@@ -227,11 +227,16 @@ def _get_branch_target(operands: str):
         candidates.append(int(mo.group(1), 16))
 
     if not candidates:
-        # 2. Plain hex addresses of at least 3 digits (to avoid matching
-        #    short register names like a0, t0, x0, w0).
+        # 2. Plain hex addresses (1 or more hex digits).  The lookbehind
+        #    ``(?<![#\w])`` prevents matching ``#``-prefixed immediates
+        #    (e.g. AArch64 ``#0x1``) and hex-like register names that are
+        #    preceded by a word character.  Branch targets are always the
+        #    LAST operand, so spurious matches on earlier register names
+        #    (e.g. RISC-V ``a0``, ``a5``) are harmless because the final
+        #    candidate — the actual address — is returned.
         #    ValueError from int(..., 16) cannot occur since the regex only
         #    captures [0-9a-fA-F]+ characters; the try/except is defensive.
-        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]{3,})\b", op):
+        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]+)\b", op):
             try:
                 candidates.append(int(mo.group(1), 16))
             except ValueError:  # pragma: no cover
