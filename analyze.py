@@ -602,15 +602,15 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     yield from _yield_mca_result(bb, mca_args, arch)
 
 
-def _analyze_function_cpi(instrs, mca_args=(), arch: str = "x86"):
-    """Compute the CPI estimate for one function.
+def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
+    """Compute the IPC estimate for one function.
 
-    CPI_f = max { CPI_b  for b in basic blocks and loops inside f }
+    IPC_f = min { IPC_b  for b in basic blocks and loops inside f }
 
-    where CPI_b = 1 / IPC_b as reported by llvm-mca.  Taking the maximum CPI
-    (equivalently the minimum IPC) identifies the throughput bottleneck region.
+    Taking the minimum IPC identifies the throughput bottleneck region, which
+    limits the overall function's throughput.
 
-    Returns a ``(start_addr, end_addr, cpi, load_proportion)`` tuple where the
+    Returns a ``(start_addr, end_addr, ipc, load_proportion)`` tuple where the
     address range spans the whole function and *load_proportion* belongs to the
     bottleneck region.  Returns ``None`` when llvm-mca produces no results for
     any region in the function.
@@ -639,21 +639,20 @@ def _analyze_function_cpi(instrs, mca_args=(), arch: str = "x86"):
     if bb:
         regions.append(bb)
 
-    best_cpi = None
+    best_ipc = None
     best_lp = 0.0
     for region in regions:
         result = _run_mca(region, mca_args, arch)
         if result is not None:
             ipc, lp = result
             if ipc > 0:
-                cpi = 1.0 / ipc
-                if best_cpi is None or cpi > best_cpi:
-                    best_cpi = cpi
+                if best_ipc is None or ipc < best_ipc:
+                    best_ipc = ipc
                     best_lp = lp
 
-    if best_cpi is None:
+    if best_ipc is None:
         return None
-    return instrs[0][0], instrs[-1][0], best_cpi, best_lp
+    return instrs[0][0], instrs[-1][0], best_ipc, best_lp
 
 
 # ---------------------------------------------------------------------------
@@ -674,9 +673,9 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
         ``"blocks"`` (default) — yield ``(start, end, ipc, load_proportion)``
         for every loop and non-loop basic block, as in the original behaviour.
 
-        ``"functions"`` — yield ``(start, end, cpi, load_proportion)`` for
+        ``"functions"`` — yield ``(start, end, ipc, load_proportion)`` for
         every function, where *start*/*end* span the whole function and
-        ``cpi = max { 1/IPC_b  for all basic blocks and loops b in f }``.
+        ``ipc = min { IPC_b  for all basic blocks and loops b in f }``.
     """
     arch_info = _detect_arch(binary)
 
@@ -689,7 +688,7 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
     for _func_name, instrs in disassemble(binary, arch_info.objdump,
                                           arch_info.name):
         if mode == "functions":
-            result = _analyze_function_cpi(instrs, mca_args, arch_info.name)
+            result = _analyze_function_ipc(instrs, mca_args, arch_info.name)
             if result is not None:
                 yield result
         else:
@@ -721,9 +720,9 @@ def main():
         default="blocks",
         help=(
             "Analysis mode. 'blocks' (default) reports each basic block and "
-            "loop separately with its IPC. 'functions' reports one CPI "
+            "loop separately with its IPC. 'functions' reports one IPC "
             "estimate per function (address range = whole function; "
-            "CPI = max CPI across all basic blocks and loops in the function)."
+            "IPC = min IPC across all basic blocks and loops in the function)."
         ),
     )
     args = parser.parse_args()
@@ -732,11 +731,11 @@ def main():
         parser.error(f"{args.binary}: no such file")
 
     if args.mode == "functions":
-        # Function mode: one row per function, value is CPI (not sorted).
-        print("start_address,end_address,cpi,load_proportion")
-        for start, end, cpi, load_proportion in analyze(
+        # Function mode: one row per function, same output format as block mode.
+        print("start_address,end_address,throughput,load_proportion")
+        for start, end, ipc, load_proportion in analyze(
                 args.binary, args.mcpu, mode="functions"):
-            print(f"0x{start:x},0x{end:x},{cpi:.2f},{load_proportion:.4f}")
+            print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
     else:
         # Block mode (default): existing behaviour — one row per loop/BB, sorted.
         results = sorted(analyze(args.binary, args.mcpu),
