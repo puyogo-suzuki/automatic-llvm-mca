@@ -618,40 +618,14 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
     if not instrs:
         return None
 
-    loops = _find_loops(instrs, arch)
-
-    # Collect all regions to evaluate: every loop + every non-loop basic block.
-    regions = []
-    for ls, le in loops:
-        region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        if region:
-            regions.append(region)
-
-    non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
-    bb = []
-    for instr in non_loop:
-        addr, mnemonic, operands = instr
-        bb.append(instr)
-        if _ends_basic_block(mnemonic, operands, arch):
-            if bb:
-                regions.append(bb)
-            bb = []
-    if bb:
-        regions.append(bb)
-
-    best_ipc = None
-    best_lp = 0.0
-    for region in regions:
-        result = _run_mca(region, mca_args, arch)
-        if result is not None:
-            ipc, lp = result
-            if ipc > 0:
-                if best_ipc is None or ipc < best_ipc:
-                    best_ipc = ipc
-                    best_lp = lp
-
-    if best_ipc is None:
+    candidates = [
+        (ipc, lp)
+        for _, _, ipc, lp in _analyze_function(instrs, mca_args, arch)
+        if ipc > 0
+    ]
+    if not candidates:
         return None
+    best_ipc, best_lp = min(candidates, key=lambda r: r[0])
     return instrs[0][0], instrs[-1][0], best_ipc, best_lp
 
 
