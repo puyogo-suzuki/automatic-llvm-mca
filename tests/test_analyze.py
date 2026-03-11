@@ -458,3 +458,172 @@ class TestAArch64:
         for start, end, _ipc, _lp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _analyze_function_ipc
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeFunctionIpc:
+    """Unit tests for analyze._analyze_function_ipc."""
+
+    def test_empty_instrs_returns_none(self):
+        """An empty instruction list must return None."""
+        assert analyze._analyze_function_ipc([]) is None
+
+    def test_loop_ipc_returned(self, monkeypatch):
+        """IPC returned equals the llvm-mca IPC of the single loop."""
+        # Backward branch at 0x2 → 0x0 forms a loop.
+        instrs = [
+            (0x0, "add", "%eax,%edx"),
+            (0x2, "jne", "0"),
+        ]
+        monkeypatch.setattr(analyze, "_run_mca",
+                            lambda *a, **kw: (2.0, 0.25))
+        result = analyze._analyze_function_ipc(instrs)
+        assert result is not None
+        start, end, ipc, lp = result
+        assert start == 0x0
+        assert end == 0x2
+        assert abs(ipc - 2.0) < 1e-9
+        assert abs(lp - 0.25) < 1e-9
+
+    def test_max_loop_ipc_selected(self, monkeypatch):
+        """The loop with the highest IPC (hottest loop) is chosen."""
+        # Two non-overlapping loops + one basic block outside loops.
+        # Loop 1: [0x0, 0x2], loop 2: [0x10, 0x12], basic block: [0x20].
+        instrs = [
+            (0x0,  "add", "%eax,%edx"),
+            (0x2,  "jne", "0"),            # loop 1: backward branch to 0x0
+            (0x10, "xor", "%eax,%eax"),
+            (0x12, "jne", "10"),           # loop 2: backward branch to 0x10
+            (0x20, "ret", ""),             # basic block outside loops
+        ]
+
+        def fake_run_mca(region, *a, **kw):
+            if region[0][0] == 0x0:
+                return (4.0, 0.10)   # loop 1 (high IPC — hottest)
+            if region[0][0] == 0x10:
+                return (1.0, 0.50)   # loop 2 (low IPC)
+            return (2.0, 0.00)       # basic block — must be ignored
+
+        monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
+        result = analyze._analyze_function_ipc(instrs)
+        assert result is not None
+        start, end, ipc, lp = result
+        # Address range spans all instructions
+        assert start == 0x0
+        assert end == 0x20
+        # IPC_f = max(4.0, 1.0) = 4.0; load_proportion from hottest loop
+        assert abs(ipc - 4.0) < 1e-9
+        assert abs(lp - 0.10) < 1e-9
+
+    def test_no_loops_falls_back_to_blocks(self, monkeypatch):
+        """A function with no loops falls back to the max-IPC basic block."""
+        instrs = [
+            (0x0,  "add", "%eax,%edx"),
+            (0x2,  "jmp", "10"),           # forward branch — no loop
+            (0x10, "xor", "%eax,%eax"),
+            (0x12, "ret", ""),
+        ]
+
+        def fake_run_mca(region, *a, **kw):
+            if region[0][0] == 0x0:
+                return (3.0, 0.20)   # first BB
+            return (1.5, 0.40)       # second BB
+
+        monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
+        result = analyze._analyze_function_ipc(instrs)
+        assert result is not None
+        start, end, ipc, lp = result
+        assert start == 0x0
+        assert end == 0x12
+        # Falls back to max over blocks: max(3.0, 1.5) = 3.0
+        assert abs(ipc - 3.0) < 1e-9
+        assert abs(lp - 0.20) < 1e-9
+
+    def test_no_mca_results_returns_none(self, monkeypatch):
+        """If llvm-mca returns None for every region, return None."""
+        instrs = [
+            (0x0, "add", "%eax,%edx"),
+            (0x2, "ret", ""),
+        ]
+        monkeypatch.setattr(analyze, "_run_mca", lambda *a, **kw: None)
+        assert analyze._analyze_function_ipc(instrs) is None
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — function mode (x86-64)
+# ---------------------------------------------------------------------------
+
+class TestAMD64FunctionMode:
+    """Integration tests for analyze() in 'functions' mode (x86-64)."""
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
+    def test_results_nonempty(self, x86_obj):
+        """analyze() in 'functions' mode produces at least one result."""
+        results = list(analyze.analyze(x86_obj, mode="functions"))
+        assert results, "Expected at least one result from analyze(mode='functions')"
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
+    def test_one_row_per_function(self, x86_obj):
+        """Function mode yields at most one row for the compiled source file."""
+        results = list(analyze.analyze(x86_obj, mode="functions"))
+        # The test binary has a single function (sum); allow for compiler-injected
+        # helpers but there should be far fewer rows than in block mode.
+        block_results = list(analyze.analyze(x86_obj))
+        assert len(results) <= len(block_results), (
+            "Function mode should yield no more rows than block mode"
+        )
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
+    def test_ipc_positive(self, x86_obj):
+        """IPC values are strictly positive."""
+        results = list(analyze.analyze(x86_obj, mode="functions"))
+        assert results
+        for start, end, ipc, _lp in results:
+            assert ipc > 0, (
+                f"IPC should be positive, got {ipc} for function "
+                f"0x{start:x}–0x{end:x}"
+            )
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
+    def test_load_proportion_in_range(self, x86_obj):
+        """load_proportion values are in [0, 1]."""
+        results = list(analyze.analyze(x86_obj, mode="functions"))
+        for start, end, _ipc, lp in results:
+            assert 0.0 <= lp <= 1.0, (
+                f"load_proportion {lp} out of range for function "
+                f"0x{start:x}–0x{end:x}"
+            )
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
+    def test_addresses_are_nonneg_ints(self, x86_obj):
+        """Start and end addresses are non-negative integers."""
+        results = list(analyze.analyze(x86_obj, mode="functions"))
+        for start, end, _ipc, _lp in results:
+            assert isinstance(start, int) and start >= 0
+            assert isinstance(end, int) and end >= 0
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
+    def test_ipc_le_max_block_ipc(self, x86_obj):
+        """Function IPC must be <= global max block IPC."""
+        block_results = list(analyze.analyze(x86_obj))
+        func_results = list(analyze.analyze(x86_obj, mode="functions"))
+        assert func_results
+        # IPC_f is the max over loops (or blocks if no loops); either way it is
+        # drawn from the same pool of regions as block mode, so it cannot exceed
+        # the global maximum block IPC.
+        max_block_ipc = max(ipc for _, _, ipc, _ in block_results if ipc > 0)
+        for _start, _end, func_ipc, _lp in func_results:
+            assert func_ipc <= max_block_ipc + 1e-9, (
+                f"Function IPC {func_ipc:.4f} exceeds maximum block IPC "
+                f"{max_block_ipc:.4f}; expected IPC_f = max of all loop IPCs "
+                f"(or block IPCs when no loops exist)"
+            )

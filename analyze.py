@@ -580,15 +580,17 @@ def _yield_mca_result(instrs, mca_args, arch):
 def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, ipc, load_proportion)`` tuples for every
-    loop and every basic block that is not part of a loop.
+    Yields ``(start_addr, end_addr, ipc, load_proportion, kind)`` tuples for
+    every loop and every basic block that is not part of a loop.  *kind* is
+    ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
     """
     loops = _find_loops(instrs, arch)
 
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        yield from _yield_mca_result(region, mca_args, arch)
+        for start, end, ipc, lp in _yield_mca_result(region, mca_args, arch):
+            yield start, end, ipc, lp, "loop"
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -597,20 +599,68 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
         addr, mnemonic, operands = instr
         bb.append(instr)
         if _ends_basic_block(mnemonic, operands, arch):
-            yield from _yield_mca_result(bb, mca_args, arch)
+            for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch):
+                yield start, end, ipc, lp, "block"
             bb = []
-    yield from _yield_mca_result(bb, mca_args, arch)
+    for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch):
+        yield start, end, ipc, lp, "block"
+
+
+def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
+    """Compute the IPC estimate for one function.
+
+    IPC_f = max { IPC_l  for l in loops inside f }
+
+    If the function contains no loops, falls back to:
+
+    IPC_f = max { IPC_b  for b in basic blocks inside f }
+
+    Returns a ``(start_addr, end_addr, ipc, load_proportion)`` tuple where the
+    address range spans the whole function, *ipc* is the highest IPC found, and
+    *load_proportion* belongs to that highest-IPC region.  Returns ``None``
+    when llvm-mca produces no results for any region in the function.
+    """
+    if not instrs:
+        return None
+
+    loop_candidates = []
+    block_candidates = []
+    for _, _, ipc, lp, kind in _analyze_function(instrs, mca_args, arch):
+        if ipc > 0:
+            if kind == "loop":
+                loop_candidates.append((ipc, lp))
+            else:
+                block_candidates.append((ipc, lp))
+
+    candidates = loop_candidates or block_candidates
+    if not candidates:
+        return None
+    best_ipc, best_lp = max(candidates, key=lambda r: r[0])
+    return instrs[0][0], instrs[-1][0], best_ipc, best_lp
 
 
 # ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
-def analyze(binary: str, mcpu: str = ""):
-    """Analyse *binary* and yield ``(start, end, ipc, load_proportion)`` tuples.
+def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
+    """Analyse *binary* and yield result tuples.
 
-    If *mcpu* is non-empty it overrides the default ``-mcpu`` value chosen by
-    ``_detect_arch`` and is forwarded to llvm-mca.
+    Parameters
+    ----------
+    binary:
+        Path to the ELF binary to analyse.
+    mcpu:
+        If non-empty, overrides the default ``-mcpu`` value chosen by
+        ``_detect_arch`` and is forwarded to llvm-mca.
+    mode:
+        ``"blocks"`` (default) — yield ``(start, end, ipc, load_proportion)``
+        for every loop and non-loop basic block, as in the original behaviour.
+
+        ``"functions"`` — yield ``(start, end, ipc, load_proportion)`` for
+        every function, where *start*/*end* span the whole function and
+        ``ipc = max { IPC_l  for all loops l in f }`` (or the max over basic
+        blocks when the function has no loops).
     """
     arch_info = _detect_arch(binary)
 
@@ -622,7 +672,14 @@ def analyze(binary: str, mcpu: str = ""):
 
     for _func_name, instrs in disassemble(binary, arch_info.objdump,
                                           arch_info.name):
-        yield from _analyze_function(instrs, mca_args, arch_info.name)
+        if mode == "functions":
+            result = _analyze_function_ipc(instrs, mca_args, arch_info.name)
+            if result is not None:
+                yield result
+        else:
+            for start, end, ipc, lp, _kind in _analyze_function(
+                    instrs, mca_args, arch_info.name):
+                yield start, end, ipc, lp
 
 
 # ---------------------------------------------------------------------------
@@ -644,18 +701,36 @@ def main():
             "architecture auto-detection."
         ),
     )
+    parser.add_argument(
+        "--mode",
+        choices=["blocks", "functions"],
+        default="blocks",
+        help=(
+            "Analysis mode. 'blocks' (default) reports each basic block and "
+            "loop separately with its IPC. 'functions' reports one IPC "
+            "estimate per function (address range = whole function; "
+            "IPC = max IPC across all loops in the function, or max IPC "
+            "across basic blocks if the function has no loops)."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
 
-    # Sort: inner loops first (ascending end address; for equal end, larger
-    # start = smaller span comes first).
-    results = sorted(analyze(args.binary, args.mcpu),
-                     key=lambda x: (x[1], -x[0]))
-    print("start_address,end_address,throughput,load_proportion")
-    for start, end, ipc, load_proportion in results:
-        print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
+    if args.mode == "functions":
+        # Function mode: one row per function, same output format as block mode.
+        print("start_address,end_address,throughput,load_proportion")
+        for start, end, ipc, load_proportion in analyze(
+                args.binary, args.mcpu, mode="functions"):
+            print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
+    else:
+        # Block mode (default): existing behaviour — one row per loop/BB, sorted.
+        results = sorted(analyze(args.binary, args.mcpu),
+                         key=lambda x: (x[1], -x[0]))
+        print("start_address,end_address,throughput,load_proportion")
+        for start, end, ipc, load_proportion in results:
+            print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
 
 
 if __name__ == "__main__":
