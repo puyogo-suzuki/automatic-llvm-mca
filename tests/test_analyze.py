@@ -511,31 +511,42 @@ class TestAnalyzeFunctionIpc:
         result = analyze._analyze_function_ipc(instrs)
         assert result is not None
         start, end, ipc, lp = result
-        # Function spans all instructions
+        # Address range spans all instructions
         assert start == 0x0
         assert end == 0x20
         # IPC_f = max(4.0, 1.0) = 4.0; load_proportion from hottest loop
         assert abs(ipc - 4.0) < 1e-9
         assert abs(lp - 0.10) < 1e-9
 
-    def test_no_loops_returns_none(self, monkeypatch):
-        """A function with no loops (only basic blocks) returns None."""
+    def test_no_loops_falls_back_to_blocks(self, monkeypatch):
+        """A function with no loops falls back to the max-IPC basic block."""
         instrs = [
             (0x0,  "add", "%eax,%edx"),
             (0x2,  "jmp", "10"),           # forward branch — no loop
             (0x10, "xor", "%eax,%eax"),
             (0x12, "ret", ""),
         ]
-        monkeypatch.setattr(analyze, "_run_mca",
-                            lambda *a, **kw: (2.0, 0.25))
-        assert analyze._analyze_function_ipc(instrs) is None
+
+        def fake_run_mca(region, *a, **kw):
+            if region[0][0] == 0x0:
+                return (3.0, 0.20)   # first BB
+            return (1.5, 0.40)       # second BB
+
+        monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
+        result = analyze._analyze_function_ipc(instrs)
+        assert result is not None
+        start, end, ipc, lp = result
+        assert start == 0x0
+        assert end == 0x12
+        # Falls back to max over blocks: max(3.0, 1.5) = 3.0
+        assert abs(ipc - 3.0) < 1e-9
+        assert abs(lp - 0.20) < 1e-9
 
     def test_no_mca_results_returns_none(self, monkeypatch):
-        """If llvm-mca returns None for every loop region, return None."""
-        # Backward branch at 0x2 → 0x0 forms a loop.
+        """If llvm-mca returns None for every region, return None."""
         instrs = [
             (0x0, "add", "%eax,%edx"),
-            (0x2, "jne", "0"),
+            (0x2, "ret", ""),
         ]
         monkeypatch.setattr(analyze, "_run_mca", lambda *a, **kw: None)
         assert analyze._analyze_function_ipc(instrs) is None
@@ -602,15 +613,17 @@ class TestAMD64FunctionMode:
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_ipc_le_max_block_ipc(self, x86_obj):
-        """Function IPC (max loop IPC) must be <= global max block IPC."""
+        """Function IPC must be <= global max block IPC."""
         block_results = list(analyze.analyze(x86_obj))
         func_results = list(analyze.analyze(x86_obj, mode="functions"))
         assert func_results
-        # The function IPC is the max over its loops, which is a subset of all
-        # block regions; hence it cannot exceed the global maximum block IPC.
+        # IPC_f is the max over loops (or blocks if no loops); either way it is
+        # drawn from the same pool of regions as block mode, so it cannot exceed
+        # the global maximum block IPC.
         max_block_ipc = max(ipc for _, _, ipc, _ in block_results if ipc > 0)
         for _start, _end, func_ipc, _lp in func_results:
             assert func_ipc <= max_block_ipc + 1e-9, (
                 f"Function IPC {func_ipc:.4f} exceeds maximum block IPC "
-                f"{max_block_ipc:.4f}; expected IPC_f = max of all loop IPCs"
+                f"{max_block_ipc:.4f}; expected IPC_f = max of all loop IPCs "
+                f"(or block IPCs when no loops exist)"
             )
