@@ -561,16 +561,18 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86"):
     return ipc, load_proportion
 
 
-def _yield_mca_result(instrs, mca_args, arch):
-    """Run llvm-mca on *instrs* and yield a ``(start, end, ipc, load_proportion)`` tuple.
+def _yield_mca_result(instrs, mca_args, arch, kind: str = "block"):
+    """Run llvm-mca on *instrs* and yield a result tuple.
 
+    Yields a ``(start, end, ipc, load_proportion, kind)`` tuple where *kind*
+    is ``"loop"`` for a loop region or ``"block"`` for a basic-block region.
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
         result = _run_mca(instrs, mca_args, arch)
         if result is not None:
             ipc, load_proportion = result
-            yield instrs[0][0], instrs[-1][0], ipc, load_proportion
+            yield instrs[0][0], instrs[-1][0], ipc, load_proportion, kind
 
 
 # ---------------------------------------------------------------------------
@@ -580,15 +582,16 @@ def _yield_mca_result(instrs, mca_args, arch):
 def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, ipc, load_proportion)`` tuples for every
-    loop and every basic block that is not part of a loop.
+    Yields ``(start_addr, end_addr, ipc, load_proportion, kind)`` tuples for
+    every loop and every basic block that is not part of a loop.  *kind* is
+    ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
     """
     loops = _find_loops(instrs, arch)
 
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        yield from _yield_mca_result(region, mca_args, arch)
+        yield from _yield_mca_result(region, mca_args, arch, kind="loop")
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -597,35 +600,36 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
         addr, mnemonic, operands = instr
         bb.append(instr)
         if _ends_basic_block(mnemonic, operands, arch):
-            yield from _yield_mca_result(bb, mca_args, arch)
+            yield from _yield_mca_result(bb, mca_args, arch, kind="block")
             bb = []
-    yield from _yield_mca_result(bb, mca_args, arch)
+    yield from _yield_mca_result(bb, mca_args, arch, kind="block")
 
 
 def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
     """Compute the IPC estimate for one function.
 
-    IPC_f = min { IPC_b  for b in basic blocks and loops inside f }
+    IPC_f = max { IPC_l  for l in loops inside f }
 
-    Taking the minimum IPC identifies the throughput bottleneck region, which
-    limits the overall function's throughput.
+    Taking the maximum IPC among all loops identifies the hottest loop in the
+    function, which dominates its throughput.
 
     Returns a ``(start_addr, end_addr, ipc, load_proportion)`` tuple where the
     address range spans the whole function and *load_proportion* belongs to the
-    bottleneck region.  Returns ``None`` when llvm-mca produces no results for
-    any region in the function.
+    hottest loop.  Returns ``None`` when the function contains no loops or
+    llvm-mca produces no results for any loop.
     """
     if not instrs:
         return None
 
-    candidates = [
+    loop_candidates = (
         (ipc, lp)
-        for _, _, ipc, lp in _analyze_function(instrs, mca_args, arch)
-        if ipc > 0
-    ]
-    if not candidates:
+        for _, _, ipc, lp, kind in _analyze_function(instrs, mca_args, arch)
+        if kind == "loop" and ipc > 0
+    )
+    best = max(loop_candidates, key=lambda r: r[0], default=None)
+    if best is None:
         return None
-    best_ipc, best_lp = min(candidates, key=lambda r: r[0])
+    best_ipc, best_lp = best
     return instrs[0][0], instrs[-1][0], best_ipc, best_lp
 
 
@@ -648,8 +652,9 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
         for every loop and non-loop basic block, as in the original behaviour.
 
         ``"functions"`` — yield ``(start, end, ipc, load_proportion)`` for
-        every function, where *start*/*end* span the whole function and
-        ``ipc = min { IPC_b  for all basic blocks and loops b in f }``.
+        every function that contains at least one loop, where *start*/*end*
+        span the whole function and
+        ``ipc = max { IPC_l  for all loops l in f }``.
     """
     arch_info = _detect_arch(binary)
 
@@ -666,7 +671,9 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
             if result is not None:
                 yield result
         else:
-            yield from _analyze_function(instrs, mca_args, arch_info.name)
+            for start, end, ipc, lp, _kind in _analyze_function(
+                    instrs, mca_args, arch_info.name):
+                yield start, end, ipc, lp
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +703,7 @@ def main():
             "Analysis mode. 'blocks' (default) reports each basic block and "
             "loop separately with its IPC. 'functions' reports one IPC "
             "estimate per function (address range = whole function; "
-            "IPC = min IPC across all basic blocks and loops in the function)."
+            "IPC = max IPC across all loops in the function)."
         ),
     )
     args = parser.parse_args()

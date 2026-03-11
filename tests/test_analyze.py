@@ -471,13 +471,13 @@ class TestAnalyzeFunctionIpc:
         """An empty instruction list must return None."""
         assert analyze._analyze_function_ipc([]) is None
 
-    def test_ipc_returned_directly(self, monkeypatch):
-        """IPC returned equals the llvm-mca IPC when there is only one region."""
+    def test_loop_ipc_returned(self, monkeypatch):
+        """IPC returned equals the llvm-mca IPC of the single loop."""
+        # Backward branch at 0x2 → 0x0 forms a loop.
         instrs = [
             (0x0, "add", "%eax,%edx"),
-            (0x2, "ret", ""),
+            (0x2, "jne", "0"),
         ]
-        # Patch _run_mca to return a fixed IPC of 2.0.
         monkeypatch.setattr(analyze, "_run_mca",
                             lambda *a, **kw: (2.0, 0.25))
         result = analyze._analyze_function_ipc(instrs)
@@ -488,20 +488,24 @@ class TestAnalyzeFunctionIpc:
         assert abs(ipc - 2.0) < 1e-9
         assert abs(lp - 0.25) < 1e-9
 
-    def test_min_ipc_selected(self, monkeypatch):
-        """The region with the lowest IPC (bottleneck) is chosen."""
-        # Two basic blocks: first has IPC=4, second has IPC=1 (bottleneck).
+    def test_max_loop_ipc_selected(self, monkeypatch):
+        """The loop with the highest IPC (hottest loop) is chosen."""
+        # Two non-overlapping loops + one basic block outside loops.
+        # Loop 1: [0x0, 0x2], loop 2: [0x10, 0x12], basic block: [0x20].
         instrs = [
             (0x0,  "add", "%eax,%edx"),
-            (0x2,  "jmp", "10"),           # ends BB 1 — forward branch (no loop)
+            (0x2,  "jne", "0"),            # loop 1: backward branch to 0x0
             (0x10, "xor", "%eax,%eax"),
-            (0x12, "ret", ""),             # ends BB 2
+            (0x12, "jne", "10"),           # loop 2: backward branch to 0x10
+            (0x20, "ret", ""),             # basic block outside loops
         ]
 
         def fake_run_mca(region, *a, **kw):
             if region[0][0] == 0x0:
-                return (4.0, 0.10)   # fast block
-            return (1.0, 0.50)       # slow block (bottleneck)
+                return (4.0, 0.10)   # loop 1 (high IPC — hottest)
+            if region[0][0] == 0x10:
+                return (1.0, 0.50)   # loop 2 (low IPC)
+            return (2.0, 0.00)       # basic block — must be ignored
 
         monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
         result = analyze._analyze_function_ipc(instrs)
@@ -509,16 +513,29 @@ class TestAnalyzeFunctionIpc:
         start, end, ipc, lp = result
         # Function spans all instructions
         assert start == 0x0
-        assert end == 0x12
-        # IPC_f = min(4.0, 1.0) = 1.0; load_proportion from bottleneck
-        assert abs(ipc - 1.0) < 1e-9
-        assert abs(lp - 0.50) < 1e-9
+        assert end == 0x20
+        # IPC_f = max(4.0, 1.0) = 4.0; load_proportion from hottest loop
+        assert abs(ipc - 4.0) < 1e-9
+        assert abs(lp - 0.10) < 1e-9
+
+    def test_no_loops_returns_none(self, monkeypatch):
+        """A function with no loops (only basic blocks) returns None."""
+        instrs = [
+            (0x0,  "add", "%eax,%edx"),
+            (0x2,  "jmp", "10"),           # forward branch — no loop
+            (0x10, "xor", "%eax,%eax"),
+            (0x12, "ret", ""),
+        ]
+        monkeypatch.setattr(analyze, "_run_mca",
+                            lambda *a, **kw: (2.0, 0.25))
+        assert analyze._analyze_function_ipc(instrs) is None
 
     def test_no_mca_results_returns_none(self, monkeypatch):
-        """If llvm-mca returns None for every region, the function returns None."""
+        """If llvm-mca returns None for every loop region, return None."""
+        # Backward branch at 0x2 → 0x0 forms a loop.
         instrs = [
             (0x0, "add", "%eax,%edx"),
-            (0x2, "ret", ""),
+            (0x2, "jne", "0"),
         ]
         monkeypatch.setattr(analyze, "_run_mca", lambda *a, **kw: None)
         assert analyze._analyze_function_ipc(instrs) is None
@@ -585,14 +602,15 @@ class TestAMD64FunctionMode:
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_ipc_le_max_block_ipc(self, x86_obj):
-        """Function IPC must be <= max block IPC (IPC_f = min IPC = bottleneck)."""
+        """Function IPC (max loop IPC) must be <= global max block IPC."""
         block_results = list(analyze.analyze(x86_obj))
         func_results = list(analyze.analyze(x86_obj, mode="functions"))
         assert func_results
-        # The function IPC should be no greater than the maximum block IPC.
+        # The function IPC is the max over its loops, which is a subset of all
+        # block regions; hence it cannot exceed the global maximum block IPC.
         max_block_ipc = max(ipc for _, _, ipc, _ in block_results if ipc > 0)
         for _start, _end, func_ipc, _lp in func_results:
             assert func_ipc <= max_block_ipc + 1e-9, (
                 f"Function IPC {func_ipc:.4f} exceeds maximum block IPC "
-                f"{max_block_ipc:.4f}; expected IPC_f = min of all block IPCs"
+                f"{max_block_ipc:.4f}; expected IPC_f = max of all loop IPCs"
             )
