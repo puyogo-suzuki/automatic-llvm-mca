@@ -23,6 +23,7 @@ Usage:
 import argparse
 import os
 import platform
+import random
 import re
 import shutil
 import subprocess
@@ -199,6 +200,35 @@ def _ends_basic_block(mnemonic: str, operands: str = "",
         or (m == "repz" and op.startswith("ret"))
         or m in ("hlt", "ud2", "int3")
     )
+
+
+def _is_load_instruction(mnemonic: str, operands: str,
+                          arch: str = "x86") -> bool:
+    """Return True if *mnemonic*/*operands* describe a memory-load instruction.
+
+    Recognises:
+    * x86/x86-64 (AT&T syntax): source operand (first) contains ``(``
+      indicating a memory-read address.  ``lea`` is excluded because it
+      computes an address without reading memory.
+    * AArch64 / ARM: mnemonic starts with ``ld``, or is ``pop`` (ARM only).
+    * RISC-V: mnemonic is one of the standard load opcodes.
+    """
+    m = mnemonic.lower()
+    if arch == "x86":
+        if m in ("lea", "leal", "leaq"):
+            return False
+        # In AT&T syntax the source (first) operand comes first.
+        # A memory operand contains '(' (e.g. ``(%rdi)``, ``8(%rsp)``).
+        parts = operands.split(",") if operands else []
+        src = parts[0].strip() if parts else operands.strip()
+        return "(" in src
+    if arch == "aarch64":
+        return m.startswith("ld")
+    if arch == "arm":
+        return m.startswith("ld") or m == "pop"
+    if arch == "riscv":
+        return m in ("lb", "lh", "lw", "ld", "lbu", "lhu", "lwu")
+    return False
 
 
 def _get_branch_target(operands: str, mnemonic: str = "", arch: str = "x86"):
@@ -466,9 +496,73 @@ def _format_asm(instrs, arch: str = "x86") -> str:
     return "\n".join(lines) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# llvm-mca invocation
-# ---------------------------------------------------------------------------
+def _format_asm_with_cache_miss(instrs, arch: str = "x86",
+                                 cache_miss: float = 0.0,
+                                 cache_latency: int = 0) -> str:
+    """Format *instrs* as assembly for llvm-mca with cache-miss simulation.
+
+    The code block is repeated ``_CACHE_MISS_REPEAT`` times.  For each
+    repetition, every load instruction is independently given a probability
+    *cache_miss* of receiving an ``# LLVM-MCA-LATENCY`` override with the
+    value *cache_latency* (simulating a cache miss):
+
+    .. code-block:: asm
+
+        # LLVM-MCA-LATENCY 100
+        mov (%edi), %eax
+        # LLVM-MCA-LATENCY
+
+    Labels are made unique per repetition so that backward branches within a
+    loop still resolve to the correct iteration-local target.
+    """
+    _CACHE_MISS_REPEAT = 100
+
+    addr_set = {a for a, _, _ in instrs}
+
+    # Determine which addresses need an iteration-local label.
+    labeled: set = set()
+    for _, mnemonic, operands in instrs:
+        if _is_branch(mnemonic, arch):
+            t = _get_branch_target(operands, mnemonic, arch)
+            if t is not None and t in addr_set:
+                labeled.add(t)
+
+    def _emit(mnemonic, operands, lines):
+        """Append the instruction, wrapping loads with latency directives."""
+        tail = f" {operands}" if operands else ""
+        is_load = _is_load_instruction(mnemonic, operands, arch)
+        if is_load and random.random() < cache_miss:
+            lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
+            lines.append(f"\t{mnemonic}{tail}")
+            lines.append("# LLVM-MCA-LATENCY")
+        else:
+            lines.append(f"\t{mnemonic}{tail}")
+
+    lines = []
+    for it in range(_CACHE_MISS_REPEAT):
+        sfx = f"_r{it}"
+        for addr, mnemonic, operands in instrs:
+            if addr in labeled:
+                lines.append(f".Lmca_{addr:x}{sfx}:")
+            if _is_branch(mnemonic, arch):
+                t = _get_branch_target(operands, mnemonic, arch)
+                if t is not None and t in addr_set:
+                    new_ops = _replace_branch_target(
+                        operands, t, f".Lmca_{t:x}{sfx}")
+                    _emit(mnemonic, new_ops, lines)
+                elif t is not None:
+                    new_ops = _replace_branch_target(
+                        operands, t, ".Lmca_end")
+                    _emit(mnemonic, new_ops, lines)
+                else:
+                    _emit(mnemonic, operands, lines)
+            else:
+                _emit(mnemonic, operands, lines)
+
+    lines.append(".Lmca_end:")
+    return "\n".join(lines) + "\n"
+
+
 
 def _find_llvm_mca() -> str:
     """Return the path to llvm-mca, trying versioned names as fallback."""
@@ -534,8 +628,16 @@ def _parse_load_proportion(mca_output: str) -> float:
     return loads / total if total > 0 else 0.0
 
 
-def _run_mca(instrs, mca_args=(), arch: str = "x86"):
-    """Run llvm-mca on *instrs* and return ``(ipc, load_proportion)``, or None."""
+def _run_mca(instrs, mca_args=(), arch: str = "x86",
+             cache_miss: float = 0.0, cache_latency: int = 0):
+    """Run llvm-mca on *instrs* and return ``(ipc, load_proportion)``, or None.
+
+    When *cache_miss* is greater than 0 the assembly is repeated
+    ``_CACHE_MISS_REPEAT`` (100) times with cache-miss latency directives
+    randomly inserted for load instructions (probability = *cache_miss*,
+    latency = *cache_latency* cycles).  ``-iterations=0`` is added to the
+    llvm-mca command so that llvm-mca does not add its own repetitions.
+    """
     global _LLVM_MCA
     if not instrs:
         return None
@@ -546,10 +648,17 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86"):
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    asm = _format_asm(instrs, arch)
+    if cache_miss > 0:
+        asm = _format_asm_with_cache_miss(instrs, arch, cache_miss,
+                                          cache_latency)
+        extra = ["-iterations=0"]
+    else:
+        asm = _format_asm(instrs, arch)
+        extra = []
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
     # -instruction-info adds the per-instruction table used to extract MayLoad.
-    cmd = [_LLVM_MCA, *mca_args, "--call-latency=0", "-instruction-info", "-"]
+    cmd = [_LLVM_MCA, *mca_args, *extra,
+           "--call-latency=0", "-instruction-info", "-"]
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None
@@ -561,13 +670,14 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86"):
     return ipc, load_proportion
 
 
-def _yield_mca_result(instrs, mca_args, arch):
+def _yield_mca_result(instrs, mca_args, arch,
+                      cache_miss: float = 0.0, cache_latency: int = 0):
     """Run llvm-mca on *instrs* and yield a ``(start, end, ipc, load_proportion)`` tuple.
 
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
-        result = _run_mca(instrs, mca_args, arch)
+        result = _run_mca(instrs, mca_args, arch, cache_miss, cache_latency)
         if result is not None:
             ipc, load_proportion = result
             yield instrs[0][0], instrs[-1][0], ipc, load_proportion
@@ -577,7 +687,8 @@ def _yield_mca_result(instrs, mca_args, arch):
 # Per-function analysis
 # ---------------------------------------------------------------------------
 
-def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
+def _analyze_function(instrs, mca_args=(), arch: str = "x86",
+                      cache_miss: float = 0.0, cache_latency: int = 0):
     """Analyse one function's instructions.
 
     Yields ``(start_addr, end_addr, ipc, load_proportion, kind)`` tuples for
@@ -589,7 +700,8 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        for start, end, ipc, lp in _yield_mca_result(region, mca_args, arch):
+        for start, end, ipc, lp in _yield_mca_result(region, mca_args, arch,
+                                                      cache_miss, cache_latency):
             yield start, end, ipc, lp, "loop"
 
     # --- Basic blocks outside loops ---
@@ -599,14 +711,18 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86"):
         addr, mnemonic, operands = instr
         bb.append(instr)
         if _ends_basic_block(mnemonic, operands, arch):
-            for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch):
+            for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch,
+                                                          cache_miss,
+                                                          cache_latency):
                 yield start, end, ipc, lp, "block"
             bb = []
-    for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch):
+    for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch,
+                                                  cache_miss, cache_latency):
         yield start, end, ipc, lp, "block"
 
 
-def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
+def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86",
+                           cache_miss: float = 0.0, cache_latency: int = 0):
     """Compute the IPC estimate for one function.
 
     IPC_f = max { IPC_l  for l in loops inside f }
@@ -625,7 +741,8 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
 
     loop_candidates = []
     block_candidates = []
-    for _, _, ipc, lp, kind in _analyze_function(instrs, mca_args, arch):
+    for _, _, ipc, lp, kind in _analyze_function(instrs, mca_args, arch,
+                                                  cache_miss, cache_latency):
         if ipc > 0:
             if kind == "loop":
                 loop_candidates.append((ipc, lp))
@@ -643,7 +760,8 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86"):
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
-def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
+def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
+            cache_miss: float = 0.0, cache_latency: int = 0):
     """Analyse *binary* and yield result tuples.
 
     Parameters
@@ -661,6 +779,15 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
         every function, where *start*/*end* span the whole function and
         ``ipc = max { IPC_l  for all loops l in f }`` (or the max over basic
         blocks when the function has no loops).
+    cache_miss:
+        Probability (0–1) that a load instruction suffers a cache miss.
+        When greater than 0 the code block is repeated 100 times with
+        ``# LLVM-MCA-LATENCY`` directives randomly inserted for load
+        instructions, and llvm-mca is invoked with ``-iterations=0``.
+        Default is 0 (no cache-miss simulation).
+    cache_latency:
+        Cache-miss penalty in cycles inserted via the ``# LLVM-MCA-LATENCY``
+        directive.  Only used when *cache_miss* > 0.  Default is 0.
     """
     arch_info = _detect_arch(binary)
 
@@ -673,12 +800,14 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks"):
     for _func_name, instrs in disassemble(binary, arch_info.objdump,
                                           arch_info.name):
         if mode == "functions":
-            result = _analyze_function_ipc(instrs, mca_args, arch_info.name)
+            result = _analyze_function_ipc(instrs, mca_args, arch_info.name,
+                                           cache_miss, cache_latency)
             if result is not None:
                 yield result
         else:
             for start, end, ipc, lp, _kind in _analyze_function(
-                    instrs, mca_args, arch_info.name):
+                    instrs, mca_args, arch_info.name, cache_miss,
+                    cache_latency):
                 yield start, end, ipc, lp
 
 
@@ -713,21 +842,56 @@ def main():
             "across basic blocks if the function has no loops)."
         ),
     )
+    parser.add_argument(
+        "--cache-miss",
+        type=float,
+        default=0.0,
+        metavar="PROB",
+        help=(
+            "Cache-miss probability for load instructions (0–1, default 0). "
+            "When non-zero the code block is repeated 100 times and each load "
+            "instruction independently receives a cache-miss latency override "
+            "(# LLVM-MCA-LATENCY) with this probability. "
+            "llvm-mca is run with -iterations=0 in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--cache-latency",
+        type=int,
+        default=0,
+        metavar="CYCLES",
+        help=(
+            "Cache-miss latency in cycles (≥0, default 0). "
+            "Used as the latency value in the # LLVM-MCA-LATENCY directive "
+            "when --cache-miss is non-zero."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
 
+    if not 0.0 <= args.cache_miss <= 1.0:
+        parser.error("--cache-miss must be in the range 0–1")
+    if args.cache_latency < 0:
+        parser.error("--cache-latency must be >= 0")
+
+    cache_miss = args.cache_miss
+    cache_latency = args.cache_latency
+
     if args.mode == "functions":
         # Function mode: one row per function, same output format as block mode.
         print("start_address,end_address,throughput,load_proportion")
         for start, end, ipc, load_proportion in analyze(
-                args.binary, args.mcpu, mode="functions"):
+                args.binary, args.mcpu, mode="functions",
+                cache_miss=cache_miss, cache_latency=cache_latency):
             print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
     else:
         # Block mode (default): existing behaviour — one row per loop/BB, sorted.
-        results = sorted(analyze(args.binary, args.mcpu),
-                         key=lambda x: (x[1], -x[0]))
+        results = sorted(
+            analyze(args.binary, args.mcpu,
+                    cache_miss=cache_miss, cache_latency=cache_latency),
+            key=lambda x: (x[1], -x[0]))
         print("start_address,end_address,throughput,load_proportion")
         for start, end, ipc, load_proportion in results:
             print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")

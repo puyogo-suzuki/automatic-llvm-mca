@@ -13,6 +13,7 @@ Run with::
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -627,3 +628,234 @@ class TestAMD64FunctionMode:
                 f"{max_block_ipc:.4f}; expected IPC_f = max of all loop IPCs "
                 f"(or block IPCs when no loops exist)"
             )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _is_load_instruction
+# ---------------------------------------------------------------------------
+
+class TestIsLoadInstruction:
+    """Unit tests for analyze._is_load_instruction."""
+
+    # ------------------------------------------------------------------
+    # x86 AT&T syntax
+    # ------------------------------------------------------------------
+
+    def test_x86_mov_from_memory_is_load(self):
+        """mov (%edi), %eax reads from memory — load."""
+        assert analyze._is_load_instruction("mov", "(%edi),%eax", "x86")
+
+    def test_x86_add_from_memory_is_load(self):
+        """add (%rdi), %rax reads from memory — load."""
+        assert analyze._is_load_instruction("add", "(%rdi),%rax", "x86")
+
+    def test_x86_mov_to_memory_not_load(self):
+        """mov %eax, (%edi) writes to memory — not a load (source is a reg)."""
+        assert not analyze._is_load_instruction("mov", "%eax,(%edi)", "x86")
+
+    def test_x86_reg_to_reg_not_load(self):
+        """add %eax, %edx is register-to-register — not a load."""
+        assert not analyze._is_load_instruction("add", "%eax,%edx", "x86")
+
+    def test_x86_lea_not_a_load(self):
+        """lea computes an address without reading memory."""
+        assert not analyze._is_load_instruction("lea", "0x10(%rip),%rax", "x86")
+
+    def test_x86_leal_not_a_load(self):
+        """leal (32-bit variant) also computes address without reading memory."""
+        assert not analyze._is_load_instruction("leal", "(%rdi,%rsi),%ecx", "x86")
+
+    def test_x86_leaq_not_a_load(self):
+        """leaq (64-bit variant) also computes address without reading memory."""
+        assert not analyze._is_load_instruction("leaq", "0x10(%rip),%rax", "x86")
+
+    def test_x86_offset_memory_source_is_load(self):
+        """mov 8(%rsp), %rax — offset memory source."""
+        assert analyze._is_load_instruction("mov", "8(%rsp),%rax", "x86")
+
+    def test_x86_no_operands_not_load(self):
+        """Instruction with no operands is not a load."""
+        assert not analyze._is_load_instruction("ret", "", "x86")
+
+    # ------------------------------------------------------------------
+    # AArch64
+    # ------------------------------------------------------------------
+
+    def test_aarch64_ldr_is_load(self):
+        assert analyze._is_load_instruction("ldr", "x0, [x1]", "aarch64")
+
+    def test_aarch64_ldp_is_load(self):
+        assert analyze._is_load_instruction("ldp", "x0, x1, [sp]", "aarch64")
+
+    def test_aarch64_str_not_load(self):
+        assert not analyze._is_load_instruction("str", "x0, [x1]", "aarch64")
+
+    def test_aarch64_add_not_load(self):
+        assert not analyze._is_load_instruction("add", "x0, x1, x2", "aarch64")
+
+    # ------------------------------------------------------------------
+    # ARM (32-bit)
+    # ------------------------------------------------------------------
+
+    def test_arm_ldr_is_load(self):
+        assert analyze._is_load_instruction("ldr", "r0, [r1]", "arm")
+
+    def test_arm_pop_is_load(self):
+        assert analyze._is_load_instruction("pop", "{r0, r1}", "arm")
+
+    def test_arm_str_not_load(self):
+        assert not analyze._is_load_instruction("str", "r0, [r1]", "arm")
+
+    # ------------------------------------------------------------------
+    # RISC-V
+    # ------------------------------------------------------------------
+
+    def test_riscv_lw_is_load(self):
+        assert analyze._is_load_instruction("lw", "a0, 0(a1)", "riscv")
+
+    def test_riscv_ld_is_load(self):
+        assert analyze._is_load_instruction("ld", "a0, 8(sp)", "riscv")
+
+    def test_riscv_lb_is_load(self):
+        assert analyze._is_load_instruction("lb", "a0, 0(a1)", "riscv")
+
+    def test_riscv_sw_not_load(self):
+        assert not analyze._is_load_instruction("sw", "a0, 0(a1)", "riscv")
+
+    def test_riscv_add_not_load(self):
+        assert not analyze._is_load_instruction("add", "a0, a1, a2", "riscv")
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _format_asm_with_cache_miss
+# ---------------------------------------------------------------------------
+
+class TestFormatAsmWithCacheMiss:
+    """Unit tests for analyze._format_asm_with_cache_miss."""
+
+    _LOAD_INSTRS = [
+        (0x0, "mov", "(%edi),%eax"),
+        (0x2, "add", "%eax,%edx"),
+        (0x4, "ret", ""),
+    ]
+
+    def test_no_cache_miss_no_latency_directives(self):
+        """With cache_miss=0 no LLVM-MCA-LATENCY directives must appear."""
+        asm = analyze._format_asm_with_cache_miss(
+            self._LOAD_INSTRS, "x86", cache_miss=0.0, cache_latency=100)
+        assert "LLVM-MCA-LATENCY" not in asm
+
+    def test_full_cache_miss_all_loads_get_latency(self):
+        """With cache_miss=1.0 every load must be wrapped with directives."""
+        asm = analyze._format_asm_with_cache_miss(
+            self._LOAD_INSTRS, "x86", cache_miss=1.0, cache_latency=100)
+        assert "# LLVM-MCA-LATENCY 100" in asm
+        assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
+
+    def test_non_load_not_wrapped(self):
+        """Non-load instructions must never have an opening latency directive."""
+        asm = analyze._format_asm_with_cache_miss(
+            self._LOAD_INSTRS, "x86", cache_miss=1.0, cache_latency=100)
+        lines = asm.splitlines()
+        _open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
+        for i, line in enumerate(lines):
+            if "add\t%eax,%edx" in line or "\tadd %eax,%edx" in line:
+                if i > 0:
+                    assert not _open_re.search(lines[i - 1]), (
+                        f"Non-load 'add' must not be preceded by an opening "
+                        f"LLVM-MCA-LATENCY directive. Line before: {lines[i-1]!r}"
+                    )
+
+    def test_code_repeated_100_times(self):
+        """The instruction block must appear 100 times in the output."""
+        instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
+        asm = analyze._format_asm_with_cache_miss(
+            instrs, "x86", cache_miss=0.0, cache_latency=0)
+        # The non-branch instruction appears once per iteration.
+        assert asm.count("add %eax,%edx") == 100
+
+    def test_labels_are_unique_per_iteration(self):
+        """Backward-branch labels must be unique per repetition."""
+        instrs = [
+            (0x0, "add", "%eax,%edx"),
+            (0x2, "jne", "0"),
+        ]
+        asm = analyze._format_asm_with_cache_miss(
+            instrs, "x86", cache_miss=0.0, cache_latency=0)
+        # Per-iteration label suffix: _r0, _r1, …, _r99
+        assert ".Lmca_0_r0:" in asm
+        assert ".Lmca_0_r99:" in asm
+        # No bare .Lmca_0: label (which would be duplicated)
+        assert not re.search(r"^\.Lmca_0:$", asm, re.MULTILINE)
+
+    def test_lmca_end_label_present(self):
+        """The closing .Lmca_end: label must be present exactly once."""
+        asm = analyze._format_asm_with_cache_miss(
+            self._LOAD_INSTRS, "x86", cache_miss=0.0, cache_latency=0)
+        assert asm.count(".Lmca_end:") == 1
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _run_mca cache-miss plumbing (monkeypatched)
+# ---------------------------------------------------------------------------
+
+class TestRunMcaCacheMissPlumbing:
+    """Verify that _run_mca uses the right formatter and mca flags."""
+
+    def test_cache_miss_zero_uses_format_asm(self, monkeypatch):
+        """With cache_miss=0, _format_asm (not _format_asm_with_cache_miss) is used."""
+        called = {}
+
+        def fake_format_asm(instrs, arch):
+            called["format_asm"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        def fake_format_asm_with_cache_miss(instrs, arch, cache_miss, cache_latency):
+            called["format_asm_with_cache_miss"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm", fake_format_asm)
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss",
+                            fake_format_asm_with_cache_miss)
+        monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
+
+        class FakeProc:
+            returncode = 0
+            stdout = "IPC: 1.00\n"
+            stderr = ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
+
+        analyze._run_mca([(0x0, "nop", "")], cache_miss=0.0)
+        assert called.get("format_asm"), "Expected _format_asm to be called"
+        assert not called.get("format_asm_with_cache_miss"), (
+            "Did not expect _format_asm_with_cache_miss to be called"
+        )
+
+    def test_cache_miss_nonzero_uses_format_asm_with_cache_miss(self, monkeypatch):
+        """With cache_miss>0, _format_asm_with_cache_miss is used and
+        -iterations=0 is added to the llvm-mca command."""
+        captured_cmd = {}
+
+        def fake_format_asm_with_cache_miss(instrs, arch, cache_miss, cache_latency):
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss",
+                            fake_format_asm_with_cache_miss)
+        monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
+
+        class FakeProc:
+            returncode = 0
+            stdout = "IPC: 1.00\n"
+            stderr = ""
+
+        def fake_run(cmd, **kw):
+            captured_cmd["cmd"] = cmd
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        analyze._run_mca([(0x0, "nop", "")], cache_miss=0.5, cache_latency=100)
+        assert "-iterations=0" in captured_cmd.get("cmd", []), (
+            "Expected -iterations=0 in llvm-mca command when cache_miss > 0"
+        )
