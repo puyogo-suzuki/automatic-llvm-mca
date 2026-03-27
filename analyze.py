@@ -568,7 +568,7 @@ def _find_llvm_mca() -> str:
     """Return the path to llvm-mca, trying versioned names as fallback."""
     if shutil.which("llvm-mca"):
         return "llvm-mca"
-    for ver in range(20, 10, -1):
+    for ver in range(30, 15, -1):
         name = f"llvm-mca-{ver}"
         if shutil.which(name):
             return name
