@@ -635,7 +635,7 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86",
     When *cache_miss* is greater than 0 the assembly is repeated
     ``_CACHE_MISS_REPEAT`` (100) times with cache-miss latency directives
     randomly inserted for load instructions (probability = *cache_miss*,
-    latency = *cache_latency* cycles).  ``-iterations=0`` is added to the
+    latency = *cache_latency* cycles).  ``-iterations=1`` is added to the
     llvm-mca command so that llvm-mca does not add its own repetitions.
     """
     global _LLVM_MCA
@@ -651,7 +651,7 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86",
     if cache_miss > 0:
         asm = _format_asm_with_cache_miss(instrs, arch, cache_miss,
                                           cache_latency)
-        extra = ["-iterations=0"]
+        extra = ["-iterations=1"]
     else:
         asm = _format_asm(instrs, arch)
         extra = []
@@ -783,7 +783,7 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
         Probability (0–1) that a load instruction suffers a cache miss.
         When greater than 0 the code block is repeated 100 times with
         ``# LLVM-MCA-LATENCY`` directives randomly inserted for load
-        instructions, and llvm-mca is invoked with ``-iterations=0``.
+        instructions, and llvm-mca is invoked with ``-iterations=1``.
         Default is 0 (no cache-miss simulation).
     cache_latency:
         Cache-miss penalty in cycles inserted via the ``# LLVM-MCA-LATENCY``
@@ -852,7 +852,7 @@ def main():
             "When non-zero the code block is repeated 100 times and each load "
             "instruction independently receives a cache-miss latency override "
             "(# LLVM-MCA-LATENCY) with this probability. "
-            "llvm-mca is run with -iterations=0 in this mode."
+            "llvm-mca is run with -iterations=1 in this mode."
         ),
     )
     parser.add_argument(
