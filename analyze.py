@@ -540,22 +540,25 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
     )
     b = _CACHE_MISS_REPEAT * n
     a = round(cache_miss * b) if b > 0 else 0
-    miss_positions: set[int] = (
-        {int(m * b / a) for m in range(a)} if a > 0 else set()
-    )
-
     load_counter = 0
+    miss_counter = 0
+    next_miss_position = 0 if a > 0 else -1
 
     def _emit(mnemonic, operands, lines):
         """Append the instruction, wrapping loads with latency directives."""
-        nonlocal load_counter
+        nonlocal load_counter, miss_counter, next_miss_position
         tail = f" {operands}" if operands else ""
         is_load = _is_load_instruction(mnemonic, operands, arch)
         if is_load:
-            if load_counter in miss_positions:
+            if miss_counter < a and load_counter == next_miss_position:
                 lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
                 lines.append(f"\t{mnemonic}{tail}")
                 lines.append("# LLVM-MCA-LATENCY")
+                miss_counter += 1
+                if miss_counter < a:
+                    next_miss_position = int(miss_counter * b / a)
+                else:
+                    next_miss_position = -1
             else:
                 lines.append(f"\t{mnemonic}{tail}")
             load_counter += 1
