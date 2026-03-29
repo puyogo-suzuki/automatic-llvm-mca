@@ -137,18 +137,18 @@ def aarch64_obj():
 # ---------------------------------------------------------------------------
 
 class TestGetBranchTarget:
-    """Unit tests for analyze._get_branch_target.
+    """Unit tests for arch.get_branch_target() on each architecture class.
 
     The tests are grouped to document three distinct categories:
 
-    (A) Correct direct-branch cases — the regex returns the right target.
+    (A) Correct direct-branch cases — the method returns the right target.
     (B) Harmless false-positive candidates — earlier hex-like register names
         are matched by the plain-hex fallback but the last-candidate heuristic
         still returns the correct address.
     (C) Previously broken indirect-branch false positives — RISC-V ``jr``/
         ``jalr`` with a bare register operand whose name is all-hex (``a0``–
         ``a7``) were misidentified as direct branches to an address.  This is
-        now fixed by the ``mnemonic``/``arch`` parameters.
+        now handled by the architecture class's ``get_branch_target`` method.
     """
 
     # ------------------------------------------------------------------
@@ -157,34 +157,34 @@ class TestGetBranchTarget:
 
     # x86-64 style (AT&T syntax, plain hex, possibly short)
     def test_x86_plain_hex_3digits(self):
-        assert analyze._get_branch_target("4016") == 0x4016
+        assert analyze.X86Arch().get_branch_target("4016") == 0x4016
 
     def test_x86_plain_hex_2digits(self):
         """Two-digit hex targets (common in object files) must be parsed."""
-        assert analyze._get_branch_target("20") == 0x20
+        assert analyze.X86Arch().get_branch_target("20") == 0x20
 
     def test_x86_plain_hex_1digit(self):
         """Single-digit hex targets must be parsed."""
-        assert analyze._get_branch_target("8") == 0x8
+        assert analyze.X86Arch().get_branch_target("8") == 0x8
 
     # AArch64 style
     def test_aarch64_bne_2digit_target(self):
         """b.ne with a 2-digit hex target (object-file address)."""
-        assert analyze._get_branch_target("18", "b.ne", "aarch64") == 0x18
+        assert analyze.AArch64Arch().get_branch_target("18", "b.ne") == 0x18
 
     def test_aarch64_ble_2digit_target(self):
-        assert analyze._get_branch_target("2c", "b.le", "aarch64") == 0x2c
+        assert analyze.AArch64Arch().get_branch_target("2c", "b.le") == 0x2c
 
     def test_aarch64_cbz_register_plus_target(self):
         """cbz xN, addr — target is the last operand."""
-        assert analyze._get_branch_target("x0, 2dc", "cbz", "aarch64") == 0x2dc
+        assert analyze.AArch64Arch().get_branch_target("x0, 2dc", "cbz") == 0x2dc
 
     def test_aarch64_tbz_register_imm_target(self):
         """tbz xN, #imm, addr — the #-prefixed imm must NOT be taken as target."""
-        assert analyze._get_branch_target("x0, #0, 2dc", "tbz", "aarch64") == 0x2dc
+        assert analyze.AArch64Arch().get_branch_target("x0, #0, 2dc", "tbz") == 0x2dc
 
     def test_aarch64_0x_prefix(self):
-        assert analyze._get_branch_target("0x400808", "b", "aarch64") == 0x400808
+        assert analyze.AArch64Arch().get_branch_target("0x400808", "b") == 0x400808
 
     # ------------------------------------------------------------------
     # (B) Harmless false-positive candidates
@@ -196,31 +196,31 @@ class TestGetBranchTarget:
     def test_riscv_bne_fp_candidates_last_is_target(self):
         """bne a4,a5,314 — a4 and a5 are false-positive candidates,
         but the last candidate (0x314) is the correct branch target."""
-        assert analyze._get_branch_target("a4,a5,314", "bne", "riscv") == 0x314
+        assert analyze.RISCVArch().get_branch_target("a4,a5,314", "bne") == 0x314
 
     def test_riscv_beqz_fp_candidate_last_is_target(self):
         """beqz a0,100 — a0 is a false-positive candidate,
         but the last candidate (0x100) is the correct branch target."""
-        assert analyze._get_branch_target("a0,100", "beqz", "riscv") == 0x100
+        assert analyze.RISCVArch().get_branch_target("a0,100", "beqz") == 0x100
 
     # ------------------------------------------------------------------
     # (C) Indirect-branch false positives — must return None
     # jr/jalr with a bare register operand (no comma) is an indirect
     # jump; a0–a5 are all-hex so they would be mistaken for addresses
-    # without the mnemonic/arch guard.
+    # without the mnemonic/arch guard in RISCVArch.get_branch_target.
     # ------------------------------------------------------------------
 
     def test_riscv_jr_indirect_a0(self):
         """jr a0 is an indirect jump; must return None, not 0xa0."""
-        assert analyze._get_branch_target("a0", "jr", "riscv") is None
+        assert analyze.RISCVArch().get_branch_target("a0", "jr") is None
 
     def test_riscv_jr_indirect_a5(self):
         """jr a5 is an indirect jump; must return None, not 0xa5."""
-        assert analyze._get_branch_target("a5", "jr", "riscv") is None
+        assert analyze.RISCVArch().get_branch_target("a5", "jr") is None
 
     def test_riscv_jalr_indirect_a1(self):
         """jalr a1 (single-register operand) is indirect; must return None."""
-        assert analyze._get_branch_target("a1", "jalr", "riscv") is None
+        assert analyze.RISCVArch().get_branch_target("a1", "jalr") is None
 
     def test_riscv_jalr_with_comma_bypasses_indirect_guard(self):
         """jalr with multiple operands (comma present) is NOT blocked by the
@@ -233,19 +233,19 @@ class TestGetBranchTarget:
         disassembles indirect RISC-V calls in single-register pseudo form ('jalr a0').
         """
         # "jalr ra, a0, 0" — last candidate is 0
-        assert analyze._get_branch_target("ra, a0, 0", "jalr", "riscv") == 0x0
+        assert analyze.RISCVArch().get_branch_target("ra, a0, 0", "jalr") == 0x0
 
     def test_riscv_jr_ra_returns_none_due_to_nonhex_char(self):
         """jr ra — 'ra' contains a non-hex character ('r'), so the plain-hex
         regex finds no match and returns None independently of the mnemonic
-        guard.  Verified here without arch/mnemonic to show the regex alone
-        handles non-hex register names correctly."""
-        assert analyze._get_branch_target("ra") is None
+        guard.  Verified here via _parse_branch_target_candidates to show
+        the shared regex alone handles non-hex register names correctly."""
+        assert analyze._parse_branch_target_candidates("ra") is None
 
     # Indirect branches — architecture-agnostic check (x86 AT&T prefix)
     def test_indirect_x86_star_prefix(self):
         """Indirect branch in AT&T syntax (*%reg) returns None."""
-        assert analyze._get_branch_target("*%rax") is None
+        assert analyze.X86Arch().get_branch_target("*%rax") is None
 
 
 class TestFindLoops:
@@ -263,7 +263,7 @@ class TestFindLoops:
             (0x25, "cmp", "%eax,%edi"),
             (0x27, "jne", "20"),  # backward branch → loop 0x20..0x27
         ]
-        loops = analyze._find_loops(instrs, "x86")
+        loops = analyze._find_loops(instrs, analyze.X86Arch())
         assert (0x20, 0x27) in loops
 
     def test_x86_no_loop_forward_branch(self):
@@ -274,7 +274,7 @@ class TestFindLoops:
             (0x14, "xor", "%eax,%eax"),
             (0x30, "ret", ""),
         ]
-        loops = analyze._find_loops(instrs, "x86")
+        loops = analyze._find_loops(instrs, analyze.X86Arch())
         assert loops == []
 
     def test_aarch64_simple_loop_short_addresses(self):
@@ -285,7 +285,7 @@ class TestFindLoops:
             (0x20, "cmp", "w2, w1"),
             (0x24, "b.ne", "18"),  # backward branch → loop 0x18..0x24
         ]
-        loops = analyze._find_loops(instrs, "aarch64")
+        loops = analyze._find_loops(instrs, analyze.AArch64Arch())
         assert (0x18, 0x24) in loops
 
     def test_aarch64_no_loop_forward_branch(self):
@@ -296,7 +296,7 @@ class TestFindLoops:
             (0x8, "b.le", "2c"),  # forward branch → no loop
             (0x2c, "ret", ""),
         ]
-        loops = analyze._find_loops(instrs, "aarch64")
+        loops = analyze._find_loops(instrs, analyze.AArch64Arch())
         assert loops == []
 
     def test_riscv_jr_a0_not_a_loop(self):
@@ -309,7 +309,7 @@ class TestFindLoops:
             (0xb0, "jr", "a0"),             # indirect — operand is a register,
                                              # NOT the address 0xa0
         ]
-        loops = analyze._find_loops(instrs, "riscv")
+        loops = analyze._find_loops(instrs, analyze.RISCVArch())
         assert loops == [], (
             "jr a0 is an indirect branch and must not create a loop; "
             f"got loops={loops}"
@@ -322,8 +322,8 @@ class TestFormatAsm:
     def test_riscv_jr_kept_as_indirect(self):
         """_format_asm must emit 'jr a0' verbatim, not 'jr .Lmca_end'.
 
-        Previously, _get_branch_target("a0") returned 0xa0 instead of None,
-        causing _format_asm to rewrite the indirect branch as
+        Previously, RISCVArch.get_branch_target("a0") returned 0xa0 instead
+        of None, causing _format_asm to rewrite the indirect branch as
         ``jr .Lmca_end`` — invalid RISC-V assembly that made llvm-mca fail
         and silently drop the region.
         """
@@ -331,7 +331,7 @@ class TestFormatAsm:
             (0x0,  "add", "a0, a0, a1"),
             (0x4,  "jr",  "a0"),
         ]
-        asm = analyze._format_asm(instrs, "riscv")
+        asm = analyze._format_asm(instrs, analyze.RISCVArch())
         assert "jr a0" in asm, (
             f"Expected 'jr a0' to be preserved as an indirect branch. Got:\n{asm}"
         )
@@ -345,7 +345,7 @@ class TestFormatAsm:
             (0x0, "addi", "a1, a1, 4"),
             (0x4, "jalr", "a1"),
         ]
-        asm = analyze._format_asm(instrs, "riscv")
+        asm = analyze._format_asm(instrs, analyze.RISCVArch())
         assert "jalr a1" in asm, (
             f"Expected 'jalr a1' to be preserved. Got:\n{asm}"
         )
@@ -635,7 +635,7 @@ class TestAMD64FunctionMode:
 # ---------------------------------------------------------------------------
 
 class TestIsLoadInstruction:
-    """Unit tests for analyze._is_load_instruction."""
+    """Unit tests for arch.is_load_instruction() on each architecture class."""
 
     # ------------------------------------------------------------------
     # x86 AT&T syntax
@@ -643,87 +643,87 @@ class TestIsLoadInstruction:
 
     def test_x86_mov_from_memory_is_load(self):
         """mov (%edi), %eax reads from memory — load."""
-        assert analyze._is_load_instruction("mov", "(%edi),%eax", "x86")
+        assert analyze.X86Arch().is_load_instruction("mov", "(%edi),%eax")
 
     def test_x86_add_from_memory_is_load(self):
         """add (%rdi), %rax reads from memory — load."""
-        assert analyze._is_load_instruction("add", "(%rdi),%rax", "x86")
+        assert analyze.X86Arch().is_load_instruction("add", "(%rdi),%rax")
 
     def test_x86_mov_to_memory_not_load(self):
         """mov %eax, (%edi) writes to memory — not a load (source is a reg)."""
-        assert not analyze._is_load_instruction("mov", "%eax,(%edi)", "x86")
+        assert not analyze.X86Arch().is_load_instruction("mov", "%eax,(%edi)")
 
     def test_x86_reg_to_reg_not_load(self):
         """add %eax, %edx is register-to-register — not a load."""
-        assert not analyze._is_load_instruction("add", "%eax,%edx", "x86")
+        assert not analyze.X86Arch().is_load_instruction("add", "%eax,%edx")
 
     def test_x86_lea_not_a_load(self):
         """lea computes an address without reading memory."""
-        assert not analyze._is_load_instruction("lea", "0x10(%rip),%rax", "x86")
+        assert not analyze.X86Arch().is_load_instruction("lea", "0x10(%rip),%rax")
 
     def test_x86_leal_not_a_load(self):
         """leal (32-bit variant) also computes address without reading memory."""
-        assert not analyze._is_load_instruction("leal", "(%rdi,%rsi),%ecx", "x86")
+        assert not analyze.X86Arch().is_load_instruction("leal", "(%rdi,%rsi),%ecx")
 
     def test_x86_leaq_not_a_load(self):
         """leaq (64-bit variant) also computes address without reading memory."""
-        assert not analyze._is_load_instruction("leaq", "0x10(%rip),%rax", "x86")
+        assert not analyze.X86Arch().is_load_instruction("leaq", "0x10(%rip),%rax")
 
     def test_x86_offset_memory_source_is_load(self):
         """mov 8(%rsp), %rax — offset memory source."""
-        assert analyze._is_load_instruction("mov", "8(%rsp),%rax", "x86")
+        assert analyze.X86Arch().is_load_instruction("mov", "8(%rsp),%rax")
 
     def test_x86_no_operands_not_load(self):
         """Instruction with no operands is not a load."""
-        assert not analyze._is_load_instruction("ret", "", "x86")
+        assert not analyze.X86Arch().is_load_instruction("ret", "")
 
     # ------------------------------------------------------------------
     # AArch64
     # ------------------------------------------------------------------
 
     def test_aarch64_ldr_is_load(self):
-        assert analyze._is_load_instruction("ldr", "x0, [x1]", "aarch64")
+        assert analyze.AArch64Arch().is_load_instruction("ldr", "x0, [x1]")
 
     def test_aarch64_ldp_is_load(self):
-        assert analyze._is_load_instruction("ldp", "x0, x1, [sp]", "aarch64")
+        assert analyze.AArch64Arch().is_load_instruction("ldp", "x0, x1, [sp]")
 
     def test_aarch64_str_not_load(self):
-        assert not analyze._is_load_instruction("str", "x0, [x1]", "aarch64")
+        assert not analyze.AArch64Arch().is_load_instruction("str", "x0, [x1]")
 
     def test_aarch64_add_not_load(self):
-        assert not analyze._is_load_instruction("add", "x0, x1, x2", "aarch64")
+        assert not analyze.AArch64Arch().is_load_instruction("add", "x0, x1, x2")
 
     # ------------------------------------------------------------------
     # ARM (32-bit)
     # ------------------------------------------------------------------
 
     def test_arm_ldr_is_load(self):
-        assert analyze._is_load_instruction("ldr", "r0, [r1]", "arm")
+        assert analyze.ARMArch().is_load_instruction("ldr", "r0, [r1]")
 
     def test_arm_pop_is_load(self):
-        assert analyze._is_load_instruction("pop", "{r0, r1}", "arm")
+        assert analyze.ARMArch().is_load_instruction("pop", "{r0, r1}")
 
     def test_arm_str_not_load(self):
-        assert not analyze._is_load_instruction("str", "r0, [r1]", "arm")
+        assert not analyze.ARMArch().is_load_instruction("str", "r0, [r1]")
 
     # ------------------------------------------------------------------
     # RISC-V
     # ------------------------------------------------------------------
 
     def test_riscv_lw_is_load(self):
-        assert analyze._is_load_instruction("lw", "a0, 0(a1)", "riscv")
+        assert analyze.RISCVArch().is_load_instruction("lw", "a0, 0(a1)")
 
     def test_riscv_ld_is_load(self):
-        assert analyze._is_load_instruction("ld", "a0, 8(sp)", "riscv")
+        assert analyze.RISCVArch().is_load_instruction("ld", "a0, 8(sp)")
 
     def test_riscv_lb_is_load(self):
-        assert analyze._is_load_instruction("lb", "a0, 0(a1)", "riscv")
+        assert analyze.RISCVArch().is_load_instruction("lb", "a0, 0(a1)")
 
     def test_riscv_sw_not_load(self):
-        assert not analyze._is_load_instruction("sw", "a0, 0(a1)", "riscv")
+        assert not analyze.RISCVArch().is_load_instruction("sw", "a0, 0(a1)")
 
     def test_riscv_add_not_load(self):
-        assert not analyze._is_load_instruction("add", "a0, a1, a2", "riscv")
+        assert not analyze.RISCVArch().is_load_instruction("add", "a0, a1, a2")
 
 
 # ---------------------------------------------------------------------------
@@ -738,24 +738,25 @@ class TestFormatAsmWithCacheMiss:
         (0x2, "add", "%eax,%edx"),
         (0x4, "ret", ""),
     ]
+    _ARCH = analyze.X86Arch()
 
     def test_no_cache_miss_no_latency_directives(self):
         """With cache_miss=0 no LLVM-MCA-LATENCY directives must appear."""
         asm = analyze._format_asm_with_cache_miss(
-            self._LOAD_INSTRS, "x86", cache_miss=0.0, cache_latency=100)
+            self._LOAD_INSTRS, self._ARCH, cache_miss=0.0, cache_latency=100)
         assert "LLVM-MCA-LATENCY" not in asm
 
     def test_full_cache_miss_all_loads_get_latency(self):
         """With cache_miss=1.0 every load must be wrapped with directives."""
         asm = analyze._format_asm_with_cache_miss(
-            self._LOAD_INSTRS, "x86", cache_miss=1.0, cache_latency=100)
+            self._LOAD_INSTRS, self._ARCH, cache_miss=1.0, cache_latency=100)
         assert "# LLVM-MCA-LATENCY 100" in asm
         assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
 
     def test_non_load_not_wrapped(self):
         """Non-load instructions must never have an opening latency directive."""
         asm = analyze._format_asm_with_cache_miss(
-            self._LOAD_INSTRS, "x86", cache_miss=1.0, cache_latency=100)
+            self._LOAD_INSTRS, self._ARCH, cache_miss=1.0, cache_latency=100)
         lines = asm.splitlines()
         _open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
         for i, line in enumerate(lines):
@@ -770,7 +771,7 @@ class TestFormatAsmWithCacheMiss:
         """The instruction block must appear 100 times in the output."""
         instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
         asm = analyze._format_asm_with_cache_miss(
-            instrs, "x86", cache_miss=0.0, cache_latency=0)
+            instrs, self._ARCH, cache_miss=0.0, cache_latency=0)
         # The non-branch instruction appears once per iteration.
         assert asm.count("add %eax,%edx") == 100
 
@@ -781,7 +782,7 @@ class TestFormatAsmWithCacheMiss:
             (0x2, "jne", "0"),
         ]
         asm = analyze._format_asm_with_cache_miss(
-            instrs, "x86", cache_miss=0.0, cache_latency=0)
+            instrs, self._ARCH, cache_miss=0.0, cache_latency=0)
         # Per-iteration label suffix: _r0, _r1, …, _r99
         assert ".Lmca_0_r0:" in asm
         assert ".Lmca_0_r99:" in asm
@@ -791,7 +792,7 @@ class TestFormatAsmWithCacheMiss:
     def test_lmca_end_label_present(self):
         """The closing .Lmca_end: label must be present exactly once."""
         asm = analyze._format_asm_with_cache_miss(
-            self._LOAD_INSTRS, "x86", cache_miss=0.0, cache_latency=0)
+            self._LOAD_INSTRS, self._ARCH, cache_miss=0.0, cache_latency=0)
         assert asm.count(".Lmca_end:") == 1
 
     def test_deterministic_exact_miss_count(self):
@@ -802,7 +803,7 @@ class TestFormatAsmWithCacheMiss:
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
         for rate, expected_per_rep in [(0.0, 0), (0.3, 3), (0.5, 5), (1.0, 10)]:
             asm = analyze._format_asm_with_cache_miss(
-                instrs, "x86", cache_miss=rate, cache_latency=100)
+                instrs, self._ARCH, cache_miss=rate, cache_latency=100)
             # Count opening latency directives (one per cache-miss event).
             total_misses = asm.count("# LLVM-MCA-LATENCY 100")
             assert total_misses == expected_per_rep * 100, (
@@ -820,7 +821,7 @@ class TestFormatAsmWithCacheMiss:
         # Build 10 loads with distinct operands so we can identify them.
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
         asm = analyze._format_asm_with_cache_miss(
-            instrs, "x86", cache_miss=0.3, cache_latency=999)
+            instrs, self._ARCH, cache_miss=0.3, cache_latency=999)
 
         lines = asm.splitlines()
         miss_indices = []  # global 0-indexed load positions that are misses
@@ -843,9 +844,9 @@ class TestFormatAsmWithCacheMiss:
         """Two calls with the same arguments must produce identical output."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
         asm1 = analyze._format_asm_with_cache_miss(
-            instrs, "x86", cache_miss=0.4, cache_latency=200)
+            instrs, self._ARCH, cache_miss=0.4, cache_latency=200)
         asm2 = analyze._format_asm_with_cache_miss(
-            instrs, "x86", cache_miss=0.4, cache_latency=200)
+            instrs, self._ARCH, cache_miss=0.4, cache_latency=200)
         assert asm1 == asm2, "Output must be deterministic across calls"
 
 
@@ -857,7 +858,7 @@ class TestRunMcaCacheMissPlumbing:
     """Verify that _run_mca uses the right formatter and mca flags."""
 
     def test_cache_miss_zero_uses_format_asm(self, monkeypatch):
-        """With cache_miss=0, _format_asm (not _format_asm_with_cache_miss) is used."""
+        """With _NoCacheMiss, _format_asm (not _format_asm_with_cache_miss) is used."""
         called = {}
 
         def fake_format_asm(instrs, arch):
@@ -880,15 +881,16 @@ class TestRunMcaCacheMissPlumbing:
 
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
 
-        analyze._run_mca([(0x0, "nop", "")], cache_miss=0.0)
+        analyze._run_mca([(0x0, "nop", "")],
+                         cache_mode=analyze._NoCacheMiss())
         assert called.get("format_asm"), "Expected _format_asm to be called"
         assert not called.get("format_asm_with_cache_miss"), (
             "Did not expect _format_asm_with_cache_miss to be called"
         )
 
     def test_cache_miss_nonzero_uses_format_asm_with_cache_miss(self, monkeypatch):
-        """With cache_miss>0, _format_asm_with_cache_miss is used and
-        -iterations=0 is added to the llvm-mca command."""
+        """With _StochasticCacheMiss, _format_asm_with_cache_miss is used and
+        -iterations=1 is added to the llvm-mca command."""
         captured_cmd = {}
 
         def fake_format_asm_with_cache_miss(instrs, arch, cache_miss, cache_latency):
@@ -909,9 +911,10 @@ class TestRunMcaCacheMissPlumbing:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        analyze._run_mca([(0x0, "nop", "")], cache_miss=0.5, cache_latency=100)
-        assert "-iterations=0" in captured_cmd.get("cmd", []), (
-            "Expected -iterations=0 in llvm-mca command when cache_miss > 0"
+        analyze._run_mca([(0x0, "nop", "")],
+                         cache_mode=analyze._StochasticCacheMiss(0.5, 100))
+        assert "-iterations=1" in captured_cmd.get("cmd", []), (
+            "Expected -iterations=1 in llvm-mca command for stochastic mode"
         )
 
 
@@ -927,24 +930,25 @@ class TestFormatAsmWithAverageLoadLatency:
         (0x2, "add", "%eax,%edx"),
         (0x4, "ret", ""),
     ]
+    _ARCH = analyze.X86Arch()
 
     def test_all_loads_get_latency_directive(self):
         """Every load must be wrapped with opening and closing latency directives."""
         asm = analyze._format_asm_with_average_load_latency(
-            self._LOAD_INSTRS, "x86", latency=50)
+            self._LOAD_INSTRS, self._ARCH, latency=50)
         assert "# LLVM-MCA-LATENCY 50" in asm
         assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
 
     def test_zero_latency_still_wraps_loads(self):
         """A latency of 0 still inserts directives (latency=0 is valid)."""
         asm = analyze._format_asm_with_average_load_latency(
-            self._LOAD_INSTRS, "x86", latency=0)
+            self._LOAD_INSTRS, self._ARCH, latency=0)
         assert "# LLVM-MCA-LATENCY 0" in asm
 
     def test_non_load_not_wrapped(self):
         """Non-load instructions must not be preceded by a latency directive."""
         asm = analyze._format_asm_with_average_load_latency(
-            self._LOAD_INSTRS, "x86", latency=75)
+            self._LOAD_INSTRS, self._ARCH, latency=75)
         lines = asm.splitlines()
         open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
         for i, line in enumerate(lines):
@@ -959,28 +963,28 @@ class TestFormatAsmWithAverageLoadLatency:
         """The instruction block must appear exactly once (no repetition)."""
         instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "ret", "")]
         asm = analyze._format_asm_with_average_load_latency(
-            instrs, "x86", latency=10)
+            instrs, self._ARCH, latency=10)
         # Load appears once; not repeated 100 times like stochastic mode.
         assert asm.count("mov (%edi),%eax") == 1
 
     def test_lmca_end_label_present(self):
         """The closing .Lmca_end: label must be present."""
         asm = analyze._format_asm_with_average_load_latency(
-            self._LOAD_INSTRS, "x86", latency=0)
+            self._LOAD_INSTRS, self._ARCH, latency=0)
         assert ".Lmca_end:" in asm
 
     def test_no_loads_no_latency_directives(self):
         """A block with no loads must produce no LLVM-MCA-LATENCY directives."""
         instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
         asm = analyze._format_asm_with_average_load_latency(
-            instrs, "x86", latency=100)
+            instrs, self._ARCH, latency=100)
         assert "LLVM-MCA-LATENCY" not in asm
 
     def test_multiple_loads_all_wrapped(self):
         """All load instructions in a block must each be wrapped."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
         asm = analyze._format_asm_with_average_load_latency(
-            instrs, "x86", latency=30)
+            instrs, self._ARCH, latency=30)
         # There should be exactly 5 opening latency directives.
         assert asm.count("# LLVM-MCA-LATENCY 30") == 5
 
@@ -988,9 +992,9 @@ class TestFormatAsmWithAverageLoadLatency:
         """Two calls with the same arguments produce identical output."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(3)]
         asm1 = analyze._format_asm_with_average_load_latency(
-            instrs, "x86", latency=20)
+            instrs, self._ARCH, latency=20)
         asm2 = analyze._format_asm_with_average_load_latency(
-            instrs, "x86", latency=20)
+            instrs, self._ARCH, latency=20)
         assert asm1 == asm2
 
 
@@ -1003,9 +1007,8 @@ class TestRunMcaAverageModePlumbing:
 
     def test_average_mode_uses_format_asm_with_average_load_latency(
             self, monkeypatch):
-        """With cache_miss_mode='average' and cache_miss>0,
-        _format_asm_with_average_load_latency is called with the correct
-        effective latency (round(cache_miss * cache_latency))."""
+        """With _AverageCacheMiss, _format_asm_with_average_load_latency is
+        called with the correct effective latency (round(cache_miss * cache_latency))."""
         called = {}
 
         def fake_format_avg(instrs, arch, latency):
@@ -1025,8 +1028,7 @@ class TestRunMcaAverageModePlumbing:
 
         analyze._run_mca(
             [(0x0, "nop", "")],
-            cache_miss=0.3, cache_latency=100,
-            cache_miss_mode="average",
+            cache_mode=analyze._AverageCacheMiss(0.3, 100),
         )
         assert "latency" in called, (
             "Expected _format_asm_with_average_load_latency to be called"
@@ -1058,15 +1060,14 @@ class TestRunMcaAverageModePlumbing:
 
         analyze._run_mca(
             [(0x0, "nop", "")],
-            cache_miss=0.5, cache_latency=100,
-            cache_miss_mode="average",
+            cache_mode=analyze._AverageCacheMiss(0.5, 100),
         )
         assert "-iterations=1" not in captured_cmd.get("cmd", []), (
             "Average mode must not add -iterations=1 to the llvm-mca command"
         )
 
     def test_stochastic_mode_still_uses_cache_miss_formatter(self, monkeypatch):
-        """Stochastic mode (default) still uses _format_asm_with_cache_miss."""
+        """Stochastic mode still uses _format_asm_with_cache_miss."""
         called = {}
 
         def fake_format_stochastic(instrs, arch, cache_miss, cache_latency):
@@ -1086,8 +1087,7 @@ class TestRunMcaAverageModePlumbing:
 
         analyze._run_mca(
             [(0x0, "nop", "")],
-            cache_miss=0.5, cache_latency=100,
-            cache_miss_mode="stochastic",
+            cache_mode=analyze._StochasticCacheMiss(0.5, 100),
         )
         assert called.get("stochastic"), (
             "Expected _format_asm_with_cache_miss to be called in stochastic mode"
@@ -1124,8 +1124,8 @@ class TestRunMcaAverageModePlumbing:
             if cache_miss > 0:
                 analyze._run_mca(
                     [(0x0, "nop", "")],
-                    cache_miss=cache_miss, cache_latency=cache_latency,
-                    cache_miss_mode="average",
+                    cache_mode=analyze._AverageCacheMiss(cache_miss,
+                                                         cache_latency),
                 )
                 assert called.get("latency") == expected, (
                     f"cache_miss={cache_miss}, cache_latency={cache_latency}: "

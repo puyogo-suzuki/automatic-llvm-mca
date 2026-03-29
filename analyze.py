@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """automatic-llvm-mca: Estimate throughput for ELF binaries using llvm-mca.
 
+
 Procedure:
   1. Disassemble the ELF binary with objdump.
   2. Decompose each function into loops and (for non-loop code) basic blocks.
@@ -27,93 +28,10 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import namedtuple
 
 
 # ---------------------------------------------------------------------------
-# Architecture info
-# ---------------------------------------------------------------------------
-
-# _ArchInfo bundles all per-architecture settings needed during analysis.
-#   name     : short arch tag used for branch-detection dispatch
-#   objdump  : objdump executable that can disassemble this architecture
-#   mca_args : extra arguments forwarded to llvm-mca
-_ArchInfo = namedtuple("_ArchInfo", ["name", "objdump", "mca_args"])
-
-
-def _find_cross_tool(preferred: str) -> str:
-    """Return *preferred* tool if it exists on PATH, else fall back to plain objdump."""
-    return preferred if shutil.which(preferred) else "objdump"
-
-
-def _arch_from_platform() -> "_ArchInfo":
-    """Return an ``_ArchInfo`` based on the host machine's architecture.
-
-    Used as a fallback when the ``file`` command is not available.
-    ``platform.machine()`` provides the CPU type (e.g. ``x86_64``,
-    ``aarch64``, ``riscv64``) and ``platform.architecture()`` provides the
-    pointer-size bit width, which is used to distinguish RV32 from RV64.
-    """
-    machine = platform.machine().lower()
-    bits, _ = platform.architecture()
-
-    if "riscv" in machine:
-        objdump = _find_cross_tool("riscv64-linux-gnu-objdump")
-        if bits == "32bit":
-            return _ArchInfo("riscv", objdump,
-                             ["-march=riscv32", "-mcpu=sifive-e31"])
-        return _ArchInfo("riscv", objdump,
-                         ["-march=riscv64", "-mcpu=sifive-u74"])
-
-    if machine in ("aarch64", "arm64"):
-        objdump = _find_cross_tool("aarch64-linux-gnu-objdump")
-        return _ArchInfo("aarch64", objdump,
-                         ["-march=aarch64", "-mcpu=cortex-a57"])
-
-    if machine.startswith("arm"):
-        objdump = _find_cross_tool("arm-linux-gnueabihf-objdump")
-        return _ArchInfo("arm", objdump, ["-march=arm"])
-
-    return _ArchInfo("x86", "objdump", [])
-
-
-def _detect_arch(binary: str) -> "_ArchInfo":
-    """Detect the architecture of *binary* and return an ``_ArchInfo``."""
-    if not shutil.which("file"):
-        print(
-            "Warning: 'file' command not found; falling back to host architecture.",
-            file=sys.stderr,
-        )
-        return _arch_from_platform()
-    try:
-        file_out = subprocess.run(
-            ["file", binary], capture_output=True, text=True
-        ).stdout.lower()
-    except Exception:
-        file_out = ""
-
-    if "ucb risc-v" in file_out:
-        objdump = _find_cross_tool("riscv64-linux-gnu-objdump")
-        if "32-bit" in file_out:
-            return _ArchInfo("riscv", objdump,
-                             ["-march=riscv32", "-mcpu=sifive-e31"])
-        return _ArchInfo("riscv", objdump,
-                         ["-march=riscv64", "-mcpu=sifive-u74"])
-
-    if "aarch64" in file_out or "arm64" in file_out:
-        objdump = _find_cross_tool("aarch64-linux-gnu-objdump")
-        return _ArchInfo("aarch64", objdump,
-                         ["-march=aarch64", "-mcpu=cortex-a57"])
-
-    if re.search(r"\barm\b", file_out):
-        objdump = _find_cross_tool("arm-linux-gnueabihf-objdump")
-        return _ArchInfo("arm", objdump, ["-march=arm"])
-
-    return _ArchInfo("x86", "objdump", [])
-
-
-# ---------------------------------------------------------------------------
-# Branch / jump detection (architecture-aware)
+# Branch / jump detection constants (used by arch classes below)
 # ---------------------------------------------------------------------------
 
 # RISC-V branch/jump mnemonics (base ISA + standard pseudo-instructions).
@@ -149,71 +67,142 @@ _AARCH64_BRANCHES = frozenset({
 })
 
 
-def _is_branch(mnemonic: str, arch: str = "x86") -> bool:
-    """Return True if *mnemonic* is a branch/jump/call instruction.
+# ---------------------------------------------------------------------------
+# Helper: branch-target candidate parser (shared regex logic)
+# ---------------------------------------------------------------------------
 
-    Recognises:
-    * x86/x86-64 : ``j*``, ``call``, ``loop*``
-    * AArch64    : explicit set + ``b.`` prefix (conditional branches like
-      b.eq, b.ne, …)
-    * RISC-V     : explicit set (avoids false positives from B-extension
-      instructions bclr, bset, bext, …)
+def _parse_branch_target_candidates(op: str):
+    """Parse branch-target address candidates from operand string *op*.
+
+    Returns the last candidate (the actual branch target) or None.
+
+    Pass 1: 0x-prefixed addresses not preceded by ``#`` (AArch64 immediates
+    like ``#0x10`` start with ``#``, so the lookbehind filters them out).
+
+    Pass 2 (fallback): plain hex addresses (1 or more hex digits).  The
+    lookbehind ``(?<![#\\w])`` prevents matching ``#``-prefixed immediates and
+    register names whose first hex-digit character is immediately preceded by a
+    non-hex word character (e.g. AArch64 ``x0``, ``w5``; RISC-V ``t0``,
+    ``s1``).
+
+    For multi-operand instructions the target is always the **last** operand,
+    so only the last candidate is returned.
+
+    ``ValueError`` from ``int(..., 16)`` cannot occur since the regex only
+    captures ``[0-9a-fA-F]+`` characters; the ``try/except`` is defensive.
     """
-    m = mnemonic.lower()
-    if arch == "aarch64":
-        return m in _AARCH64_BRANCHES or m.startswith("b.")
-    if arch == "riscv":
-        return m in _RISCV_BRANCHES
-    # x86 / arm default
-    return m.startswith(("j", "call", "loop"))
+    candidates = []
+
+    # 1. Explicit 0x-prefixed addresses.
+    for mo in re.finditer(r"(?<![#\w])0x([0-9a-fA-F]+)\b", op):
+        candidates.append(int(mo.group(1), 16))
+
+    if not candidates:
+        # 2. Plain hex addresses (1 or more hex digits).
+        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]+)\b", op):
+            try:
+                candidates.append(int(mo.group(1), 16))
+            except ValueError:  # pragma: no cover
+                pass
+
+    return candidates[-1] if candidates else None
 
 
-def _ends_basic_block(mnemonic: str, operands: str = "",
-                      arch: str = "x86") -> bool:
-    """Return True if this instruction ends a basic block."""
-    m = mnemonic.lower()
-    op = operands.lower()
+# ---------------------------------------------------------------------------
+# Architecture classes
+# ---------------------------------------------------------------------------
 
-    if arch == "aarch64":
-        # bl / blr are calls (fall-through continues) — they do NOT end a BB.
+class ArchBase:
+    """Base class for architecture-specific analysis settings and logic.
+
+    Each concrete subclass bundles all per-architecture knowledge:
+    * Which objdump executable to use for disassembly.
+    * Which extra arguments to pass to llvm-mca.
+    * How to recognise branch, basic-block-terminating, and load instructions.
+    * How to parse branch targets from disassembly operand strings.
+    * How to strip inline assembly comments from disassembly output.
+
+    The class-based design replaces the previous approach of passing an
+    architecture tag string (``"x86"``, ``"aarch64"``, …) through every
+    function and dispatching on it with ``if``/``elif`` chains.
+    """
+
+    #: Short architecture tag (set by subclasses as a class attribute).
+    name: str = ""
+
+    def __init__(self, objdump: str, mca_args: list):
+        self._objdump = objdump
+        self._mca_args = list(mca_args)
+
+    @property
+    def objdump(self) -> str:
+        """Path to the objdump executable for this architecture."""
+        return self._objdump
+
+    @property
+    def mca_args(self) -> list:
+        """Extra arguments to pass to llvm-mca for this architecture."""
+        return list(self._mca_args)
+
+    def is_branch(self, mnemonic: str) -> bool:
+        """Return True if *mnemonic* is a branch/jump/call instruction."""
+        raise NotImplementedError
+
+    def ends_basic_block(self, mnemonic: str, operands: str) -> bool:
+        """Return True if this instruction terminates a basic block."""
+        raise NotImplementedError
+
+    def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
+        """Return True if *mnemonic*/*operands* describe a memory-load."""
+        raise NotImplementedError
+
+    def get_branch_target(self, operands: str, mnemonic: str = ""):
+        """Return the numeric branch target from *operands*, or None.
+
+        Returns None for indirect branches (target in a register, not a static
+        address).  The default implementation delegates to the shared regex
+        parser; subclasses override to add architecture-specific guards (e.g.
+        x86 ``*%reg`` indirect syntax, RISC-V ``jr``/``jalr`` single-register
+        form).
+        """
+        return _parse_branch_target_candidates(operands.strip())
+
+    def strip_asm_comment(self, text: str) -> str:
+        """Strip an inline assembly comment from a disassembly text line.
+
+        x86 and RISC-V use ``#``-style comments; AArch64 overrides this to
+        strip ``//``-style comments instead (since ``#`` is used for
+        immediates like ``#0x1``).
+        """
+        return re.sub(r"#.*$", "", text).strip()
+
+
+class X86Arch(ArchBase):
+    """x86 / x86-64 architecture."""
+
+    name = "x86"
+
+    def __init__(self):
+        super().__init__("objdump", [])
+
+    def is_branch(self, mnemonic: str) -> bool:
+        m = mnemonic.lower()
+        return m.startswith(("j", "call", "loop"))
+
+    def ends_basic_block(self, mnemonic: str, operands: str) -> bool:
+        m = mnemonic.lower()
+        op = operands.lower()
         return (
-            m in ("b", "br", "ret", "cbz", "cbnz", "tbz", "tbnz")
-            or m.startswith("b.")  # b.eq, b.ne, b.lt, etc.
+            m.startswith("j")
+            or m.startswith("loop")
+            or m.startswith("ret")
+            # "repz retq" / "repz retl" — branch-prediction padding idiom
+            or (m == "repz" and op.startswith("ret"))
+            or m in ("hlt", "ud2", "int3")
         )
 
-    if arch == "riscv":
-        # All conditional branches (beq/bne/blt/bge/bltu/bgeu/…) end a BB.
-        # j/jr are unconditional pseudo-jumps; ret is a return.
-        # jal/jalr: objdump typically shows `j target` (not `jal x0, target`)
-        # for unconditional jumps, and `ret` (not `jalr x0, 0(ra)`) for
-        # returns, so the distinction is handled by the pseudo-instruction
-        # names rather than inspecting the destination register.
-        return m in _RISCV_BRANCHES and m not in ("call", "tail")
-
-    # x86 / arm
-    return (
-        m.startswith("j")
-        or m.startswith("loop")
-        or m.startswith("ret")
-        # "repz retq" / "repz retl" — branch-prediction padding idiom
-        or (m == "repz" and op.startswith("ret"))
-        or m in ("hlt", "ud2", "int3")
-    )
-
-
-def _is_load_instruction(mnemonic: str, operands: str,
-                          arch: str = "x86") -> bool:
-    """Return True if *mnemonic*/*operands* describe a memory-load instruction.
-
-    Recognises:
-    * x86/x86-64 (AT&T syntax): source operand (first) contains ``(``
-      indicating a memory-read address.  ``lea`` is excluded because it
-      computes an address without reading memory.
-    * AArch64 / ARM: mnemonic starts with ``ld``, or is ``pop`` (ARM only).
-    * RISC-V: mnemonic is one of the standard load opcodes.
-    """
-    m = mnemonic.lower()
-    if arch == "x86":
+    def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
+        m = mnemonic.lower()
         if m in ("lea", "leal", "leaq"):
             return False
         # In AT&T syntax the source (first) operand comes first.
@@ -221,145 +210,196 @@ def _is_load_instruction(mnemonic: str, operands: str,
         parts = operands.split(",") if operands else []
         src = parts[0].strip() if parts else operands.strip()
         return "(" in src
-    if arch == "aarch64":
-        return m.startswith("ld")
-    if arch == "arm":
+
+    def get_branch_target(self, operands: str, mnemonic: str = ""):
+        op = operands.strip()
+        # x86/x86-64 AT&T indirect branches: *%reg or *offset(%reg).
+        if op.startswith("*"):
+            return None
+        return _parse_branch_target_candidates(op)
+
+
+class AArch64Arch(ArchBase):
+    """AArch64 (64-bit ARM) architecture."""
+
+    name = "aarch64"
+
+    def __init__(self, objdump: str = "objdump"):
+        super().__init__(objdump, ["-march=aarch64", "-mcpu=cortex-a57"])
+
+    def is_branch(self, mnemonic: str) -> bool:
+        m = mnemonic.lower()
+        return m in _AARCH64_BRANCHES or m.startswith("b.")
+
+    def ends_basic_block(self, mnemonic: str, operands: str) -> bool:
+        m = mnemonic.lower()
+        # bl / blr are calls (fall-through continues) — they do NOT end a BB.
+        return (
+            m in ("b", "br", "ret", "cbz", "cbnz", "tbz", "tbnz")
+            or m.startswith("b.")  # b.eq, b.ne, b.lt, etc.
+        )
+
+    def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
+        return mnemonic.lower().startswith("ld")
+
+    def strip_asm_comment(self, text: str) -> str:
+        # AArch64 uses # for immediate operands (e.g. #0x1), so only
+        # strip // style comments.
+        return re.sub(r"//.*$", "", text).strip()
+
+
+class ARMArch(ArchBase):
+    """32-bit ARM architecture."""
+
+    name = "arm"
+
+    def __init__(self, objdump: str = "objdump"):
+        super().__init__(objdump, ["-march=arm"])
+
+    def is_branch(self, mnemonic: str) -> bool:
+        m = mnemonic.lower()
+        return m.startswith(("j", "call", "loop"))
+
+    def ends_basic_block(self, mnemonic: str, operands: str) -> bool:
+        m = mnemonic.lower()
+        op = operands.lower()
+        return (
+            m.startswith("j")
+            or m.startswith("loop")
+            or m.startswith("ret")
+            or (m == "repz" and op.startswith("ret"))
+            or m in ("hlt", "ud2", "int3")
+        )
+
+    def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
+        m = mnemonic.lower()
         return m.startswith("ld") or m == "pop"
-    if arch == "riscv":
-        return m in ("lb", "lh", "lw", "ld", "lbu", "lhu", "lwu")
-    return False
 
 
-def _get_branch_target(operands: str, mnemonic: str = "", arch: str = "x86"):
-    """Return the numeric branch target from *operands*, or None.
+class RISCVArch(ArchBase):
+    """RISC-V architecture (RV32 and RV64)."""
 
-    Handles single-operand branches (x86: ``jne 4016``) as well as
-    multi-operand branches (RISC-V: ``bne a4,a5,314``; AArch64:
-    ``cbz x0, 2dc``; ``tbz x0, #0, 2dc``).
+    name = "riscv"
 
-    The branch target is always the LAST address-like value in the operand
-    string.  Values preceded by ``#`` (immediate field in tbz/tbnz etc.) are
-    excluded so they are not mistaken for the target address.
+    def __init__(self, objdump: str = "objdump", mca_args: list = None):
+        if mca_args is None:
+            mca_args = ["-march=riscv64", "-mcpu=sifive-u74"]
+        super().__init__(objdump, mca_args)
 
-    Returns None for indirect branches (target in a register, not a static
-    address).
+    def is_branch(self, mnemonic: str) -> bool:
+        return mnemonic.lower() in _RISCV_BRANCHES
 
-    Parameters
-    ----------
-    operands:
-        The operand string exactly as it appears in the disassembly output.
-    mnemonic:
-        The instruction mnemonic.  Required for architectures where the same
-        operand syntax can denote either a direct or an indirect branch
-        (e.g. RISC-V ``jr``/``jalr``).
-    arch:
-        Architecture tag (``"x86"``, ``"aarch64"``, ``"riscv"``, ``"arm"``).
+    def ends_basic_block(self, mnemonic: str, operands: str) -> bool:
+        m = mnemonic.lower()
+        # All conditional branches (beq/bne/blt/bge/bltu/bgeu/…) end a BB.
+        # j/jr are unconditional pseudo-jumps; ret is a return.
+        # call/tail are pseudo-calls (fall-through continues) — do NOT end a BB.
+        return m in _RISCV_BRANCHES and m not in ("call", "tail")
 
-    Known false-positive candidates (harmless)
-    -------------------------------------------
-    In multi-operand RISC-V branches such as ``bne a4,a5,314`` the register
-    names ``a4`` and ``a5`` are matched as hex-digit sequences and appended
-    to the candidate list.  Because the branch target is always the **last**
-    operand, these spurious earlier candidates are ignored and the correct
-    address (``0x314``) is returned.
+    def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
+        return mnemonic.lower() in ("lb", "lh", "lw", "ld", "lbu", "lhu", "lwu")
 
-    Previously fixed false positives
-    ---------------------------------
-    RISC-V indirect jumps ``jr aN`` / ``jalr aN`` (where N is 0–7) used to
-    return the register name interpreted as a hex address (e.g. ``jr a0``
-    → ``0xa0``) instead of ``None``.  Registers ``a0``–``a7`` are the only
-    RISC-V register names that consist entirely of hexadecimal digits; all
-    other register prefixes (``r``, ``s``, ``t``, ``f``, ``x``, ``w``, …)
-    contain non-hex characters and are already blocked by the
-    ``(?<![#\\w])`` lookbehind.  This case is now handled explicitly via the
-    *mnemonic* + *arch* parameters.
+    def get_branch_target(self, operands: str, mnemonic: str = ""):
+        op = operands.strip()
+        m = mnemonic.lower()
+        # RISC-V: ``jr rs`` is the pseudo-instruction for ``jalr x0, rs, 0``
+        # (unconditional indirect jump through a register).  ``jalr rs`` with a
+        # single register operand (no comma) is also an indirect branch or call.
+        # Both must return None rather than misinterpreting the register name as
+        # an address — which would happen for a0–a7 since those names consist
+        # entirely of hex digits.
+        if m in ("jr", "jalr") and "," not in op:
+            return None
+        return _parse_branch_target_candidates(op)
 
-    Known false negatives
-    ---------------------
-    None.  Every direct branch-target address produced by ``objdump`` for
-    the supported architectures is parsed correctly by at least one of the
-    two regex passes.
+
+# ---------------------------------------------------------------------------
+# Architecture detection
+# ---------------------------------------------------------------------------
+
+def _find_cross_tool(preferred: str) -> str:
+    """Return *preferred* tool if it exists on PATH, else fall back to plain objdump."""
+    return preferred if shutil.which(preferred) else "objdump"
+
+
+def _arch_from_platform() -> ArchBase:
+    """Return an :class:`ArchBase` subclass based on the host machine's architecture.
+
+    Used as a fallback when the ``file`` command is not available.
+    ``platform.machine()`` provides the CPU type (e.g. ``x86_64``,
+    ``aarch64``, ``riscv64``) and ``platform.architecture()`` provides the
+    pointer-size bit width, which is used to distinguish RV32 from RV64.
     """
-    op = operands.strip()
-    # x86/x86-64 AT&T indirect branches: *%reg or *offset(%reg).
-    if op.startswith("*"):
-        return None
+    machine = platform.machine().lower()
+    bits, _ = platform.architecture()
 
-    # RISC-V: ``jr rs`` is the pseudo-instruction for ``jalr x0, rs, 0``
-    # (unconditional indirect jump through a register).  ``jalr rs`` with a
-    # single register operand (no comma) is also an indirect branch or call.
-    # Both must return None rather than misinterpreting the register name as
-    # an address — which would happen for a0–a7 since those names consist
-    # entirely of hex digits.
-    m = mnemonic.lower()
-    if arch == "riscv" and m in ("jr", "jalr") and "," not in op:
-        return None
+    if "riscv" in machine:
+        objdump = _find_cross_tool("riscv64-linux-gnu-objdump")
+        mca_args = (
+            ["-march=riscv32", "-mcpu=sifive-e31"]
+            if bits == "32bit"
+            else ["-march=riscv64", "-mcpu=sifive-u74"]
+        )
+        return RISCVArch(objdump, mca_args)
 
-    candidates = []
+    if machine in ("aarch64", "arm64"):
+        objdump = _find_cross_tool("aarch64-linux-gnu-objdump")
+        return AArch64Arch(objdump)
 
-    # 1. Explicit 0x-prefixed addresses not preceded by # (AArch64 immediates
-    #    like #0x10 start with #, so the lookbehind filters them out).
-    for mo in re.finditer(r"(?<![#\w])0x([0-9a-fA-F]+)\b", op):
-        candidates.append(int(mo.group(1), 16))
+    if machine.startswith("arm"):
+        objdump = _find_cross_tool("arm-linux-gnueabihf-objdump")
+        return ARMArch(objdump)
 
-    if not candidates:
-        # 2. Plain hex addresses (1 or more hex digits).  The lookbehind
-        #    ``(?<![#\w])`` prevents matching ``#``-prefixed immediates
-        #    (e.g. AArch64 ``#0x1``) and register names whose first hex-digit
-        #    character is immediately preceded by a non-hex word character
-        #    (e.g. AArch64 ``x0``, ``w5``; RISC-V ``t0``, ``s1``).
-        #
-        #    False-positive candidates: in multi-operand RISC-V branches
-        #    (e.g. ``bne a4,a5,314``) register names ``a4`` and ``a5`` — which
-        #    happen to be all-hex — are matched and added to the list.  This
-        #    is harmless: only the LAST candidate (the actual target address)
-        #    is returned.
-        #
-        #    ValueError from int(..., 16) cannot occur since the regex only
-        #    captures [0-9a-fA-F]+ characters; the try/except is defensive.
-        for mo in re.finditer(r"(?<![#\w])([0-9a-fA-F]+)\b", op):
-            try:
-                candidates.append(int(mo.group(1), 16))
-            except ValueError:  # pragma: no cover
-                pass
-
-    # Return the last candidate — for multi-operand instructions the target
-    # is always the final operand.
-    return candidates[-1] if candidates else None
+    return X86Arch()
 
 
-def _replace_branch_target(operands: str, target: int,
-                            replacement: str) -> str:
-    """Replace the branch target address in *operands* with *replacement*.
+def _detect_arch(binary: str) -> ArchBase:
+    """Detect the architecture of *binary* and return an :class:`ArchBase` subclass."""
+    if not shutil.which("file"):
+        print(
+            "Warning: 'file' command not found; falling back to host architecture.",
+            file=sys.stderr,
+        )
+        return _arch_from_platform()
+    try:
+        file_out = subprocess.run(
+            ["file", binary], capture_output=True, text=True
+        ).stdout.lower()
+    except Exception:
+        file_out = ""
 
-    Works for both single-operand (``4016``) and multi-operand
-    (``a4,a5,314``, ``x0, 2dc``) branch instructions.
-    """
-    hex_t = f"{target:x}"
-    # Try 0x-prefixed form first, then plain hex.
-    for pattern in (
-        rf"(?<![#\w])0x{re.escape(hex_t)}\b",
-        rf"(?<![#\w]){re.escape(hex_t)}\b",
-    ):
-        new_ops, n = re.subn(pattern, replacement, operands,
-                             flags=re.IGNORECASE)
-        if n:
-            return new_ops
-    return operands  # fallback: no replacement found
+    if "ucb risc-v" in file_out:
+        objdump = _find_cross_tool("riscv64-linux-gnu-objdump")
+        mca_args = (
+            ["-march=riscv32", "-mcpu=sifive-e31"]
+            if "32-bit" in file_out
+            else ["-march=riscv64", "-mcpu=sifive-u74"]
+        )
+        return RISCVArch(objdump, mca_args)
+
+    if "aarch64" in file_out or "arm64" in file_out:
+        objdump = _find_cross_tool("aarch64-linux-gnu-objdump")
+        return AArch64Arch(objdump)
+
+    if re.search(r"\barm\b", file_out):
+        objdump = _find_cross_tool("arm-linux-gnueabihf-objdump")
+        return ARMArch(objdump)
+
+    return X86Arch()
 
 
 # ---------------------------------------------------------------------------
 # Disassembly
 # ---------------------------------------------------------------------------
 
-def disassemble(binary: str, objdump: str = "objdump", arch: str = "x86"):
-    """Disassemble *binary* with *objdump*.
+def disassemble(binary: str, arch: ArchBase):
+    """Disassemble *binary* using the objdump from *arch*.
 
     Returns a list of ``(func_name, instructions)`` pairs where
     *instructions* is a list of ``(addr, mnemonic, operands)`` triples.
     """
     proc = subprocess.run(
-        [objdump, "-d", "--no-show-raw-insn", binary],
+        [arch.objdump, "-d", "--no-show-raw-insn", binary],
         capture_output=True,
         text=True,
         check=True,
@@ -387,14 +427,8 @@ def disassemble(binary: str, objdump: str = "objdump", arch: str = "x86"):
             text = im.group(2)
             # Remove symbol annotations like <name+0x10>
             text = re.sub(r"<[^>]+>", "", text)
-            # Remove inline comments.
-            # AArch64 uses # for immediate operands (e.g. #0x1), so only
-            # strip // style comments there.  All other architectures use
-            # # style inline annotations (e.g. x86 "# addr", RISC-V "# addr").
-            if arch == "aarch64":
-                text = re.sub(r"//.*$", "", text).strip()
-            else:
-                text = re.sub(r"#.*$", "", text).strip()
+            # Remove inline comments using the arch-specific strategy.
+            text = arch.strip_asm_comment(text)
             if not text:
                 continue
             parts = text.split(None, 1)
@@ -412,7 +446,7 @@ def disassemble(binary: str, objdump: str = "objdump", arch: str = "x86"):
 # Loop detection
 # ---------------------------------------------------------------------------
 
-def _find_loops(instrs, arch: str = "x86"):
+def _find_loops(instrs, arch: ArchBase):
     """Detect loops via backward branches.
 
     Returns a list of ``(start_addr, end_addr)`` pairs, one per detected
@@ -424,8 +458,8 @@ def _find_loops(instrs, arch: str = "x86"):
     loops = []
 
     for addr, mnemonic, operands in instrs:
-        if _is_branch(mnemonic, arch):
-            target = _get_branch_target(operands, mnemonic, arch)
+        if arch.is_branch(mnemonic):
+            target = arch.get_branch_target(operands, mnemonic)
             if target is not None and target < addr and target in addr_set:
                 loops.append((target, addr))
 
@@ -442,7 +476,27 @@ def _in_any_loop(addr: int, loops) -> bool:
 # Assembly formatting for llvm-mca
 # ---------------------------------------------------------------------------
 
-def _format_asm(instrs, arch: str = "x86") -> str:
+def _replace_branch_target(operands: str, target: int,
+                            replacement: str) -> str:
+    """Replace the branch target address in *operands* with *replacement*.
+
+    Works for both single-operand (``4016``) and multi-operand
+    (``a4,a5,314``, ``x0, 2dc``) branch instructions.
+    """
+    hex_t = f"{target:x}"
+    # Try 0x-prefixed form first, then plain hex.
+    for pattern in (
+        rf"(?<![#\w])0x{re.escape(hex_t)}\b",
+        rf"(?<![#\w]){re.escape(hex_t)}\b",
+    ):
+        new_ops, n = re.subn(pattern, replacement, operands,
+                              flags=re.IGNORECASE)
+        if n:
+            return new_ops
+    return operands  # fallback: no replacement found
+
+
+def _format_asm(instrs, arch: ArchBase) -> str:
     """Format *instrs* as assembly for llvm-mca.
 
     * Instructions whose address is a branch target within this region are
@@ -461,8 +515,8 @@ def _format_asm(instrs, arch: str = "x86") -> str:
     # Determine which addresses need a label
     labeled: set = set()
     for addr, mnemonic, operands in instrs:
-        if _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands, mnemonic, arch)
+        if arch.is_branch(mnemonic):
+            t = arch.get_branch_target(operands, mnemonic)
             if t is not None and t in addr_set:
                 labeled.add(t)
 
@@ -470,8 +524,8 @@ def _format_asm(instrs, arch: str = "x86") -> str:
     for addr, mnemonic, operands in instrs:
         if addr in labeled:
             lines.append(f".Lmca_{addr:x}:")
-        if _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands, mnemonic, arch)
+        if arch.is_branch(mnemonic):
+            t = arch.get_branch_target(operands, mnemonic)
             if t is not None and t in addr_set:
                 # In-region branch: replace target with a local label,
                 # keeping any other operands (e.g. registers in cbz/bne).
@@ -495,7 +549,7 @@ def _format_asm(instrs, arch: str = "x86") -> str:
     return "\n".join(lines) + "\n"
 
 
-def _format_asm_with_average_load_latency(instrs, arch: str = "x86",
+def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
                                           latency: int = 0) -> str:
     """Format *instrs* as assembly where every load gets a fixed latency override.
 
@@ -513,8 +567,8 @@ def _format_asm_with_average_load_latency(instrs, arch: str = "x86",
     # Determine which addresses need a label.
     labeled: set = set()
     for _, mnemonic, operands in instrs:
-        if _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands, mnemonic, arch)
+        if arch.is_branch(mnemonic):
+            t = arch.get_branch_target(operands, mnemonic)
             if t is not None and t in addr_set:
                 labeled.add(t)
 
@@ -523,12 +577,12 @@ def _format_asm_with_average_load_latency(instrs, arch: str = "x86",
         if addr in labeled:
             lines.append(f".Lmca_{addr:x}:")
         tail = f" {operands}" if operands else ""
-        if _is_load_instruction(mnemonic, operands, arch):
+        if arch.is_load_instruction(mnemonic, operands):
             lines.append(f"# LLVM-MCA-LATENCY {latency}")
             lines.append(f"\t{mnemonic}{tail}")
             lines.append("# LLVM-MCA-LATENCY")
-        elif _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands, mnemonic, arch)
+        elif arch.is_branch(mnemonic):
+            t = arch.get_branch_target(operands, mnemonic)
             if t is not None and t in addr_set:
                 new_ops = _replace_branch_target(operands, t, f".Lmca_{t:x}")
                 lines.append(f"\t{mnemonic} {new_ops}")
@@ -544,7 +598,7 @@ def _format_asm_with_average_load_latency(instrs, arch: str = "x86",
     return "\n".join(lines) + "\n"
 
 
-def _format_asm_with_cache_miss(instrs, arch: str = "x86",
+def _format_asm_with_cache_miss(instrs, arch: ArchBase,
                                  cache_miss: float = 0.0,
                                  cache_latency: int = 0) -> str:
     """Format *instrs* as assembly for llvm-mca with cache-miss simulation.
@@ -577,15 +631,15 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
     # Determine which addresses need an iteration-local label.
     labeled: set = set()
     for _, mnemonic, operands in instrs:
-        if _is_branch(mnemonic, arch):
-            t = _get_branch_target(operands, mnemonic, arch)
+        if arch.is_branch(mnemonic):
+            t = arch.get_branch_target(operands, mnemonic)
             if t is not None and t in addr_set:
                 labeled.add(t)
 
     # n: load instructions per repetition; b: total generated load count.
     # Miss positions are floor(m * b / a) for m in 0..a-1.
     n = sum(
-        1 for _, mn, ops in instrs if _is_load_instruction(mn, ops, arch)
+        1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
     )
     b = _CACHE_MISS_REPEAT * n
     a = round(cache_miss * b) if b > 0 else 0
@@ -597,7 +651,7 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
         """Append the instruction, wrapping loads with latency directives."""
         nonlocal load_counter, miss_counter, next_miss_position
         tail = f" {operands}" if operands else ""
-        is_load = _is_load_instruction(mnemonic, operands, arch)
+        is_load = arch.is_load_instruction(mnemonic, operands)
         if is_load:
             if miss_counter < a and load_counter == next_miss_position:
                 lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
@@ -617,8 +671,8 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
         for addr, mnemonic, operands in instrs:
             if addr in labeled:
                 lines.append(f".Lmca_{addr:x}{sfx}:")
-            if _is_branch(mnemonic, arch):
-                t = _get_branch_target(operands, mnemonic, arch)
+            if arch.is_branch(mnemonic):
+                t = arch.get_branch_target(operands, mnemonic)
                 if t is not None and t in addr_set:
                     new_ops = _replace_branch_target(
                         operands, t, f".Lmca_{t:x}{sfx}")
@@ -636,6 +690,87 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Cache-miss simulation mode classes
+# ---------------------------------------------------------------------------
+
+class _CacheMissMode:
+    """Base class for cache-miss simulation strategies.
+
+    Each subclass encapsulates the cache-miss parameters as instance
+    variables and provides a ``format_asm`` method that produces the
+    appropriate assembly for llvm-mca, as well as ``extra_mca_args`` for
+    any extra flags required by that strategy.
+    """
+
+    def format_asm(self, instrs, arch: ArchBase) -> str:
+        """Format *instrs* as assembly with the cache-miss strategy applied."""
+        raise NotImplementedError
+
+    def extra_mca_args(self) -> list:
+        """Return extra arguments to add to the llvm-mca command."""
+        return []
+
+
+class _NoCacheMiss(_CacheMissMode):
+    """No cache-miss simulation — plain assembly formatting."""
+
+    def format_asm(self, instrs, arch: ArchBase) -> str:
+        return _format_asm(instrs, arch)
+
+
+class _StochasticCacheMiss(_CacheMissMode):
+    """Stochastic cache-miss simulation.
+
+    The assembly is repeated 100 times with ``# LLVM-MCA-LATENCY`` directives
+    inserted deterministically so that exactly *cache_miss* fraction of loads
+    receive the full *cache_latency* penalty.  ``-iterations=1`` is added to
+    llvm-mca so that it does not add its own repetitions.
+    """
+
+    def __init__(self, cache_miss: float, cache_latency: int):
+        self.cache_miss = cache_miss
+        self.cache_latency = cache_latency
+
+    def format_asm(self, instrs, arch: ArchBase) -> str:
+        return _format_asm_with_cache_miss(instrs, arch, self.cache_miss,
+                                           self.cache_latency)
+
+    def extra_mca_args(self) -> list:
+        return ["-iterations=1"]
+
+
+class _AverageCacheMiss(_CacheMissMode):
+    """Average cache-miss simulation.
+
+    Every load instruction receives a fixed latency of
+    ``round(cache_miss * cache_latency)`` cycles via ``# LLVM-MCA-LATENCY``
+    directives.  Models the case where all loads pay the average cache-miss
+    cost rather than a fraction of loads paying the full penalty.
+    """
+
+    def __init__(self, cache_miss: float, cache_latency: int):
+        self.cache_miss = cache_miss
+        self.cache_latency = cache_latency
+
+    def format_asm(self, instrs, arch: ArchBase) -> str:
+        avg_latency = round(self.cache_miss * self.cache_latency)
+        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
+
+
+def _build_cache_mode(cache_miss: float, cache_latency: int,
+                      cache_miss_mode: str) -> _CacheMissMode:
+    """Build and return the appropriate :class:`_CacheMissMode` instance."""
+    if cache_miss <= 0:
+        return _NoCacheMiss()
+    if cache_miss_mode == "average":
+        return _AverageCacheMiss(cache_miss, cache_latency)
+    return _StochasticCacheMiss(cache_miss, cache_latency)
+
+
+# ---------------------------------------------------------------------------
+# llvm-mca runner
+# ---------------------------------------------------------------------------
 
 def _find_llvm_mca() -> str:
     """Return the path to llvm-mca, trying versioned names as fallback."""
@@ -701,25 +836,21 @@ def _parse_load_proportion(mca_output: str) -> float:
     return loads / total if total > 0 else 0.0
 
 
-def _run_mca(instrs, mca_args=(), arch: str = "x86",
-             cache_miss: float = 0.0, cache_latency: int = 0,
-             cache_miss_mode: str = "stochastic"):
+def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
+             cache_mode: _CacheMissMode = None):
     """Run llvm-mca on *instrs* and return ``(ipc, load_proportion)``, or None.
 
-    *cache_miss_mode* selects how cache misses are simulated when *cache_miss*
-    is greater than 0:
-
-    ``"stochastic"`` (default)
-        The assembly is repeated ``_CACHE_MISS_REPEAT`` (100) times with
-        ``# LLVM-MCA-LATENCY`` directives inserted deterministically so that
-        exactly *cache_miss* fraction of loads per repetition receive the full
-        *cache_latency* penalty.  ``-iterations=1`` is added to the llvm-mca
-        command so that llvm-mca does not add its own repetitions.
-
-    ``"average"``
-        Every load instruction receives a fixed latency of
-        ``round(cache_miss * cache_latency)`` cycles via ``# LLVM-MCA-LATENCY``
-        directives.  No manual repetition is applied.
+    Parameters
+    ----------
+    instrs:
+        List of ``(addr, mnemonic, operands)`` triples to analyse.
+    mca_args:
+        Extra arguments forwarded to llvm-mca (e.g. ``-march=``, ``-mcpu=``).
+    arch:
+        Architecture object.  Defaults to :class:`X86Arch` when omitted.
+    cache_mode:
+        Cache-miss simulation strategy.  Defaults to :class:`_NoCacheMiss`
+        (no simulation) when omitted.
     """
     global _LLVM_MCA
     if not instrs:
@@ -731,18 +862,14 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86",
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    if cache_miss > 0:
-        if cache_miss_mode == "average":
-            avg_latency = round(cache_miss * cache_latency)
-            asm = _format_asm_with_average_load_latency(instrs, arch, avg_latency)
-            extra = []
-        else:
-            asm = _format_asm_with_cache_miss(instrs, arch, cache_miss,
-                                              cache_latency)
-            extra = ["-iterations=1"]
-    else:
-        asm = _format_asm(instrs, arch)
-        extra = []
+    if arch is None:
+        arch = X86Arch()
+    if cache_mode is None:
+        cache_mode = _NoCacheMiss()
+
+    asm = cache_mode.format_asm(instrs, arch)
+    extra = cache_mode.extra_mca_args()
+
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
     # -instruction-info adds the per-instruction table used to extract MayLoad.
     cmd = [_LLVM_MCA, *mca_args, *extra,
@@ -758,16 +885,14 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86",
     return ipc, load_proportion
 
 
-def _yield_mca_result(instrs, mca_args, arch,
-                      cache_miss: float = 0.0, cache_latency: int = 0,
-                      cache_miss_mode: str = "stochastic"):
+def _yield_mca_result(instrs, mca_args, arch: ArchBase,
+                      cache_mode: _CacheMissMode):
     """Run llvm-mca on *instrs* and yield a ``(start, end, ipc, load_proportion)`` tuple.
 
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
-        result = _run_mca(instrs, mca_args, arch, cache_miss, cache_latency,
-                          cache_miss_mode)
+        result = _run_mca(instrs, mca_args, arch, cache_mode)
         if result is not None:
             ipc, load_proportion = result
             yield instrs[0][0], instrs[-1][0], ipc, load_proportion
@@ -777,23 +902,26 @@ def _yield_mca_result(instrs, mca_args, arch,
 # Per-function analysis
 # ---------------------------------------------------------------------------
 
-def _analyze_function(instrs, mca_args=(), arch: str = "x86",
-                      cache_miss: float = 0.0, cache_latency: int = 0,
-                      cache_miss_mode: str = "stochastic"):
+def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
+                      cache_mode: _CacheMissMode = None):
     """Analyse one function's instructions.
 
     Yields ``(start_addr, end_addr, ipc, load_proportion, kind)`` tuples for
     every loop and every basic block that is not part of a loop.  *kind* is
     ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
     """
+    if arch is None:
+        arch = X86Arch()
+    if cache_mode is None:
+        cache_mode = _NoCacheMiss()
+
     loops = _find_loops(instrs, arch)
 
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
         for start, end, ipc, lp in _yield_mca_result(region, mca_args, arch,
-                                                      cache_miss, cache_latency,
-                                                      cache_miss_mode):
+                                                      cache_mode):
             yield start, end, ipc, lp, "loop"
 
     # --- Basic blocks outside loops ---
@@ -802,22 +930,18 @@ def _analyze_function(instrs, mca_args=(), arch: str = "x86",
     for instr in non_loop:
         addr, mnemonic, operands = instr
         bb.append(instr)
-        if _ends_basic_block(mnemonic, operands, arch):
+        if arch.ends_basic_block(mnemonic, operands):
             for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch,
-                                                          cache_miss,
-                                                          cache_latency,
-                                                          cache_miss_mode):
+                                                          cache_mode):
                 yield start, end, ipc, lp, "block"
             bb = []
     for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch,
-                                                  cache_miss, cache_latency,
-                                                  cache_miss_mode):
+                                                  cache_mode):
         yield start, end, ipc, lp, "block"
 
 
-def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86",
-                           cache_miss: float = 0.0, cache_latency: int = 0,
-                           cache_miss_mode: str = "stochastic"):
+def _analyze_function_ipc(instrs, mca_args=(), arch: ArchBase = None,
+                           cache_mode: _CacheMissMode = None):
     """Compute the IPC estimate for one function.
 
     IPC_f = max { IPC_l  for l in loops inside f }
@@ -834,11 +958,15 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86",
     if not instrs:
         return None
 
+    if arch is None:
+        arch = X86Arch()
+    if cache_mode is None:
+        cache_mode = _NoCacheMiss()
+
     loop_candidates = []
     block_candidates = []
     for _, _, ipc, lp, kind in _analyze_function(instrs, mca_args, arch,
-                                                  cache_miss, cache_latency,
-                                                  cache_miss_mode):
+                                                  cache_mode):
         if ipc > 0:
             if kind == "loop":
                 loop_candidates.append((ipc, lp))
@@ -853,6 +981,77 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: str = "x86",
 
 
 # ---------------------------------------------------------------------------
+# Analyzer class — encapsulates optional analysis parameters
+# ---------------------------------------------------------------------------
+
+class Analyzer:
+    """Analyses an ELF binary using llvm-mca.
+
+    Optional analysis parameters (CPU override, analysis mode, and cache-miss
+    simulation settings) are stored as instance variables rather than being
+    threaded through every function call as positional/keyword arguments.
+
+    Parameters
+    ----------
+    binary:
+        Path to the ELF binary to analyse.
+    mcpu:
+        If non-empty, overrides the default ``-mcpu`` value chosen by
+        :func:`_detect_arch` and is forwarded to llvm-mca.
+    mode:
+        ``"blocks"`` (default) — yield ``(start, end, ipc, load_proportion)``
+        for every loop and non-loop basic block.
+
+        ``"functions"`` — yield one tuple per function where *ipc* is the
+        maximum IPC across all loops (or basic blocks when no loops exist).
+    cache_miss:
+        Fraction (0–1) of load instructions that suffer a cache miss.
+        Default is 0 (no simulation).
+    cache_latency:
+        Cache-miss penalty in cycles.  Only used when *cache_miss* > 0.
+    cache_miss_mode:
+        ``"stochastic"`` (default) or ``"average"``.  See :func:`analyze`
+        for a full description.
+    """
+
+    def __init__(self, binary: str, mcpu: str = "", mode: str = "blocks",
+                 cache_miss: float = 0.0, cache_latency: int = 0,
+                 cache_miss_mode: str = "stochastic"):
+        self.binary = binary
+        self.mcpu = mcpu
+        self.mode = mode
+        self.cache_miss = cache_miss
+        self.cache_latency = cache_latency
+        self.cache_miss_mode = cache_miss_mode
+
+    def _effective_mca_args(self, arch: ArchBase) -> list:
+        """Return mca_args for *arch*, applying any :attr:`mcpu` override."""
+        mca_args = arch.mca_args
+        if self.mcpu:
+            mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
+            mca_args = mca_args + [f"-mcpu={self.mcpu}"]
+        return mca_args
+
+    def run(self):
+        """Analyse :attr:`binary` and yield ``(start, end, ipc, load_proportion)`` tuples."""
+        arch = _detect_arch(self.binary)
+        mca_args = self._effective_mca_args(arch)
+        cache_mode = _build_cache_mode(self.cache_miss, self.cache_latency,
+                                       self.cache_miss_mode)
+
+        for _func_name, instrs in disassemble(self.binary, arch):
+            if self.mode == "functions":
+                result = _analyze_function_ipc(instrs, mca_args, arch,
+                                               cache_mode)
+                if result is not None:
+                    yield result
+            else:
+                for start, end, ipc, lp, _kind in _analyze_function(
+                        instrs, mca_args, arch, cache_mode):
+                    yield start, end, ipc, lp
+
+
+# ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
@@ -860,6 +1059,9 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
             cache_miss: float = 0.0, cache_latency: int = 0,
             cache_miss_mode: str = "stochastic"):
     """Analyse *binary* and yield result tuples.
+
+    This is a convenience wrapper around :class:`Analyzer`.  All parameters
+    are forwarded as instance variables; see :class:`Analyzer` for details.
 
     Parameters
     ----------
@@ -893,27 +1095,14 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
         ``round(cache_miss * cache_latency)`` cycles; models the case where
         all loads pay the average cache-miss cost.
     """
-    arch_info = _detect_arch(binary)
-
-    mca_args = arch_info.mca_args
-    if mcpu:
-        # Replace any existing -mcpu=... entry with the user-supplied value.
-        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
-        mca_args = mca_args + [f"-mcpu={mcpu}"]
-
-    for _func_name, instrs in disassemble(binary, arch_info.objdump,
-                                          arch_info.name):
-        if mode == "functions":
-            result = _analyze_function_ipc(instrs, mca_args, arch_info.name,
-                                           cache_miss, cache_latency,
-                                           cache_miss_mode)
-            if result is not None:
-                yield result
-        else:
-            for start, end, ipc, lp, _kind in _analyze_function(
-                    instrs, mca_args, arch_info.name, cache_miss,
-                    cache_latency, cache_miss_mode):
-                yield start, end, ipc, lp
+    return Analyzer(
+        binary=binary,
+        mcpu=mcpu,
+        mode=mode,
+        cache_miss=cache_miss,
+        cache_latency=cache_latency,
+        cache_miss_mode=cache_miss_mode,
+    ).run()
 
 
 # ---------------------------------------------------------------------------
@@ -993,24 +1182,24 @@ def main():
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
 
-    cache_miss = args.cache_miss
-    cache_latency = args.cache_latency
-    cache_miss_mode = args.cache_miss_mode
+    runner = Analyzer(
+        binary=args.binary,
+        mcpu=args.mcpu,
+        mode=args.mode,
+        cache_miss=args.cache_miss,
+        cache_latency=args.cache_latency,
+        cache_miss_mode=args.cache_miss_mode,
+    )
 
     if args.mode == "functions":
         # Function mode: one row per function, same output format as block mode.
         print("start_address,end_address,throughput,load_proportion")
-        for start, end, ipc, load_proportion in analyze(
-                args.binary, args.mcpu, mode="functions",
-                cache_miss=cache_miss, cache_latency=cache_latency,
-                cache_miss_mode=cache_miss_mode):
+        for start, end, ipc, load_proportion in runner.run():
             print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
     else:
         # Block mode (default): existing behaviour — one row per loop/BB, sorted.
         results = sorted(
-            analyze(args.binary, args.mcpu,
-                    cache_miss=cache_miss, cache_latency=cache_latency,
-                    cache_miss_mode=cache_miss_mode),
+            runner.run(),
             key=lambda x: (x[1], -x[0]))
         print("start_address,end_address,throughput,load_proportion")
         for start, end, ipc, load_proportion in results:

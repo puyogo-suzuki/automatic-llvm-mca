@@ -22,8 +22,8 @@ import analyze
 _CACHE_MISS_RATES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 
 
-def _region_cpis(region, mca_args, arch, cache_latency,
-                 cache_miss_mode="stochastic"):
+def _region_cpis(region, mca_args, arch: analyze.ArchBase, cache_latency: int,
+                 cache_miss_mode: str = "stochastic"):
     """Run llvm-mca on *region* at each cache-miss rate.
 
     Returns ``(cpis, load_proportion)`` where *cpis* is a list of CPI values
@@ -35,10 +35,11 @@ def _region_cpis(region, mca_args, arch, cache_latency,
     load_proportion = None
     for miss_rate in _CACHE_MISS_RATES:
         if load_proportion == 0:
-          cpis.append(cpis[-1])
-          continue
-        result = analyze._run_mca(region, mca_args, arch,
-                                   miss_rate, cache_latency, cache_miss_mode)
+            cpis.append(cpis[-1])
+            continue
+        cache_mode = analyze._build_cache_mode(miss_rate, cache_latency,
+                                               cache_miss_mode)
+        result = analyze._run_mca(region, mca_args, arch, cache_mode)
         if result is None:
             return None
         ipc, lp = result
@@ -71,23 +72,22 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
         *cache_latency* penalty.  ``"average"`` — all loads receive
         ``round(miss_rate * cache_latency)`` cycles.
     """
-    arch_info = analyze._detect_arch(binary)
-    mca_args = arch_info.mca_args
+    arch = analyze._detect_arch(binary)
+    mca_args = arch.mca_args
     if mcpu:
         mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
         mca_args = mca_args + [f"-mcpu={mcpu}"]
 
-    for _func_name, instrs in analyze.disassemble(binary, arch_info.objdump,
-                                                   arch_info.name):
-        loops = analyze._find_loops(instrs, arch_info.name)
+    for _func_name, instrs in analyze.disassemble(binary, arch):
+        loops = analyze._find_loops(instrs, arch)
 
         # --- Loops ---
         for ls, le in loops:
             region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
             if not region:
                 continue
-            result = _region_cpis(region, mca_args, arch_info.name,
-                                   cache_latency, cache_miss_mode)
+            result = _region_cpis(region, mca_args, arch, cache_latency,
+                                   cache_miss_mode)
             if result is not None:
                 cpis, load_proportion = result
                 yield (region[0][0], region[-1][0], load_proportion) + tuple(cpis)
@@ -99,17 +99,17 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
         for instr in non_loop:
             addr, mnemonic, operands = instr
             bb.append(instr)
-            if analyze._ends_basic_block(mnemonic, operands, arch_info.name):
+            if arch.ends_basic_block(mnemonic, operands):
                 if bb:
-                    result = _region_cpis(bb, mca_args, arch_info.name,
-                                          cache_latency, cache_miss_mode)
+                    result = _region_cpis(bb, mca_args, arch, cache_latency,
+                                          cache_miss_mode)
                     if result is not None:
                         cpis, load_proportion = result
                         yield (bb[0][0], bb[-1][0], load_proportion) + tuple(cpis)
                 bb = []
         if bb:
-            result = _region_cpis(bb, mca_args, arch_info.name, cache_latency,
-                                  cache_miss_mode)
+            result = _region_cpis(bb, mca_args, arch, cache_latency,
+                                   cache_miss_mode)
             if result is not None:
                 cpis, load_proportion = result
                 yield (bb[0][0], bb[-1][0], load_proportion) + tuple(cpis)
