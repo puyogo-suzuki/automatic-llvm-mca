@@ -811,10 +811,11 @@ class TestFormatAsmWithCacheMiss:
             )
 
     def test_deterministic_miss_positions_uniform_early_bias(self):
-        """Miss positions must follow floor(m*b/a) formula within each repetition.
+        """Miss positions must follow floor(m*b/a) and prefer earlier loads.
 
-        For b=10, a=3 the expected miss positions (0-indexed among loads) are
-        0, 3, 6 — i.e. the 1st, 4th, and 7th load in each repetition.
+        With n=10 loads/repetition and _CACHE_MISS_REPEAT=100:
+        b = 1000 and a = 300 for cache_miss=0.3.
+        The first repetition should hit 0, 3, 6 (1st, 4th, 7th loads).
         """
         # Build 10 loads with distinct operands so we can identify them.
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
@@ -822,20 +823,20 @@ class TestFormatAsmWithCacheMiss:
             instrs, "x86", cache_miss=0.3, cache_latency=999)
 
         lines = asm.splitlines()
-        miss_indices = []  # 0-indexed load positions that are misses, within one rep
+        miss_indices = []  # global 0-indexed load positions that are misses
         load_idx = 0
         for i, line in enumerate(lines):
             if "mov" in line and "(%edi)" in line:
                 # Check if the previous non-empty line is the opening directive.
                 prev = lines[i - 1] if i > 0 else ""
                 if "# LLVM-MCA-LATENCY 999" in prev:
-                    miss_indices.append(load_idx % 10)
+                    miss_indices.append(load_idx)
                 load_idx += 1
 
-        # Each repetition should contribute misses at positions 0, 3, 6.
-        expected = {0, 3, 6}
-        assert set(miss_indices) == expected, (
-            f"Expected miss positions {expected}, got {set(miss_indices)}"
+        # In the first repetition (global positions 0..9), misses are 0,3,6.
+        first_rep = [idx for idx in miss_indices if idx < 10]
+        assert first_rep == [0, 3, 6], (
+            f"Expected first repetition misses [0, 3, 6], got {first_rep}"
         )
 
     def test_deterministic_no_randomness(self):

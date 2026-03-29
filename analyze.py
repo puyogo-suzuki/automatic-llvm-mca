@@ -510,14 +510,13 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
         mov (%edi), %eax
         # LLVM-MCA-LATENCY
 
-    Let ``b`` be the number of load instructions per repetition and
-    ``a = round(cache_miss * b)``.  Within every group of ``b`` consecutive
-    loads (i.e. within each repetition of the block), exactly ``a`` loads are
-    given the latency override.  The ``a`` miss positions (0-indexed within
-    the group) are chosen as ``floor(m * b / a)`` for ``m`` in ``0..a-1``,
-    which distributes them as evenly as possible and biases misses towards the
-    beginning of each group.  For example, with ``b=10`` and ``a=3`` the miss
-    positions are 0, 3, 6 (1st, 4th, and 7th loads in the group).
+    Let ``n`` be the number of load instructions in one repetition, and
+    ``b = _CACHE_MISS_REPEAT * n`` be the total number of generated loads.
+    Let ``a = round(cache_miss * b)``.  Across all generated loads, exactly
+    ``a`` loads are given the latency override.  The ``a`` miss positions
+    (0-indexed in ``0..b-1``) are chosen as ``floor(m * b / a)`` for ``m`` in
+    ``0..a-1``, which distributes them as evenly as possible and biases misses
+    towards earlier loads.
 
     Labels are made unique per repetition so that backward branches within a
     loop still resolve to the correct iteration-local target.
@@ -534,11 +533,12 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
             if t is not None and t in addr_set:
                 labeled.add(t)
 
-    # Count load instructions per repetition to compute the deterministic miss
-    # positions: floor(m * b / a) for m in 0..a-1.
-    b = sum(
+    # n: load instructions per repetition; b: total generated load count.
+    # Miss positions are floor(m * b / a) for m in 0..a-1.
+    n = sum(
         1 for _, mn, ops in instrs if _is_load_instruction(mn, ops, arch)
     )
+    b = _CACHE_MISS_REPEAT * n
     a = round(cache_miss * b) if b > 0 else 0
     miss_positions: set[int] = (
         {int(m * b / a) for m in range(a)} if a > 0 else set()
@@ -552,9 +552,7 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
         tail = f" {operands}" if operands else ""
         is_load = _is_load_instruction(mnemonic, operands, arch)
         if is_load:
-            # miss_positions is empty when b==0 or a==0, so the short-circuit
-            # on the falsy empty-set prevents a ZeroDivisionError from % b.
-            if miss_positions and load_counter % b in miss_positions:
+            if load_counter in miss_positions:
                 lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
                 lines.append(f"\t{mnemonic}{tail}")
                 lines.append("# LLVM-MCA-LATENCY")
