@@ -33,6 +33,9 @@ def _region_cpis(region, mca_args, arch, cache_latency):
     cpis = []
     load_proportion = None
     for miss_rate in _CACHE_MISS_RATES:
+        if load_proportion == 0:
+          cpis.append(cpis[-1])
+          continue
         result = analyze._run_mca(region, mca_args, arch,
                                    miss_rate, cache_latency)
         if result is None:
