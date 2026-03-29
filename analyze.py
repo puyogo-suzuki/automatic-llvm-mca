@@ -566,12 +566,12 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
 
 def _find_llvm_mca() -> str:
     """Return the path to llvm-mca, trying versioned names as fallback."""
-    if shutil.which("llvm-mca"):
-        return "llvm-mca"
     for ver in range(30, 15, -1):
         name = f"llvm-mca-{ver}"
         if shutil.which(name):
             return name
+    if shutil.which("llvm-mca"):
+        return "llvm-mca"
     raise FileNotFoundError(
         "llvm-mca not found. Install LLVM (e.g. apt install llvm)."
     )
