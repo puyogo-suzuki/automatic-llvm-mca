@@ -22,7 +22,8 @@ import analyze
 _CACHE_MISS_RATES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 
 
-def _region_cpis(region, mca_args, arch, cache_latency):
+def _region_cpis(region, mca_args, arch, cache_latency,
+                 cache_miss_mode="stochastic"):
     """Run llvm-mca on *region* at each cache-miss rate.
 
     Returns ``(cpis, load_proportion)`` where *cpis* is a list of CPI values
@@ -37,7 +38,7 @@ def _region_cpis(region, mca_args, arch, cache_latency):
           cpis.append(cpis[-1])
           continue
         result = analyze._run_mca(region, mca_args, arch,
-                                   miss_rate, cache_latency)
+                                   miss_rate, cache_latency, cache_miss_mode)
         if result is None:
             return None
         ipc, lp = result
@@ -48,7 +49,8 @@ def _region_cpis(region, mca_args, arch, cache_latency):
     return cpis, load_proportion
 
 
-def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100):
+def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
+               cache_miss_mode: str = "stochastic"):
     """Analyse *binary* and yield CPI-vs-cache-miss tuples.
 
     Yields ``(start, end, load_proportion, cpi0, cpi10, cpi20, cpi30, cpi40,
@@ -64,6 +66,10 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100):
     cache_latency:
         Cache-miss penalty in cycles used for the ``# LLVM-MCA-LATENCY``
         directive when simulating non-zero cache-miss rates.
+    cache_miss_mode:
+        ``"stochastic"`` (default) — a fraction of loads receive the full
+        *cache_latency* penalty.  ``"average"`` — all loads receive
+        ``round(miss_rate * cache_latency)`` cycles.
     """
     arch_info = analyze._detect_arch(binary)
     mca_args = arch_info.mca_args
@@ -81,7 +87,7 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100):
             if not region:
                 continue
             result = _region_cpis(region, mca_args, arch_info.name,
-                                   cache_latency)
+                                   cache_latency, cache_miss_mode)
             if result is not None:
                 cpis, load_proportion = result
                 yield (region[0][0], region[-1][0], load_proportion) + tuple(cpis)
@@ -96,13 +102,14 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100):
             if analyze._ends_basic_block(mnemonic, operands, arch_info.name):
                 if bb:
                     result = _region_cpis(bb, mca_args, arch_info.name,
-                                          cache_latency)
+                                          cache_latency, cache_miss_mode)
                     if result is not None:
                         cpis, load_proportion = result
                         yield (bb[0][0], bb[-1][0], load_proportion) + tuple(cpis)
                 bb = []
         if bb:
-            result = _region_cpis(bb, mca_args, arch_info.name, cache_latency)
+            result = _region_cpis(bb, mca_args, arch_info.name, cache_latency,
+                                  cache_miss_mode)
             if result is not None:
                 cpis, load_proportion = result
                 yield (bb[0][0], bb[-1][0], load_proportion) + tuple(cpis)
@@ -137,6 +144,19 @@ def main():
             "for non-zero cache-miss rates."
         ),
     )
+    parser.add_argument(
+        "--cache-miss-mode",
+        choices=["stochastic", "average"],
+        default="stochastic",
+        dest="cache_miss_mode",
+        help=(
+            "Cache-miss simulation mode (default: stochastic). "
+            "'stochastic': a fraction of loads receive the full --cache-latency "
+            "penalty per sweep rate. "
+            "'average': all loads receive round(rate * --cache-latency) cycles, "
+            "modelling the average cost of cache misses on every load."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.binary):
@@ -150,7 +170,8 @@ def main():
     print(f"start_address,end_address,load_proportion,{miss_cols}")
 
     results = sorted(
-        ipc_relate(args.binary, args.mcpu, args.cache_latency),
+        ipc_relate(args.binary, args.mcpu, args.cache_latency,
+                   args.cache_miss_mode),
         # Sort by end address ascending; for equal end, larger start first
         # (inner loop before outer).  Matches analyze.py's output ordering.
         key=lambda x: (x[1], -x[0]),

@@ -913,3 +913,221 @@ class TestRunMcaCacheMissPlumbing:
         assert "-iterations=0" in captured_cmd.get("cmd", []), (
             "Expected -iterations=0 in llvm-mca command when cache_miss > 0"
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _format_asm_with_average_load_latency
+# ---------------------------------------------------------------------------
+
+class TestFormatAsmWithAverageLoadLatency:
+    """Unit tests for analyze._format_asm_with_average_load_latency."""
+
+    _LOAD_INSTRS = [
+        (0x0, "mov", "(%edi),%eax"),
+        (0x2, "add", "%eax,%edx"),
+        (0x4, "ret", ""),
+    ]
+
+    def test_all_loads_get_latency_directive(self):
+        """Every load must be wrapped with opening and closing latency directives."""
+        asm = analyze._format_asm_with_average_load_latency(
+            self._LOAD_INSTRS, "x86", latency=50)
+        assert "# LLVM-MCA-LATENCY 50" in asm
+        assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
+
+    def test_zero_latency_still_wraps_loads(self):
+        """A latency of 0 still inserts directives (latency=0 is valid)."""
+        asm = analyze._format_asm_with_average_load_latency(
+            self._LOAD_INSTRS, "x86", latency=0)
+        assert "# LLVM-MCA-LATENCY 0" in asm
+
+    def test_non_load_not_wrapped(self):
+        """Non-load instructions must not be preceded by a latency directive."""
+        asm = analyze._format_asm_with_average_load_latency(
+            self._LOAD_INSTRS, "x86", latency=75)
+        lines = asm.splitlines()
+        open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
+        for i, line in enumerate(lines):
+            if "add\t%eax,%edx" in line or "\tadd %eax,%edx" in line:
+                if i > 0:
+                    assert not open_re.search(lines[i - 1]), (
+                        f"Non-load 'add' must not be preceded by an opening "
+                        f"LLVM-MCA-LATENCY directive. Line before: {lines[i-1]!r}"
+                    )
+
+    def test_no_repetition(self):
+        """The instruction block must appear exactly once (no repetition)."""
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "ret", "")]
+        asm = analyze._format_asm_with_average_load_latency(
+            instrs, "x86", latency=10)
+        # Load appears once; not repeated 100 times like stochastic mode.
+        assert asm.count("mov (%edi),%eax") == 1
+
+    def test_lmca_end_label_present(self):
+        """The closing .Lmca_end: label must be present."""
+        asm = analyze._format_asm_with_average_load_latency(
+            self._LOAD_INSTRS, "x86", latency=0)
+        assert ".Lmca_end:" in asm
+
+    def test_no_loads_no_latency_directives(self):
+        """A block with no loads must produce no LLVM-MCA-LATENCY directives."""
+        instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
+        asm = analyze._format_asm_with_average_load_latency(
+            instrs, "x86", latency=100)
+        assert "LLVM-MCA-LATENCY" not in asm
+
+    def test_multiple_loads_all_wrapped(self):
+        """All load instructions in a block must each be wrapped."""
+        instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
+        asm = analyze._format_asm_with_average_load_latency(
+            instrs, "x86", latency=30)
+        # There should be exactly 5 opening latency directives.
+        assert asm.count("# LLVM-MCA-LATENCY 30") == 5
+
+    def test_deterministic(self):
+        """Two calls with the same arguments produce identical output."""
+        instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(3)]
+        asm1 = analyze._format_asm_with_average_load_latency(
+            instrs, "x86", latency=20)
+        asm2 = analyze._format_asm_with_average_load_latency(
+            instrs, "x86", latency=20)
+        assert asm1 == asm2
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _run_mca average mode plumbing (monkeypatched)
+# ---------------------------------------------------------------------------
+
+class TestRunMcaAverageModePlumbing:
+    """Verify that _run_mca uses the average-mode formatter when requested."""
+
+    def test_average_mode_uses_format_asm_with_average_load_latency(
+            self, monkeypatch):
+        """With cache_miss_mode='average' and cache_miss>0,
+        _format_asm_with_average_load_latency is called with the correct
+        effective latency (round(cache_miss * cache_latency))."""
+        called = {}
+
+        def fake_format_avg(instrs, arch, latency):
+            called["latency"] = latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+                            fake_format_avg)
+        monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
+
+        class FakeProc:
+            returncode = 0
+            stdout = "IPC: 2.00\n"
+            stderr = ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
+
+        analyze._run_mca(
+            [(0x0, "nop", "")],
+            cache_miss=0.3, cache_latency=100,
+            cache_miss_mode="average",
+        )
+        assert "latency" in called, (
+            "Expected _format_asm_with_average_load_latency to be called"
+        )
+        assert called["latency"] == 30, (
+            f"Expected effective latency round(0.3*100)=30, got {called['latency']}"
+        )
+
+    def test_average_mode_no_iterations_flag(self, monkeypatch):
+        """Average mode must NOT add -iterations=1 to the llvm-mca command."""
+        captured_cmd = {}
+
+        monkeypatch.setattr(
+            analyze, "_format_asm_with_average_load_latency",
+            lambda *a, **kw: "\tnop\n.Lmca_end:\n",
+        )
+        monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
+
+        class FakeProc:
+            returncode = 0
+            stdout = "IPC: 1.00\n"
+            stderr = ""
+
+        def fake_run(cmd, **kw):
+            captured_cmd["cmd"] = cmd
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        analyze._run_mca(
+            [(0x0, "nop", "")],
+            cache_miss=0.5, cache_latency=100,
+            cache_miss_mode="average",
+        )
+        assert "-iterations=1" not in captured_cmd.get("cmd", []), (
+            "Average mode must not add -iterations=1 to the llvm-mca command"
+        )
+
+    def test_stochastic_mode_still_uses_cache_miss_formatter(self, monkeypatch):
+        """Stochastic mode (default) still uses _format_asm_with_cache_miss."""
+        called = {}
+
+        def fake_format_stochastic(instrs, arch, cache_miss, cache_latency):
+            called["stochastic"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss",
+                            fake_format_stochastic)
+        monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
+
+        class FakeProc:
+            returncode = 0
+            stdout = "IPC: 1.00\n"
+            stderr = ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
+
+        analyze._run_mca(
+            [(0x0, "nop", "")],
+            cache_miss=0.5, cache_latency=100,
+            cache_miss_mode="stochastic",
+        )
+        assert called.get("stochastic"), (
+            "Expected _format_asm_with_cache_miss to be called in stochastic mode"
+        )
+
+    def test_average_mode_effective_latency_rounding(self, monkeypatch):
+        """round(cache_miss * cache_latency) is used as the effective latency."""
+        # 0.5 * 7 = 3.5 → round(3.5) = 4 (Python banker's rounding: rounds to even)
+        # 0.4 * 7 = 2.8 → round(2.8) = 3
+        cases = [
+            (0.4, 7, round(0.4 * 7)),
+            (0.5, 7, round(0.5 * 7)),
+            (1.0, 50, 50),
+            (0.0, 100, 0),
+        ]
+        for cache_miss, cache_latency, expected in cases:
+            called = {}
+
+            def fake_format_avg(instrs, arch, latency, _expected=expected):
+                called["latency"] = latency
+                return "\tnop\n.Lmca_end:\n"
+
+            monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+                                fake_format_avg)
+            monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
+
+            class FakeProc:
+                returncode = 0
+                stdout = "IPC: 1.00\n"
+                stderr = ""
+
+            monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
+
+            if cache_miss > 0:
+                analyze._run_mca(
+                    [(0x0, "nop", "")],
+                    cache_miss=cache_miss, cache_latency=cache_latency,
+                    cache_miss_mode="average",
+                )
+                assert called.get("latency") == expected, (
+                    f"cache_miss={cache_miss}, cache_latency={cache_latency}: "
+                    f"expected latency {expected}, got {called.get('latency')}"
+                )
