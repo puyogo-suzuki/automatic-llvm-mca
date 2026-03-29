@@ -23,7 +23,6 @@ Usage:
 import argparse
 import os
 import platform
-import random
 import re
 import shutil
 import subprocess
@@ -501,16 +500,24 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
                                  cache_latency: int = 0) -> str:
     """Format *instrs* as assembly for llvm-mca with cache-miss simulation.
 
-    The code block is repeated ``_CACHE_MISS_REPEAT`` times.  For each
-    repetition, every load instruction is independently given a probability
-    *cache_miss* of receiving an ``# LLVM-MCA-LATENCY`` override with the
-    value *cache_latency* (simulating a cache miss):
+    The code block is repeated ``_CACHE_MISS_REPEAT`` times.  Cache misses
+    are inserted deterministically so that exactly the guaranteed fraction of
+    load instructions receive an ``# LLVM-MCA-LATENCY`` override:
 
     .. code-block:: asm
 
         # LLVM-MCA-LATENCY 100
         mov (%edi), %eax
         # LLVM-MCA-LATENCY
+
+    Let ``b`` be the number of load instructions per repetition and
+    ``a = round(cache_miss * b)``.  Within every group of ``b`` consecutive
+    loads (i.e. within each repetition of the block), exactly ``a`` loads are
+    given the latency override.  The ``a`` miss positions (0-indexed within
+    the group) are chosen as ``floor(m * b / a)`` for ``m`` in ``0..a-1``,
+    which distributes them as evenly as possible and biases misses towards the
+    beginning of each group.  For example, with ``b=10`` and ``a=3`` the miss
+    positions are 0, 3, 6 (1st, 4th, and 7th loads in the group).
 
     Labels are made unique per repetition so that backward branches within a
     loop still resolve to the correct iteration-local target.
@@ -527,14 +534,33 @@ def _format_asm_with_cache_miss(instrs, arch: str = "x86",
             if t is not None and t in addr_set:
                 labeled.add(t)
 
+    # Count load instructions per repetition to compute the deterministic miss
+    # positions: floor(m * b / a) for m in 0..a-1.
+    b = sum(
+        1 for _, mn, ops in instrs if _is_load_instruction(mn, ops, arch)
+    )
+    a = round(cache_miss * b) if b > 0 else 0
+    miss_positions: set[int] = (
+        {int(m * b / a) for m in range(a)} if a > 0 else set()
+    )
+
+    load_counter = 0
+
     def _emit(mnemonic, operands, lines):
         """Append the instruction, wrapping loads with latency directives."""
+        nonlocal load_counter
         tail = f" {operands}" if operands else ""
         is_load = _is_load_instruction(mnemonic, operands, arch)
-        if is_load and random.random() < cache_miss:
-            lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
-            lines.append(f"\t{mnemonic}{tail}")
-            lines.append("# LLVM-MCA-LATENCY")
+        if is_load:
+            # miss_positions is empty when b==0 or a==0, so the short-circuit
+            # on the falsy empty-set prevents a ZeroDivisionError from % b.
+            if miss_positions and load_counter % b in miss_positions:
+                lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
+                lines.append(f"\t{mnemonic}{tail}")
+                lines.append("# LLVM-MCA-LATENCY")
+            else:
+                lines.append(f"\t{mnemonic}{tail}")
+            load_counter += 1
         else:
             lines.append(f"\t{mnemonic}{tail}")
 
@@ -634,8 +660,9 @@ def _run_mca(instrs, mca_args=(), arch: str = "x86",
 
     When *cache_miss* is greater than 0 the assembly is repeated
     ``_CACHE_MISS_REPEAT`` (100) times with cache-miss latency directives
-    randomly inserted for load instructions (probability = *cache_miss*,
-    latency = *cache_latency* cycles).  ``-iterations=1`` is added to the
+    inserted deterministically for load instructions (exactly *cache_miss*
+    fraction of loads per repetition, latency = *cache_latency* cycles).
+    ``-iterations=1`` is added to the
     llvm-mca command so that llvm-mca does not add its own repetitions.
     """
     global _LLVM_MCA
@@ -780,10 +807,11 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
         ``ipc = max { IPC_l  for all loops l in f }`` (or the max over basic
         blocks when the function has no loops).
     cache_miss:
-        Probability (0–1) that a load instruction suffers a cache miss.
+        Fraction (0–1) of load instructions that suffer a cache miss.
         When greater than 0 the code block is repeated 100 times with
-        ``# LLVM-MCA-LATENCY`` directives randomly inserted for load
-        instructions, and llvm-mca is invoked with ``-iterations=1``.
+        ``# LLVM-MCA-LATENCY`` directives inserted deterministically for load
+        instructions (exactly the specified fraction per repetition), and
+        llvm-mca is invoked with ``-iterations=1``.
         Default is 0 (no cache-miss simulation).
     cache_latency:
         Cache-miss penalty in cycles inserted via the ``# LLVM-MCA-LATENCY``

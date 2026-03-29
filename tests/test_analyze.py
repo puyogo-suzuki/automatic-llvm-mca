@@ -794,6 +794,59 @@ class TestFormatAsmWithCacheMiss:
             self._LOAD_INSTRS, "x86", cache_miss=0.0, cache_latency=0)
         assert asm.count(".Lmca_end:") == 1
 
+    def test_deterministic_exact_miss_count(self):
+        """Cache miss count must equal round(cache_miss * loads_per_block) per repetition."""
+        # Block has one load instruction (mov), repeated 100 times.
+        # cache_miss=0.3 → a=round(0.3*1)=0 → no misses expected.
+        # Use a block with 10 loads so we can check various rates precisely.
+        instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
+        for rate, expected_per_rep in [(0.0, 0), (0.3, 3), (0.5, 5), (1.0, 10)]:
+            asm = analyze._format_asm_with_cache_miss(
+                instrs, "x86", cache_miss=rate, cache_latency=100)
+            # Count opening latency directives (one per cache-miss event).
+            total_misses = asm.count("# LLVM-MCA-LATENCY 100")
+            assert total_misses == expected_per_rep * 100, (
+                f"cache_miss={rate}: expected {expected_per_rep * 100} misses "
+                f"total, got {total_misses}"
+            )
+
+    def test_deterministic_miss_positions_uniform_early_bias(self):
+        """Miss positions must follow floor(m*b/a) formula within each repetition.
+
+        For b=10, a=3 the expected miss positions (0-indexed among loads) are
+        0, 3, 6 — i.e. the 1st, 4th, and 7th load in each repetition.
+        """
+        # Build 10 loads with distinct operands so we can identify them.
+        instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
+        asm = analyze._format_asm_with_cache_miss(
+            instrs, "x86", cache_miss=0.3, cache_latency=999)
+
+        lines = asm.splitlines()
+        miss_indices = []  # 0-indexed load positions that are misses, within one rep
+        load_idx = 0
+        for i, line in enumerate(lines):
+            if "mov" in line and "(%edi)" in line:
+                # Check if the previous non-empty line is the opening directive.
+                prev = lines[i - 1] if i > 0 else ""
+                if "# LLVM-MCA-LATENCY 999" in prev:
+                    miss_indices.append(load_idx % 10)
+                load_idx += 1
+
+        # Each repetition should contribute misses at positions 0, 3, 6.
+        expected = {0, 3, 6}
+        assert set(miss_indices) == expected, (
+            f"Expected miss positions {expected}, got {set(miss_indices)}"
+        )
+
+    def test_deterministic_no_randomness(self):
+        """Two calls with the same arguments must produce identical output."""
+        instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
+        asm1 = analyze._format_asm_with_cache_miss(
+            instrs, "x86", cache_miss=0.4, cache_latency=200)
+        asm2 = analyze._format_asm_with_cache_miss(
+            instrs, "x86", cache_miss=0.4, cache_latency=200)
+        assert asm1 == asm2, "Output must be deterministic across calls"
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — _run_mca cache-miss plumbing (monkeypatched)
