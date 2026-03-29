@@ -130,9 +130,9 @@ class ArchBase:
     #: Short architecture tag (set by subclasses as a class attribute).
     name: str = ""
 
-    def __init__(self, objdump: str, mca_args: list):
+    def __init__(self, objdump: str = "objdump", mca_args: list = None):
         self._objdump = objdump
-        self._mca_args = list(mca_args)
+        self._mca_args = list(mca_args) if mca_args is not None else []
 
     @property
     def objdump(self) -> str:
