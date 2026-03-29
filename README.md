@@ -26,6 +26,25 @@ are reported separately.
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
+### Cache-miss sensitivity (CPI vs cache-miss rate)
+
+`ipc_relate.py` reports how the estimated CPI (the reciprocal of IPC) changes as
+the cache-miss rate for load instructions increases.
+
+```
+python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] <elf-binary>
+```
+
+* `--cache-latency` (default: 100) sets the latency (cycles) used for simulated
+  cache misses via `# LLVM-MCA-LATENCY` directives.
+* The script runs `llvm-mca` for each loop and basic block at cache-miss rates
+  0%, 10%, 20%, 30%, 40%, 50% and writes:
+
+```
+start_address,end_address,load_proportion,cpi0,cpi10,cpi20,cpi30,cpi40,cpi50
+0xSTART,0xEND,LOAD_PROP,CPI0,CPI10,CPI20,CPI30,CPI40,CPI50
+```
+
 ## How llvm-mca handles jump instructions
 
 `llvm-mca` models throughput by simulating a **fixed instruction stream**
