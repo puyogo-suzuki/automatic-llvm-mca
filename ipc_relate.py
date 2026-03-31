@@ -2,12 +2,12 @@
 """ipc_relate.py: Estimate CPI at varying instructions-per-cache-miss rates for ELF binaries.
 
 For each basic block / loop in the binary, estimates CPI (= 1/IPC) at
-instructions-per-cache-miss values of 1, 10, 20, 50, 100, and infinity
+instructions-per-cache-miss values of 1, 5, 10, 100, 1000, and infinity
 (no cache miss) using llvm-mca.
 
 Output CSV columns:
   start_address, end_address, load_proportion,
-  cpi_ipcm1, cpi_ipcm10, cpi_ipcm20, cpi_ipcm50, cpi_ipcm100, cpi_ipcm_inf
+  cpi_ipcm1, cpi_ipcm5, cpi_ipcm10, cpi_ipcm100, cpi_ipcm1000, cpi_ipcm_inf
 
 Usage:
   python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] <elf-binary>
@@ -22,7 +22,7 @@ import analyze
 
 # Instructions-per-cache-miss values to sweep over.
 # float('inf') represents no cache miss.
-_INSTRUCTIONS_PER_CACHE_MISS = [1, 10, 20, 50, 100, float("inf")]
+_INSTRUCTIONS_PER_CACHE_MISS = [1, 5, 10, 100, 1000, float("inf")]
 
 
 def _region_cpis(region, mca_args, arch: analyze.ArchBase, cache_latency: int,
@@ -57,8 +57,8 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
                cache_miss_mode: str = "stochastic"):
     """Analyse *binary* and yield CPI-vs-instructions-per-cache-miss tuples.
 
-    Yields ``(start, end, load_proportion, cpi_ipcm1, cpi_ipcm10, cpi_ipcm20,
-    cpi_ipcm50, cpi_ipcm100, cpi_ipcm_inf)`` for every loop and non-loop
+    Yields ``(start, end, load_proportion, cpi_ipcm1, cpi_ipcm5, cpi_ipcm10,
+    cpi_ipcm100, cpi_ipcm1000, cpi_ipcm_inf)`` for every loop and non-loop
     basic block in the binary.
 
     Parameters
