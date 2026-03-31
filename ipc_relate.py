@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""ipc_relate.py: Estimate CPI at varying cache-miss rates for ELF binaries.
+"""ipc_relate.py: Estimate CPI at varying instructions-per-cache-miss rates for ELF binaries.
 
 For each basic block / loop in the binary, estimates CPI (= 1/IPC) at
-cache-miss rates of 0%, 10%, 20%, 30%, 40%, and 50% using llvm-mca.
+instructions-per-cache-miss values of 1, 10, 20, 50, 100, and infinity
+(no cache miss) using llvm-mca.
 
 Output CSV columns:
   start_address, end_address, load_proportion,
-  cpi0, cpi10, cpi20, cpi30, cpi40, cpi50
+  cpi_ipcm1, cpi_ipcm10, cpi_ipcm20, cpi_ipcm50, cpi_ipcm100, cpi_ipcm_inf
 
 Usage:
   python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] <elf-binary>
@@ -18,26 +19,27 @@ import sys
 
 import analyze
 
-# Cache-miss rates (as fractions) to sweep over.
-_CACHE_MISS_RATES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+# Instructions-per-cache-miss values to sweep over.
+# float('inf') represents no cache miss.
+_INSTRUCTIONS_PER_CACHE_MISS = [1, 10, 20, 50, 100, float("inf")]
 
 
 def _region_cpis(region, mca_args, arch: analyze.ArchBase, cache_latency: int,
                  cache_miss_mode: str = "stochastic"):
-    """Run llvm-mca on *region* at each cache-miss rate.
+    """Run llvm-mca on *region* at each instructions-per-cache-miss value.
 
     Returns ``(cpis, load_proportion)`` where *cpis* is a list of CPI values
-    (one per entry in ``_CACHE_MISS_RATES``) and *load_proportion* is taken
-    from the zero-miss-rate run.  Returns ``None`` if llvm-mca fails for any
-    rate.
+    (one per entry in ``_INSTRUCTIONS_PER_CACHE_MISS``) and *load_proportion*
+    is taken from the no-miss run.  Returns ``None`` if llvm-mca fails for any
+    value.
     """
     cpis = []
     load_proportion = None
-    for miss_rate in _CACHE_MISS_RATES:
+    for ipcm in _INSTRUCTIONS_PER_CACHE_MISS:
         if load_proportion == 0:
             cpis.append(cpis[-1])
             continue
-        cache_mode = analyze._build_cache_mode(miss_rate, cache_latency,
+        cache_mode = analyze._build_cache_mode(ipcm, cache_latency,
                                                cache_miss_mode)
         result = analyze._run_mca(region, mca_args, arch, cache_mode)
         if result is None:
@@ -52,10 +54,11 @@ def _region_cpis(region, mca_args, arch: analyze.ArchBase, cache_latency: int,
 
 def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
                cache_miss_mode: str = "stochastic"):
-    """Analyse *binary* and yield CPI-vs-cache-miss tuples.
+    """Analyse *binary* and yield CPI-vs-instructions-per-cache-miss tuples.
 
-    Yields ``(start, end, load_proportion, cpi0, cpi10, cpi20, cpi30, cpi40,
-    cpi50)`` for every loop and non-loop basic block in the binary.
+    Yields ``(start, end, load_proportion, cpi_ipcm1, cpi_ipcm10, cpi_ipcm20,
+    cpi_ipcm50, cpi_ipcm100, cpi_ipcm_inf)`` for every loop and non-loop
+    basic block in the binary.
 
     Parameters
     ----------
@@ -66,11 +69,12 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
         architecture auto-detection and is forwarded to llvm-mca.
     cache_latency:
         Cache-miss penalty in cycles used for the ``# LLVM-MCA-LATENCY``
-        directive when simulating non-zero cache-miss rates.
+        directive when simulating finite instructions-per-cache-miss values.
     cache_miss_mode:
         ``"stochastic"`` (default) — a fraction of loads receive the full
-        *cache_latency* penalty.  ``"average"`` — all loads receive
-        ``round(miss_rate * cache_latency)`` cycles.
+        *cache_latency* penalty, derived from the instructions-per-cache-miss
+        ratio.  ``"average"`` — all loads receive an average latency computed
+        from the ratio.
     """
     arch = analyze._detect_arch(binary)
     mca_args = arch.mca_args
@@ -118,8 +122,8 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Estimate CPI at varying cache-miss rates for an ELF binary "
-            "using llvm-mca."
+            "Estimate CPI at varying instructions-per-cache-miss values for "
+            "an ELF binary using llvm-mca."
         )
     )
     parser.add_argument("binary", help="Path to the ELF binary to analyse")
@@ -141,7 +145,7 @@ def main():
         help=(
             "Cache-miss latency in cycles (>=0, default 100). "
             "Used as the latency value in the # LLVM-MCA-LATENCY directive "
-            "for non-zero cache-miss rates."
+            "for finite instructions-per-cache-miss values."
         ),
     )
     parser.add_argument(
@@ -151,10 +155,11 @@ def main():
         dest="cache_miss_mode",
         help=(
             "Cache-miss simulation mode (default: stochastic). "
-            "'stochastic': a fraction of loads receive the full --cache-latency "
-            "penalty per sweep rate. "
-            "'average': all loads receive round(rate * --cache-latency) cycles, "
-            "modelling the average cost of cache misses on every load."
+            "'stochastic': load instructions receive the full --cache-latency "
+            "penalty according to the effective miss fraction derived from the "
+            "instructions-per-cache-miss ratio. "
+            "'average': all loads receive an average latency derived from the "
+            "instructions-per-cache-miss ratio and --cache-latency."
         ),
     )
     args = parser.parse_args()
@@ -164,10 +169,11 @@ def main():
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
 
-    miss_cols = ",".join(
-        f"cpi{int(r * 100)}" for r in _CACHE_MISS_RATES
-    )
-    print(f"start_address,end_address,load_proportion,{miss_cols}")
+    def _col_name(ipcm):
+        return "cpi_ipcm_inf" if ipcm == float("inf") else f"cpi_ipcm{int(ipcm)}"
+
+    ipcm_cols = ",".join(_col_name(ipcm) for ipcm in _INSTRUCTIONS_PER_CACHE_MISS)
+    print(f"start_address,end_address,load_proportion,{ipcm_cols}")
 
     results = sorted(
         ipc_relate(args.binary, args.mcpu, args.cache_latency,

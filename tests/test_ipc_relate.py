@@ -39,7 +39,7 @@ long sum(long *a, int n) {
 }
 """
 
-_EXPECTED_COLS = 3 + len(ipc_relate._CACHE_MISS_RATES)  # start, end, lp, cpi*
+_EXPECTED_COLS = 3 + len(ipc_relate._INSTRUCTIONS_PER_CACHE_MISS)  # start, end, lp, cpi*
 
 
 # ---------------------------------------------------------------------------
@@ -129,19 +129,19 @@ def aarch64_obj():
 # Unit tests — _CACHE_MISS_RATES constant
 # ---------------------------------------------------------------------------
 
-class TestCacheMissRates:
-    """Sanity checks on the _CACHE_MISS_RATES constant."""
+class TestInstructionsPerCacheMiss:
+    """Sanity checks on the _INSTRUCTIONS_PER_CACHE_MISS constant."""
 
     def test_length(self):
-        """There are 6 cache-miss rate steps (0%, 10%, …, 50%)."""
-        assert len(ipc_relate._CACHE_MISS_RATES) == 6
+        """There are 6 instructions-per-cache-miss steps (1, 10, 20, 50, 100, inf)."""
+        assert len(ipc_relate._INSTRUCTIONS_PER_CACHE_MISS) == 6
 
     def test_values(self):
-        """The rates are 0.0, 0.1, 0.2, 0.3, 0.4, 0.5."""
-        assert ipc_relate._CACHE_MISS_RATES == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        """The values are 1, 10, 20, 50, 100, inf."""
+        assert ipc_relate._INSTRUCTIONS_PER_CACHE_MISS == [1, 10, 20, 50, 100, float("inf")]
 
     def test_strictly_increasing(self):
-        rates = ipc_relate._CACHE_MISS_RATES
+        rates = ipc_relate._INSTRUCTIONS_PER_CACHE_MISS
         assert all(rates[i] < rates[i + 1] for i in range(len(rates) - 1))
 
 
@@ -163,7 +163,7 @@ class TestRegionCpis:
         )
         assert result is not None
         cpis, load_proportion = result
-        assert len(cpis) == len(ipc_relate._CACHE_MISS_RATES)
+        assert len(cpis) == len(ipc_relate._INSTRUCTIONS_PER_CACHE_MISS)
         assert abs(load_proportion - 0.25) < 1e-9
 
     def test_cpi_is_reciprocal_of_ipc(self, monkeypatch):
