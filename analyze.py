@@ -881,7 +881,8 @@ def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
 
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
     # -instruction-info adds the per-instruction table used to extract MayLoad.
-    cmd = [_LLVM_MCA, *mca_args, *extra, "-instruction-info", "-"]
+    cmd = [_LLVM_MCA, *mca_args, *extra,
+           "--call-latency=0", "-instruction-info", "-"]
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None
