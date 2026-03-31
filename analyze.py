@@ -808,7 +808,12 @@ class _AverageCacheMiss(_CacheMissMode):
 
 def _build_cache_mode(instructions_per_cache_miss: float, cache_latency: int,
                       cache_miss_mode: str) -> _CacheMissMode:
-    """Build and return the appropriate :class:`_CacheMissMode` instance."""
+    """Build and return the appropriate :class:`_CacheMissMode` instance.
+
+    *instructions_per_cache_miss* must be positive and finite for a
+    cache-miss simulation to be applied.  ``float('inf')``, zero, or negative
+    values all result in :class:`_NoCacheMiss` (no simulation).
+    """
     if math.isinf(instructions_per_cache_miss) or instructions_per_cache_miss <= 0:
         return _NoCacheMiss()
     if cache_miss_mode == "average":

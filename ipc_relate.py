@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import sys
 
@@ -170,7 +171,7 @@ def main():
         parser.error("--cache-latency must be >= 0")
 
     def _col_name(ipcm):
-        return "cpi_ipcm_inf" if ipcm == float("inf") else f"cpi_ipcm{int(ipcm)}"
+        return "cpi_ipcm_inf" if math.isinf(ipcm) else f"cpi_ipcm{int(ipcm)}"
 
     ipcm_cols = ",".join(_col_name(ipcm) for ipcm in _INSTRUCTIONS_PER_CACHE_MISS)
     print(f"start_address,end_address,load_proportion,{ipcm_cols}")
