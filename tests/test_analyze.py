@@ -1027,19 +1027,19 @@ class TestFormatAsmWithAverageLoadLatency:
 class TestRunMcaAverageModePlumbing:
     """Verify that _run_mca uses the average-mode formatter when requested."""
 
-    def test_average_mode_uses_format_asm_with_average_load_latency(
+    def test_average_mode_uses_format_asm_with_per_load_latencies(
             self, monkeypatch):
         """With _AverageCacheMiss and load instructions,
-        _format_asm_with_average_load_latency is called with the correct
-        effective latency derived from instructions_per_cache_miss."""
+        _format_asm_with_per_load_latencies is called with Bresenham latencies."""
         called = {}
 
-        def fake_format_avg(instrs, arch, latency):
-            called["latency"] = latency
+        def fake_per_load(instrs, arch, latencies, repeat=1):
+            called["latencies"] = latencies
+            called["repeat"] = repeat
             return "\tnop\n.Lmca_end:\n"
 
-        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
-                            fake_format_avg)
+        monkeypatch.setattr(analyze, "_format_asm_with_per_load_latencies",
+                            fake_per_load)
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
 
         class FakeProc:
@@ -1049,19 +1049,23 @@ class TestRunMcaAverageModePlumbing:
 
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
 
-        # Region: 2 instructions, 1 load (mov + add).
-        # ipcm=10, latency=100 → expected_misses=2/10=0.2,
-        # avg_latency=round(0.2/1*100)=20
-        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
+        # Region: 10 instrs, 1 load, ipcm=10 → expected_misses=1.0
+        # _bresenham_load_misses(1.0, 1) = [1] → latencies=[100]
+        instrs = [(0x0, "mov", "(%edi),%eax")] + [
+            (0x2 + i * 2, "add", "%eax,%edx") for i in range(9)
+        ]
         analyze._run_mca(
             instrs,
             cache_mode=analyze._AverageCacheMiss(10, 100),
         )
-        assert "latency" in called, (
-            "Expected _format_asm_with_average_load_latency to be called"
+        assert "latencies" in called, (
+            "Expected _format_asm_with_per_load_latencies to be called"
         )
-        assert called["latency"] == 20, (
-            f"Expected effective latency round(2/10/1*100)=20, got {called['latency']}"
+        assert called["latencies"] == [100], (
+            f"Expected latencies=[100] for 1 miss * 100 cycles, got {called['latencies']}"
+        )
+        assert called.get("repeat", 1) == 1, (
+            "Average mode must not repeat the block"
         )
 
     def test_average_mode_no_iterations_flag(self, monkeypatch):
@@ -1069,7 +1073,7 @@ class TestRunMcaAverageModePlumbing:
         captured_cmd = {}
 
         monkeypatch.setattr(
-            analyze, "_format_asm_with_average_load_latency",
+            analyze, "_format_asm_with_per_load_latencies",
             lambda *a, **kw: "\tnop\n.Lmca_end:\n",
         )
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
@@ -1122,53 +1126,164 @@ class TestRunMcaAverageModePlumbing:
             "Expected _format_asm_with_cache_miss to be called in stochastic mode"
         )
 
-    def test_average_mode_effective_latency_rounding(self, monkeypatch):
-        """(num_instrs / ipcm / num_loads * cache_latency) rounded correctly.
+    def test_average_mode_bresenham_latency_distribution(self, monkeypatch):
+        """_AverageCacheMiss uses Bresenham distribution for per-load latencies.
 
-        Region: 2 instructions (mov load + add), 1 load.
-        avg_latency = round(2 / ipcm / 1 * cache_latency).
+        Region: 3 loads, expected_misses=8.0 (ipcm=1, 8 instrs).
+        _bresenham_load_misses(8.0, 3) = [3, 2, 3] → latencies=[300, 200, 300].
         """
-        # 2/ipcm * cache_latency:
-        #   ipcm=5, lat=7  → round(2/5*7)   = round(2.8) = 3
-        #   ipcm=4, lat=7  → round(2/4*7)   = round(3.5) = 4 (banker's: even)
-        #   ipcm=1, lat=50 → round(2/1*50)  = 100
-        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
-        cases = [
-            (5,  7,  round(2 / 5 * 7)),
-            (4,  7,  round(2 / 4 * 7)),
-            (1, 50,  round(2 / 1 * 50)),
+        called = {}
+
+        def fake_per_load(instrs, arch, latencies, repeat=1):
+            called["latencies"] = latencies
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_per_load_latencies",
+                            fake_per_load)
+
+        # 8 instrs total, 3 loads: expected_misses = 8/1 = 8.0
+        # round(8*(i+1)/3) - round(8*i/3) for i=0,1,2:
+        #   i=0: round(8/3)  - 0 = 3 - 0 = 3
+        #   i=1: round(16/3) - 3 = 5 - 3 = 2
+        #   i=2: round(24/3) - 5 = 8 - 5 = 3
+        instrs = [
+            (0x0, "mov", "(%edi),%eax"),   # load 0
+            (0x2, "add", "%eax,%edx"),
+            (0x4, "mov", "(%esi),%ebx"),   # load 1
+            (0x6, "add", "%ebx,%ecx"),
+            (0x8, "mov", "(%ebx),%ecx"),   # load 2
+            (0xa, "add", "%ecx,%edx"),
+            (0xc, "add", "%edx,%eax"),
+            (0xe, "ret", ""),
         ]
-        for ipcm, cache_latency, expected in cases:
-            called = {}
+        mode = analyze._AverageCacheMiss(instructions_per_cache_miss=1,
+                                          cache_latency=100)
+        mode.format_asm(instrs, analyze.X86Arch())
 
-            def fake_format_avg(instrs, arch, latency, _expected=expected):
-                called["latency"] = latency
-                return "\tnop\n.Lmca_end:\n"
-
-            monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
-                                fake_format_avg)
-            monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
-
-            class FakeProc:
-                returncode = 0
-                stdout = "IPC: 1.00\n"
-                stderr = ""
-
-            monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
-
-            analyze._run_mca(
-                instrs,
-                cache_mode=analyze._AverageCacheMiss(ipcm, cache_latency),
-            )
-            assert called.get("latency") == expected, (
-                f"ipcm={ipcm}, cache_latency={cache_latency}: "
-                f"expected latency {expected}, got {called.get('latency')}"
-            )
+        assert called.get("latencies") == [300, 200, 300], (
+            f"Expected Bresenham latencies [300, 200, 300], got {called.get('latencies')}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Unit tests — instructions-per-cache-miss (IPCM) logic
 # ---------------------------------------------------------------------------
+
+class TestBresenhamLoadMisses:
+    """Verify _bresenham_load_misses distributes misses correctly."""
+
+    def test_even_split_two_loads(self):
+        """10 misses across 2 loads → [5, 5]."""
+        assert analyze._bresenham_load_misses(10.0, 2) == [5, 5]
+
+    def test_bresenham_three_loads_total_8(self):
+        """8 misses across 3 loads → [3, 2, 3].
+
+        round(8*1/3)=3, round(8*2/3)=5, round(8*3/3)=8
+        deltas: 3-0=3, 5-3=2, 8-5=3
+        """
+        assert analyze._bresenham_load_misses(8.0, 3) == [3, 2, 3]
+
+    def test_bresenham_three_loads_total_11(self):
+        """11 misses across 3 loads → [4, 3, 4].
+
+        round(11*1/3)=4, round(11*2/3)=7, round(11*3/3)=11
+        deltas: 4-0=4, 7-4=3, 11-7=4
+        """
+        assert analyze._bresenham_load_misses(11.0, 3) == [4, 3, 4]
+
+    def test_sum_equals_round_of_expected(self):
+        """Sum of misses equals round(expected_misses)."""
+        for n_loads in [1, 2, 3, 5, 7]:
+            for expected in [0.2, 1.0, 3.3, 7.5, 10.0]:
+                misses = analyze._bresenham_load_misses(expected, n_loads)
+                assert sum(misses) == round(expected), (
+                    f"n_loads={n_loads}, expected={expected}: "
+                    f"sum={sum(misses)}, round(expected)={round(expected)}"
+                )
+
+    def test_each_load_gets_at_least_floor_misses(self):
+        """Every load gets either floor or ceil of the average."""
+        import math as _math
+        for n_loads in [2, 3, 5]:
+            for expected in [1.0, 3.0, 7.5]:
+                misses = analyze._bresenham_load_misses(expected, n_loads)
+                avg = expected / n_loads
+                for m in misses:
+                    assert m in (_math.floor(avg), _math.ceil(avg)), (
+                        f"n_loads={n_loads}, expected={expected}: "
+                        f"miss count {m} is not floor({avg}) or ceil({avg})"
+                    )
+
+    def test_single_load_gets_all_misses(self):
+        """With 1 load, it gets round(expected_misses) misses."""
+        assert analyze._bresenham_load_misses(5.7, 1) == [round(5.7)]
+
+
+class TestFormatAsmWithPerLoadLatencies:
+    """Verify _format_asm_with_per_load_latencies emits correct directives."""
+
+    _ARCH = analyze.X86Arch()
+
+    def test_single_load_gets_correct_latency(self):
+        """The one load instruction gets its specific latency."""
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
+        out = analyze._format_asm_with_per_load_latencies(instrs, self._ARCH, [200])
+        assert "# LLVM-MCA-LATENCY 200" in out
+        # Opening directive should appear before the load
+        load_pos = out.index("mov (%edi),%eax")
+        lat_pos = out.index("# LLVM-MCA-LATENCY 200")
+        assert lat_pos < load_pos
+
+    def test_per_load_different_latencies(self):
+        """Different loads receive their respective latencies."""
+        instrs = [
+            (0x0, "mov", "(%edi),%eax"),
+            (0x2, "add", "%eax,%edx"),
+            (0x4, "mov", "(%esi),%ebx"),
+        ]
+        out = analyze._format_asm_with_per_load_latencies(instrs, self._ARCH, [300, 200])
+        assert "# LLVM-MCA-LATENCY 300" in out
+        assert "# LLVM-MCA-LATENCY 200" in out
+
+    def test_zero_latency_no_directive(self):
+        """A load with latency=0 is emitted without LLVM-MCA-LATENCY directives."""
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "ret", "")]
+        out = analyze._format_asm_with_per_load_latencies(instrs, self._ARCH, [0])
+        assert "LLVM-MCA-LATENCY" not in out
+
+    def test_lmca_end_label_present(self):
+        """The .Lmca_end: label is always present."""
+        instrs = [(0x0, "mov", "(%edi),%eax")]
+        out = analyze._format_asm_with_per_load_latencies(instrs, self._ARCH, [100])
+        assert ".Lmca_end:" in out
+
+    def test_repeat_produces_unique_labels(self):
+        """With repeat>1, each iteration gets a unique label suffix."""
+        instrs = [(0x0, "mov", "(%edi),%eax")]
+        # Force a label by making it a branch target — use a self-loop
+        loop_instrs = [
+            (0x0, "mov", "(%edi),%eax"),
+            (0x2, "jne", "0x0"),           # back-branch → labels addr 0x0
+        ]
+        out = analyze._format_asm_with_per_load_latencies(
+            loop_instrs, self._ARCH, [100], repeat=3
+        )
+        assert ".Lmca_0_r0:" in out
+        assert ".Lmca_0_r1:" in out
+        assert ".Lmca_0_r2:" in out
+
+    def test_no_repetition_by_default(self):
+        """Default repeat=1 produces no _r0 suffix in labels."""
+        loop_instrs = [
+            (0x0, "mov", "(%edi),%eax"),
+            (0x2, "jne", "0x0"),
+        ]
+        out = analyze._format_asm_with_per_load_latencies(
+            loop_instrs, self._ARCH, [100]
+        )
+        assert "_r0" not in out
+
 
 class TestCacheMissIpcmLogic:
     """Verify IPCM-based effective miss rate and latency computation."""
@@ -1188,32 +1303,32 @@ class TestCacheMissIpcmLogic:
     ]
     _ARCH = analyze.X86Arch()
 
-    def test_stochastic_multiple_misses_per_load_uses_inflated_latency(self,
-                                                                        monkeypatch):
-        """When num_loads < expected_misses, effective_latency is inflated.
+    def test_stochastic_multiple_misses_per_load_uses_bresenham(self, monkeypatch):
+        """When num_loads < expected_misses, _format_asm_with_per_load_latencies
+        is called with Bresenham-distributed latencies and _CACHE_MISS_REPEAT.
 
-        Region: 10 instrs, 2 loads, ipcm=1 → expected_misses=10, num_loads=2.
-        misses_per_load = 5 → effective_latency = round(5 * 100) = 500.
-        _format_asm_with_cache_miss called with cache_miss=1.0, latency=500.
+        Region: 10 instrs, 2 loads, ipcm=1 → expected_misses=10.
+        _bresenham_load_misses(10, 2) = [5, 5] → latencies=[500, 500].
         """
         called = {}
 
-        def fake_fmt(instrs, arch, cache_miss, cache_latency):
-            called["cache_miss"] = cache_miss
-            called["cache_latency"] = cache_latency
+        def fake_per_load(instrs, arch, latencies, repeat=1):
+            called["latencies"] = latencies
+            called["repeat"] = repeat
             return "\tnop\n.Lmca_end:\n"
 
-        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
+        monkeypatch.setattr(analyze, "_format_asm_with_per_load_latencies",
+                            fake_per_load)
 
         mode = analyze._StochasticCacheMiss(instructions_per_cache_miss=1,
                                              cache_latency=100)
         mode.format_asm(self._LOADS_INSTRS, self._ARCH)
 
-        assert called.get("cache_miss") == 1.0, (
-            f"Expected cache_miss=1.0, got {called.get('cache_miss')}"
+        assert called.get("latencies") == [500, 500], (
+            f"Expected Bresenham latencies [500, 500], got {called.get('latencies')}"
         )
-        assert called.get("cache_latency") == 500, (
-            f"Expected effective_latency=500, got {called.get('cache_latency')}"
+        assert called.get("repeat") == analyze._CACHE_MISS_REPEAT, (
+            f"Expected repeat={analyze._CACHE_MISS_REPEAT}, got {called.get('repeat')}"
         )
 
     def test_stochastic_fractional_miss_rate_when_loads_exceed_expected(self,
@@ -1268,26 +1383,28 @@ class TestCacheMissIpcmLogic:
             "Did not expect _format_asm_with_cache_miss for no-load region"
         )
 
-    def test_average_multiple_misses_per_load_inflates_latency(self, monkeypatch):
-        """When num_loads < expected_misses, avg_latency is inflated.
+    def test_average_multiple_misses_per_load_uses_bresenham(self, monkeypatch):
+        """When num_loads < expected_misses, _format_asm_with_per_load_latencies
+        is called with Bresenham-distributed per-load latencies.
 
         Region: 10 instrs, 2 loads, ipcm=1 → expected_misses=10.
-        avg_latency = round(10/2 * 100) = 500.
+        _bresenham_load_misses(10, 2) = [5, 5] → latencies=[500, 500].
         """
         called = {}
 
-        def fake_avg(instrs, arch, latency):
-            called["latency"] = latency
+        def fake_per_load(instrs, arch, latencies, repeat=1):
+            called["latencies"] = latencies
             return "\tnop\n.Lmca_end:\n"
 
-        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency", fake_avg)
+        monkeypatch.setattr(analyze, "_format_asm_with_per_load_latencies",
+                            fake_per_load)
 
         mode = analyze._AverageCacheMiss(instructions_per_cache_miss=1,
                                           cache_latency=100)
         mode.format_asm(self._LOADS_INSTRS, self._ARCH)
 
-        assert called.get("latency") == 500, (
-            f"Expected avg_latency=500, got {called.get('latency')}"
+        assert called.get("latencies") == [500, 500], (
+            f"Expected Bresenham latencies [500, 500], got {called.get('latencies')}"
         )
 
     def test_build_cache_mode_inf_returns_no_cache_miss(self):
