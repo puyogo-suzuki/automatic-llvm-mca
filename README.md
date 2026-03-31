@@ -26,23 +26,27 @@ are reported separately.
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
-### Cache-miss sensitivity (CPI vs cache-miss rate)
+### Cache-miss sensitivity (CPI vs instructions-per-cache-miss)
 
 `ipc_relate.py` reports how the estimated CPI (the reciprocal of IPC) changes as
-the cache-miss rate for load instructions increases.
+the instructions-per-cache-miss (IPCM) ratio varies.  A lower IPCM means more
+frequent cache misses.
 
 ```
-python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] <elf-binary>
+python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] [--cache-miss-mode {stochastic,average}] <elf-binary>
 ```
 
-* `--cache-latency` (default: 100) sets the latency (cycles) used for simulated
+* `--cache-latency` (default: 100) sets the latency in cycles used for simulated
   cache misses via `# LLVM-MCA-LATENCY` directives.
-* The script runs `llvm-mca` for each loop and basic block at cache-miss rates
-  0%, 10%, 20%, 30%, 40%, 50% and writes:
+* `--cache-miss-mode` (default: `stochastic`) controls how misses are distributed
+  across load instructions.  `stochastic` gives a fraction of loads the full
+  `--cache-latency` penalty; `average` gives all loads an averaged latency.
+* The script runs `llvm-mca` for each loop and basic block at IPCM values of
+  1, 10, 20, 50, 100, and infinity (no cache miss) and writes:
 
 ```
-start_address,end_address,load_proportion,cpi0,cpi10,cpi20,cpi30,cpi40,cpi50
-0xSTART,0xEND,LOAD_PROP,CPI0,CPI10,CPI20,CPI30,CPI40,CPI50
+start_address,end_address,load_proportion,cpi_ipcm1,cpi_ipcm10,cpi_ipcm20,cpi_ipcm50,cpi_ipcm100,cpi_ipcm_inf
+0xSTART,0xEND,LOAD_PROP,CPI_IPCM1,CPI_IPCM10,CPI_IPCM20,CPI_IPCM50,CPI_IPCM100,CPI_IPCM_INF
 ```
 
 ## How llvm-mca handles jump instructions
