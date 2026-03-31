@@ -889,8 +889,8 @@ class TestRunMcaCacheMissPlumbing:
         )
 
     def test_cache_miss_nonzero_uses_format_asm_with_cache_miss(self, monkeypatch):
-        """With _StochasticCacheMiss, _format_asm_with_cache_miss is used and
-        -iterations=1 is added to the llvm-mca command."""
+        """With _StochasticCacheMiss and load instructions, _format_asm_with_cache_miss
+        is used and -iterations=1 is added to the llvm-mca command."""
         captured_cmd = {}
 
         def fake_format_asm_with_cache_miss(instrs, arch, cache_miss, cache_latency):
@@ -911,8 +911,9 @@ class TestRunMcaCacheMissPlumbing:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        analyze._run_mca([(0x0, "nop", "")],
-                         cache_mode=analyze._StochasticCacheMiss(0.5, 100))
+        # Use a region with a load instruction so stochastic mode activates.
+        analyze._run_mca([(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")],
+                         cache_mode=analyze._StochasticCacheMiss(10, 100))
         assert "-iterations=1" in captured_cmd.get("cmd", []), (
             "Expected -iterations=1 in llvm-mca command for stochastic mode"
         )
@@ -1026,18 +1027,18 @@ class TestFormatAsmWithAverageLoadLatency:
 class TestRunMcaAverageModePlumbing:
     """Verify that _run_mca uses the average-mode formatter when requested."""
 
-    def test_average_mode_uses_format_asm_with_average_load_latency(
+    def test_average_mode_uses_average_load_latency_formatter(
             self, monkeypatch):
-        """With _AverageCacheMiss, _format_asm_with_average_load_latency is
-        called with the correct effective latency (round(cache_miss * cache_latency))."""
+        """With _AverageCacheMiss and load instructions,
+        _format_asm_with_average_load_latency is called with the uniform latency."""
         called = {}
 
-        def fake_format_avg(instrs, arch, latency):
+        def fake_avg_load(instrs, arch, latency):
             called["latency"] = latency
             return "\tnop\n.Lmca_end:\n"
 
         monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
-                            fake_format_avg)
+                            fake_avg_load)
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
 
         class FakeProc:
@@ -1047,15 +1048,20 @@ class TestRunMcaAverageModePlumbing:
 
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
 
+        # Region: 10 instrs, 1 load, ipcm=10 → expected_misses=1.0
+        # avg_latency = round(1.0 / 1 * 100) = 100
+        instrs = [(0x0, "mov", "(%edi),%eax")] + [
+            (0x2 + i * 2, "add", "%eax,%edx") for i in range(9)
+        ]
         analyze._run_mca(
-            [(0x0, "nop", "")],
-            cache_mode=analyze._AverageCacheMiss(0.3, 100),
+            instrs,
+            cache_mode=analyze._AverageCacheMiss(10, 100),
         )
         assert "latency" in called, (
             "Expected _format_asm_with_average_load_latency to be called"
         )
-        assert called["latency"] == 30, (
-            f"Expected effective latency round(0.3*100)=30, got {called['latency']}"
+        assert called["latency"] == 100, (
+            f"Expected latency=100 for 1 miss * 100 cycles, got {called['latency']}"
         )
 
     def test_average_mode_no_iterations_flag(self, monkeypatch):
@@ -1079,16 +1085,17 @@ class TestRunMcaAverageModePlumbing:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
+        # Use a region with a load instruction to activate average-mode formatter.
         analyze._run_mca(
-            [(0x0, "nop", "")],
-            cache_mode=analyze._AverageCacheMiss(0.5, 100),
+            [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")],
+            cache_mode=analyze._AverageCacheMiss(10, 100),
         )
         assert "-iterations=1" not in captured_cmd.get("cmd", []), (
             "Average mode must not add -iterations=1 to the llvm-mca command"
         )
 
     def test_stochastic_mode_still_uses_cache_miss_formatter(self, monkeypatch):
-        """Stochastic mode still uses _format_asm_with_cache_miss."""
+        """Stochastic mode uses _format_asm_with_cache_miss when loads are present."""
         called = {}
 
         def fake_format_stochastic(instrs, arch, cache_miss, cache_latency):
@@ -1106,49 +1113,233 @@ class TestRunMcaAverageModePlumbing:
 
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
 
+        # Use a region with a load instruction so the stochastic formatter is used.
         analyze._run_mca(
-            [(0x0, "nop", "")],
-            cache_mode=analyze._StochasticCacheMiss(0.5, 100),
+            [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")],
+            cache_mode=analyze._StochasticCacheMiss(10, 100),
         )
         assert called.get("stochastic"), (
             "Expected _format_asm_with_cache_miss to be called in stochastic mode"
         )
 
-    def test_average_mode_effective_latency_rounding(self, monkeypatch):
-        """round(cache_miss * cache_latency) is used as the effective latency."""
-        # 0.5 * 7 = 3.5 → round(3.5) = 4 (Python banker's rounding: rounds to even)
-        # 0.4 * 7 = 2.8 → round(2.8) = 3
-        cases = [
-            (0.4, 7, round(0.4 * 7)),
-            (0.5, 7, round(0.5 * 7)),
-            (1.0, 50, 50),
-            (0.0, 100, 0),
+    def test_average_mode_uniform_latency(self, monkeypatch):
+        """_AverageCacheMiss computes a uniform latency for all loads.
+
+        Region: 3 loads, expected_misses=8.0 (ipcm=1, 8 instrs).
+        avg_latency = round(8.0 / 3 * 100) = round(266.67) = 267.
+        """
+        called = {}
+
+        def fake_avg_load(instrs, arch, latency):
+            called["latency"] = latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+                            fake_avg_load)
+
+        # 8 instrs total, 3 loads: expected_misses = 8/1 = 8.0
+        # avg_latency = round(8.0 / 3 * 100) = round(266.67) = 267
+        instrs = [
+            (0x0, "mov", "(%edi),%eax"),   # load 0
+            (0x2, "add", "%eax,%edx"),
+            (0x4, "mov", "(%esi),%ebx"),   # load 1
+            (0x6, "add", "%ebx,%ecx"),
+            (0x8, "mov", "(%ebx),%ecx"),   # load 2
+            (0xa, "add", "%ecx,%edx"),
+            (0xc, "add", "%edx,%eax"),
+            (0xe, "ret", ""),
         ]
-        for cache_miss, cache_latency, expected in cases:
-            called = {}
+        mode = analyze._AverageCacheMiss(instructions_per_cache_miss=1,
+                                          cache_latency=100)
+        mode.format_asm(instrs, analyze.X86Arch())
 
-            def fake_format_avg(instrs, arch, latency, _expected=expected):
-                called["latency"] = latency
-                return "\tnop\n.Lmca_end:\n"
+        assert called.get("latency") == 267, (
+            f"Expected uniform latency=267, got {called.get('latency')}"
+        )
 
-            monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
-                                fake_format_avg)
-            monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
 
-            class FakeProc:
-                returncode = 0
-                stdout = "IPC: 1.00\n"
-                stderr = ""
+# ---------------------------------------------------------------------------
+# Unit tests — instructions-per-cache-miss (IPCM) logic
+# ---------------------------------------------------------------------------
 
-            monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
+class TestFormatAsmWithCacheMissGreaterOne:
+    """Verify _format_asm_with_cache_miss handles cache_miss > 1 correctly."""
 
-            if cache_miss > 0:
-                analyze._run_mca(
-                    [(0x0, "nop", "")],
-                    cache_mode=analyze._AverageCacheMiss(cache_miss,
-                                                         cache_latency),
-                )
-                assert called.get("latency") == expected, (
-                    f"cache_miss={cache_miss}, cache_latency={cache_latency}: "
-                    f"expected latency {expected}, got {called.get('latency')}"
-                )
+    _ARCH = analyze.X86Arch()
+
+    def test_cache_miss_exact_2_all_loads_get_double_latency(self):
+        """With cache_miss=2.0, every load gets exactly 2*cache_latency."""
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
+        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 2.0, 100)
+        assert "# LLVM-MCA-LATENCY 200" in out
+        assert "# LLVM-MCA-LATENCY 100" not in out
+
+    def test_cache_miss_fractional_gt1_produces_floor_and_ceil_latencies(self):
+        """With cache_miss=1.7, some loads get 2*latency and the rest get 1*latency."""
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
+        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 1.7, 100)
+        assert "# LLVM-MCA-LATENCY 200" in out
+        assert "# LLVM-MCA-LATENCY 100" in out
+
+    def test_cache_miss_exact_3_all_loads_get_triple_latency(self):
+        """With cache_miss=3.0, every load gets exactly 3*cache_latency."""
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
+        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 3.0, 100)
+        assert "# LLVM-MCA-LATENCY 300" in out
+        assert "# LLVM-MCA-LATENCY 200" not in out
+
+    def test_lmca_end_label_present(self):
+        """The .Lmca_end: label is always present."""
+        instrs = [(0x0, "mov", "(%edi),%eax")]
+        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 2.0, 100)
+        assert ".Lmca_end:" in out
+
+    def test_unique_labels_per_repetition(self):
+        """Each repetition gets a unique _rN label suffix."""
+        loop_instrs = [
+            (0x0, "mov", "(%edi),%eax"),
+            (0x2, "jne", "0x0"),           # back-branch → labels addr 0x0
+        ]
+        out = analyze._format_asm_with_cache_miss(loop_instrs, self._ARCH, 2.0, 100)
+        assert ".Lmca_0_r0:" in out
+        assert ".Lmca_0_r1:" in out
+
+
+class TestCacheMissIpcmLogic:
+    """Verify IPCM-based effective miss rate and latency computation."""
+
+    # Region: 10 instructions, 2 loads (mov ... + mov ...).
+    _LOADS_INSTRS = [
+        (0x0, "mov", "(%edi),%eax"),
+        (0x2, "add", "%eax,%edx"),
+        (0x4, "mov", "(%esi),%ebx"),
+        (0x6, "add", "%ebx,%ecx"),
+        (0x8, "add", "%ecx,%edx"),
+        (0xa, "add", "%edx,%eax"),
+        (0xc, "add", "%eax,%ecx"),
+        (0xe, "sub", "%ecx,%edx"),
+        (0x10, "inc", "%eax"),
+        (0x12, "ret", ""),
+    ]
+    _ARCH = analyze.X86Arch()
+
+    def test_stochastic_multiple_misses_per_load_uses_cache_miss_formatter(
+            self, monkeypatch):
+        """When expected_misses > num_loads, _format_asm_with_cache_miss is called
+        with a miss_fraction > 1.
+
+        Region: 10 instrs, 2 loads, ipcm=1 → expected_misses=10.
+        miss_fraction = 10/2 = 5.0.
+        """
+        called = {}
+
+        def fake_fmt(instrs, arch, cache_miss, cache_latency):
+            called["cache_miss"] = cache_miss
+            called["cache_latency"] = cache_latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
+
+        mode = analyze._StochasticCacheMiss(instructions_per_cache_miss=1,
+                                             cache_latency=100)
+        mode.format_asm(self._LOADS_INSTRS, self._ARCH)
+
+        assert abs(called.get("cache_miss", 0) - 5.0) < 1e-9, (
+            f"Expected cache_miss=5.0, got {called.get('cache_miss')}"
+        )
+        assert called.get("cache_latency") == 100, (
+            f"Expected cache_latency=100, got {called.get('cache_latency')}"
+        )
+
+    def test_stochastic_fractional_miss_rate_when_loads_exceed_expected(self,
+                                                                          monkeypatch):
+        """When num_loads >= expected_misses, miss_fraction < 1.
+
+        Region: 10 instrs, 2 loads, ipcm=10 → expected_misses=1.
+        miss_fraction = 1/2 = 0.5.
+        """
+        called = {}
+
+        def fake_fmt(instrs, arch, cache_miss, cache_latency):
+            called["cache_miss"] = cache_miss
+            called["cache_latency"] = cache_latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
+
+        mode = analyze._StochasticCacheMiss(instructions_per_cache_miss=10,
+                                             cache_latency=100)
+        mode.format_asm(self._LOADS_INSTRS, self._ARCH)
+
+        assert abs(called.get("cache_miss", 0) - 0.5) < 1e-9, (
+            f"Expected cache_miss=0.5, got {called.get('cache_miss')}"
+        )
+        assert called.get("cache_latency") == 100, (
+            f"Expected cache_latency=100, got {called.get('cache_latency')}"
+        )
+
+    def test_stochastic_no_loads_uses_plain_format_asm(self, monkeypatch):
+        """When num_loads=0, _format_asm is used (no miss possible)."""
+        called = {}
+
+        def fake_plain(instrs, arch):
+            called["plain"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        def fake_miss(instrs, arch, cache_miss, cache_latency):
+            called["miss"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm", fake_plain)
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_miss)
+
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._StochasticCacheMiss(instructions_per_cache_miss=10,
+                                             cache_latency=100)
+        mode.format_asm(no_load_instrs, self._ARCH)
+
+        assert called.get("plain"), "Expected _format_asm to be called for no-load region"
+        assert not called.get("miss"), (
+            "Did not expect _format_asm_with_cache_miss for no-load region"
+        )
+
+    def test_average_multiple_misses_per_load_uses_average_load_latency(
+            self, monkeypatch):
+        """_AverageCacheMiss calls _format_asm_with_average_load_latency with
+        the uniform average latency.
+
+        Region: 10 instrs, 2 loads, ipcm=1 → expected_misses=10.
+        avg_latency = round(10 / 2 * 100) = 500.
+        """
+        called = {}
+
+        def fake_avg_load(instrs, arch, latency):
+            called["latency"] = latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+                            fake_avg_load)
+
+        mode = analyze._AverageCacheMiss(instructions_per_cache_miss=1,
+                                          cache_latency=100)
+        mode.format_asm(self._LOADS_INSTRS, self._ARCH)
+
+        assert called.get("latency") == 500, (
+            f"Expected uniform latency=500, got {called.get('latency')}"
+        )
+
+    def test_build_cache_mode_inf_returns_no_cache_miss(self):
+        """_build_cache_mode(float('inf'), ...) returns _NoCacheMiss."""
+        import math
+        mode = analyze._build_cache_mode(float("inf"), 100, "stochastic")
+        assert isinstance(mode, analyze._NoCacheMiss)
+
+    def test_build_cache_mode_finite_stochastic(self):
+        """_build_cache_mode(10, ...) returns _StochasticCacheMiss."""
+        mode = analyze._build_cache_mode(10, 100, "stochastic")
+        assert isinstance(mode, analyze._StochasticCacheMiss)
+
+    def test_build_cache_mode_finite_average(self):
+        """_build_cache_mode(10, ..., 'average') returns _AverageCacheMiss."""
+        mode = analyze._build_cache_mode(10, 100, "average")
+        assert isinstance(mode, analyze._AverageCacheMiss)
