@@ -66,6 +66,31 @@ _AARCH64_BRANCHES = frozenset({
     "tbnz",    # test bit and branch if non-zero
 })
 
+# 32-bit ARM condition code suffixes (used to build branch mnemonic sets).
+_ARM_CONDS = frozenset({
+    "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl",
+    "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al",
+})
+
+# ARM unconditional branch / call base forms.
+_ARM_BRANCH_BASES = ("b", "bl", "bx", "blx", "bxj")
+
+# All 32-bit ARM branch mnemonics (unconditional + conditional variants).
+# Generated programmatically to avoid errors in the manual list.
+_ARM_BRANCHES: frozenset = frozenset(
+    list(_ARM_BRANCH_BASES)
+    + [f"{base}{cond}" for base in _ARM_BRANCH_BASES for cond in _ARM_CONDS]
+    + ["ret"]
+)
+
+# ARM call forms (bl / blx and their conditional variants) — these have a
+# fall-through continuation and do NOT terminate a basic block.
+_ARM_CALLS: frozenset = frozenset(
+    ["bl", "blx"]
+    + [f"bl{cond}" for cond in _ARM_CONDS]
+    + [f"blx{cond}" for cond in _ARM_CONDS]
+)
+
 
 # ---------------------------------------------------------------------------
 # Helper: branch-target candidate parser (shared regex logic)
@@ -257,19 +282,13 @@ class ARMArch(ArchBase):
         super().__init__(objdump, ["-march=arm"])
 
     def is_branch(self, mnemonic: str) -> bool:
-        m = mnemonic.lower()
-        return m.startswith(("j", "call", "loop"))
+        return mnemonic.lower() in _ARM_BRANCHES
 
     def ends_basic_block(self, mnemonic: str, operands: str) -> bool:
         m = mnemonic.lower()
-        op = operands.lower()
-        return (
-            m.startswith("j")
-            or m.startswith("loop")
-            or m.startswith("ret")
-            or (m == "repz" and op.startswith("ret"))
-            or m in ("hlt", "ud2", "int3")
-        )
+        # bl / blx and their conditional forms are calls (fall-through) — they
+        # do NOT terminate a basic block.  All other branch forms do.
+        return m in _ARM_BRANCHES and m not in _ARM_CALLS
 
     def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
         m = mnemonic.lower()
@@ -496,6 +515,51 @@ def _replace_branch_target(operands: str, target: int,
     return operands  # fallback: no replacement found
 
 
+def _compute_labeled_addrs(instrs, arch: ArchBase) -> set:
+    """Return the set of instruction addresses that need a local label.
+
+    An address needs a label when it is the in-region target of at least one
+    branch instruction.  Used by all three ``_format_asm*`` variants to avoid
+    duplicating the label-discovery loop.
+    """
+    addr_set = {a for a, _, _ in instrs}
+    labeled: set = set()
+    for _, mnemonic, operands in instrs:
+        if arch.is_branch(mnemonic):
+            t = arch.get_branch_target(operands, mnemonic)
+            if t is not None and t in addr_set:
+                labeled.add(t)
+    return labeled
+
+
+def _format_branch_instr(mnemonic: str, operands: str, addr_set: set,
+                         arch: ArchBase, label_sfx: str = "") -> str:
+    """Return a single formatted branch instruction line.
+
+    The branch target is rewritten as follows:
+
+    * In-region target → local label ``.Lmca_ADDR<label_sfx>``.
+    * Out-of-region direct target → ``.Lmca_end``.
+    * Indirect branch (register target, ``get_branch_target`` returns ``None``)
+      → original operands kept verbatim.
+
+    *label_sfx* is appended to the local label name to make labels unique
+    across repetitions in :func:`_format_asm_with_cache_miss` (e.g. ``_r0``).
+    """
+    t = arch.get_branch_target(operands, mnemonic)
+    if t is not None and t in addr_set:
+        new_operands = _replace_branch_target(
+            operands, t, f".Lmca_{t:x}{label_sfx}"
+        )
+    elif t is not None:
+        new_operands = _replace_branch_target(operands, t, ".Lmca_end")
+    else:
+        new_operands = operands
+
+    suffix = f" {new_operands}" if new_operands else ""
+    return f"\t{mnemonic}{suffix}"
+
+
 def _format_asm(instrs, arch: ArchBase) -> str:
     """Format *instrs* as assembly for llvm-mca.
 
@@ -511,36 +575,14 @@ def _format_asm(instrs, arch: ArchBase) -> str:
       all forward/external branch targets resolve without assembler errors.
     """
     addr_set = {a for a, _, _ in instrs}
-
-    # Determine which addresses need a label
-    labeled: set = set()
-    for addr, mnemonic, operands in instrs:
-        if arch.is_branch(mnemonic):
-            t = arch.get_branch_target(operands, mnemonic)
-            if t is not None and t in addr_set:
-                labeled.add(t)
+    labeled = _compute_labeled_addrs(instrs, arch)
 
     lines = []
     for addr, mnemonic, operands in instrs:
         if addr in labeled:
             lines.append(f".Lmca_{addr:x}:")
         if arch.is_branch(mnemonic):
-            t = arch.get_branch_target(operands, mnemonic)
-            if t is not None and t in addr_set:
-                # In-region branch: replace target with a local label,
-                # keeping any other operands (e.g. registers in cbz/bne).
-                new_ops = _replace_branch_target(operands, t,
-                                                 f".Lmca_{t:x}")
-                lines.append(f"\t{mnemonic} {new_ops}")
-            elif t is not None:
-                # Out-of-region direct branch: redirect to the end label.
-                new_ops = _replace_branch_target(operands, t, ".Lmca_end")
-                lines.append(f"\t{mnemonic} {new_ops}")
-            else:
-                # Indirect branch (register target) — keep the original
-                # instruction so the assembler does not error out.
-                tail = f" {operands}" if operands else ""
-                lines.append(f"\t{mnemonic}{tail}")
+            lines.append(_format_branch_instr(mnemonic, operands, addr_set, arch))
         else:
             tail = f" {operands}" if operands else ""
             lines.append(f"\t{mnemonic}{tail}")
@@ -563,14 +605,7 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
     taking the full *cache_latency*.
     """
     addr_set = {a for a, _, _ in instrs}
-
-    # Determine which addresses need a label.
-    labeled: set = set()
-    for _, mnemonic, operands in instrs:
-        if arch.is_branch(mnemonic):
-            t = arch.get_branch_target(operands, mnemonic)
-            if t is not None and t in addr_set:
-                labeled.add(t)
+    labeled = _compute_labeled_addrs(instrs, arch)
 
     lines = []
     for addr, mnemonic, operands in instrs:
@@ -582,15 +617,7 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
             lines.append(f"\t{mnemonic}{tail}")
             lines.append("# LLVM-MCA-LATENCY")
         elif arch.is_branch(mnemonic):
-            t = arch.get_branch_target(operands, mnemonic)
-            if t is not None and t in addr_set:
-                new_ops = _replace_branch_target(operands, t, f".Lmca_{t:x}")
-                lines.append(f"\t{mnemonic} {new_ops}")
-            elif t is not None:
-                new_ops = _replace_branch_target(operands, t, ".Lmca_end")
-                lines.append(f"\t{mnemonic} {new_ops}")
-            else:
-                lines.append(f"\t{mnemonic}{tail}")
+            lines.append(_format_branch_instr(mnemonic, operands, addr_set, arch))
         else:
             lines.append(f"\t{mnemonic}{tail}")
 
@@ -627,14 +654,7 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
     _CACHE_MISS_REPEAT = 100
 
     addr_set = {a for a, _, _ in instrs}
-
-    # Determine which addresses need an iteration-local label.
-    labeled: set = set()
-    for _, mnemonic, operands in instrs:
-        if arch.is_branch(mnemonic):
-            t = arch.get_branch_target(operands, mnemonic)
-            if t is not None and t in addr_set:
-                labeled.add(t)
+    labeled = _compute_labeled_addrs(instrs, arch)
 
     # n: load instructions per repetition; b: total generated load count.
     # Miss positions are floor(m * b / a) for m in 0..a-1.
@@ -647,23 +667,19 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
     miss_counter = 0
     next_miss_position = 0
 
-    def _emit(mnemonic, operands, lines):
-        """Append the instruction, wrapping loads with latency directives."""
+    def _emit_load(mnemonic: str, operands: str, lines: list) -> None:
+        """Append a load instruction, inserting a latency directive on a miss."""
         nonlocal load_counter, miss_counter, next_miss_position
         tail = f" {operands}" if operands else ""
-        is_load = arch.is_load_instruction(mnemonic, operands)
-        if is_load:
-            if miss_counter < a and load_counter == next_miss_position:
-                lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
-                lines.append(f"\t{mnemonic}{tail}")
-                lines.append("# LLVM-MCA-LATENCY")
-                miss_counter += 1
-                next_miss_position = int(miss_counter * b / a)
-            else:
-                lines.append(f"\t{mnemonic}{tail}")
-            load_counter += 1
+        if miss_counter < a and load_counter == next_miss_position:
+            lines.append(f"# LLVM-MCA-LATENCY {cache_latency}")
+            lines.append(f"\t{mnemonic}{tail}")
+            lines.append("# LLVM-MCA-LATENCY")
+            miss_counter += 1
+            next_miss_position = int(miss_counter * b / a)
         else:
             lines.append(f"\t{mnemonic}{tail}")
+        load_counter += 1
 
     lines = []
     for it in range(_CACHE_MISS_REPEAT):
@@ -672,19 +688,14 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
             if addr in labeled:
                 lines.append(f".Lmca_{addr:x}{sfx}:")
             if arch.is_branch(mnemonic):
-                t = arch.get_branch_target(operands, mnemonic)
-                if t is not None and t in addr_set:
-                    new_ops = _replace_branch_target(
-                        operands, t, f".Lmca_{t:x}{sfx}")
-                    _emit(mnemonic, new_ops, lines)
-                elif t is not None:
-                    new_ops = _replace_branch_target(
-                        operands, t, ".Lmca_end")
-                    _emit(mnemonic, new_ops, lines)
-                else:
-                    _emit(mnemonic, operands, lines)
+                lines.append(
+                    _format_branch_instr(mnemonic, operands, addr_set, arch, sfx)
+                )
+            elif arch.is_load_instruction(mnemonic, operands):
+                _emit_load(mnemonic, operands, lines)
             else:
-                _emit(mnemonic, operands, lines)
+                tail = f" {operands}" if operands else ""
+                lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
     return "\n".join(lines) + "\n"
