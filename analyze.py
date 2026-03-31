@@ -533,7 +533,7 @@ def _compute_labeled_addrs(instrs, arch: ArchBase) -> set:
 
 
 def _format_branch_instr(mnemonic: str, operands: str, addr_set: set,
-                          arch: ArchBase, label_sfx: str = "") -> str:
+                         arch: ArchBase, label_sfx: str = "") -> str:
     """Return a single formatted branch instruction line.
 
     The branch target is rewritten as follows:
@@ -548,14 +548,16 @@ def _format_branch_instr(mnemonic: str, operands: str, addr_set: set,
     """
     t = arch.get_branch_target(operands, mnemonic)
     if t is not None and t in addr_set:
-        new_ops = _replace_branch_target(operands, t, f".Lmca_{t:x}{label_sfx}")
-        return f"\t{mnemonic} {new_ops}"
+        new_operands = _replace_branch_target(
+            operands, t, f".Lmca_{t:x}{label_sfx}"
+        )
     elif t is not None:
-        new_ops = _replace_branch_target(operands, t, ".Lmca_end")
-        return f"\t{mnemonic} {new_ops}"
+        new_operands = _replace_branch_target(operands, t, ".Lmca_end")
     else:
-        tail = f" {operands}" if operands else ""
-        return f"\t{mnemonic}{tail}"
+        new_operands = operands
+
+    suffix = f" {new_operands}" if new_operands else ""
+    return f"\t{mnemonic}{suffix}"
 
 
 def _format_asm(instrs, arch: ArchBase) -> str:
