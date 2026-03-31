@@ -641,15 +641,14 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
     modelled in two parts:
 
     * **Base penalty** — every load receives
-      ``round(cache_miss) * cache_latency`` cycles unconditionally, via an
+      ``floor(cache_miss) * cache_latency`` cycles unconditionally, via an
       ``# LLVM-MCA-LATENCY`` override.
 
-    * **Fractional adjustment** — let ``frac = cache_miss - round(cache_miss)``
-      (in the range ``(-0.5, 0.5]``).  A fraction ``|frac|`` of load instances
-      across the repeated block receives an additional ``±cache_latency``
-      adjustment (``+`` when ``frac > 0``, ``−`` when ``frac < 0``), placed
-      deterministically using the same evenly-spaced formula as the original
-      stochastic logic.
+    * **Fractional adjustment** — let ``frac = cache_miss - floor(cache_miss)``
+      (in the range ``[0, 1)``).  A fraction ``frac`` of load instances across
+      the repeated block receives an additional ``+cache_latency`` penalty,
+      placed deterministically using the same evenly-spaced formula as the
+      original stochastic logic.
 
     When ``cache_miss < 1`` the base penalty is zero and only the fractional
     stochastic component operates (identical to the original behaviour).
@@ -660,20 +659,19 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
     addr_set = {a for a, _, _ in instrs}
     labeled = _compute_labeled_addrs(instrs, arch)
 
-    # Split cache_miss into a rounded base and a signed fractional remainder.
-    base_misses = round(cache_miss)                   # integer base for all loads
-    frac = cache_miss - base_misses                   # signed fraction in (-0.5, 0.5]
-    base_latency = base_misses * cache_latency        # guaranteed latency
-    extra = cache_latency if frac >= 0 else -cache_latency  # per-adjustment step
+    # Split cache_miss into an integer floor and a non-negative fractional part.
+    base_misses = int(cache_miss)                     # floor for non-negative cache_miss
+    frac = cache_miss - base_misses                   # always in [0, 1)
+    base_latency = base_misses * cache_latency        # guaranteed latency per load
 
     # n: load instructions per repetition; b: total generated load count.
-    # a: number of loads that receive the ±extra fractional adjustment.
+    # a: number of loads that receive the +cache_latency fractional adjustment.
     # Adjustment positions are floor(m * b / a) for m in 0..a-1.
     n = sum(
         1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
     )
     b = _CACHE_MISS_REPEAT * n
-    a = round(abs(frac) * b) if b > 0 else 0
+    a = round(frac * b) if b > 0 else 0
     load_counter = 0
     miss_counter = 0
     next_miss_position = 0
@@ -683,7 +681,7 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
         nonlocal load_counter, miss_counter, next_miss_position
         tail = f" {operands}" if operands else ""
         if miss_counter < a and load_counter == next_miss_position:
-            lat = base_latency + extra
+            lat = base_latency + cache_latency
             miss_counter += 1
             next_miss_position = int(miss_counter * b / a)
         else:
