@@ -1384,3 +1384,66 @@ class TestCacheMissIpcmLogic:
         """_build_cache_mode(10, ..., 'average') returns _AverageCacheMiss."""
         mode = analyze._build_cache_mode(10, 100, "average")
         assert isinstance(mode, analyze._AverageCacheMiss)
+
+
+class TestDumper:
+    """Tests for the Dumper wrapper class."""
+
+    _INSTRS = [
+        (0x10, "nop", ""),
+        (0x11, "ret", ""),
+    ]
+    _ARCH = analyze.X86Arch()
+
+    def test_delegates_format_asm_to_inner(self, tmp_path):
+        """Dumper.format_asm returns the same value as the inner mode."""
+        inner = analyze._NoCacheMiss()
+        dumper = analyze.Dumper(inner, dump_dir=str(tmp_path / "dump"))
+        expected = inner.format_asm(self._INSTRS, self._ARCH)
+        result = dumper.format_asm(self._INSTRS, self._ARCH)
+        assert result == expected
+
+    def test_creates_dump_directory(self, tmp_path):
+        """Dumper creates the dump directory when it does not exist."""
+        dump_dir = tmp_path / "dump"
+        assert not dump_dir.exists()
+        dumper = analyze.Dumper(analyze._NoCacheMiss(), dump_dir=str(dump_dir))
+        dumper.format_asm(self._INSTRS, self._ARCH)
+        assert dump_dir.is_dir()
+
+    def test_writes_file_with_correct_name(self, tmp_path):
+        """Dumper writes {start}_{end}.{arch}.txt using hex addresses."""
+        dump_dir = tmp_path / "dump"
+        dumper = analyze.Dumper(analyze._NoCacheMiss(), dump_dir=str(dump_dir))
+        dumper.format_asm(self._INSTRS, self._ARCH)
+        # start=0x10, end=0x11, arch.name="x86"
+        expected_name = "10_11.x86.txt"
+        assert (dump_dir / expected_name).is_file()
+
+    def test_written_file_content_matches_format_asm(self, tmp_path):
+        """The content of the dump file equals the formatted assembly."""
+        dump_dir = tmp_path / "dump"
+        inner = analyze._NoCacheMiss()
+        dumper = analyze.Dumper(inner, dump_dir=str(dump_dir))
+        result = dumper.format_asm(self._INSTRS, self._ARCH)
+        written = (dump_dir / "10_11.x86.txt").read_text(encoding="utf-8")
+        assert written == result
+
+    def test_delegates_extra_mca_args_to_inner(self, tmp_path):
+        """Dumper.extra_mca_args returns the inner mode's extra args."""
+        inner = analyze._StochasticCacheMiss(10, 100)
+        dumper = analyze.Dumper(inner, dump_dir=str(tmp_path / "dump"))
+        assert dumper.extra_mca_args() == inner.extra_mca_args()
+
+    def test_no_file_written_for_empty_instrs(self, tmp_path):
+        """Dumper does not create any file when instrs is empty."""
+        dump_dir = tmp_path / "dump"
+        dumper = analyze.Dumper(analyze._NoCacheMiss(), dump_dir=str(dump_dir))
+        dumper.format_asm([], self._ARCH)
+        # The dump directory should not have been created at all.
+        assert not dump_dir.exists()
+
+    def test_default_dump_dir_name(self):
+        """Dumper uses 'dump' as the default dump directory name."""
+        dumper = analyze.Dumper(analyze._NoCacheMiss())
+        assert dumper._dump_dir == "dump"

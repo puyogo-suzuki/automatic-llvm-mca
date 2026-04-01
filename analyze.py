@@ -467,6 +467,56 @@ def _build_cache_mode(instructions_per_cache_miss: float, cache_latency: int,
     return _StochasticCacheMiss(instructions_per_cache_miss, cache_latency)
 
 
+class Dumper(_CacheMissMode):
+    """A :class:`_CacheMissMode` wrapper that writes formatted assembly to disk.
+
+    ``Dumper`` delegates all formatting logic to an inner :class:`_CacheMissMode`
+    instance and, after formatting, writes the result to a text file inside
+    *dump_dir*.  Each region produces one file named
+    ``{start_address}_{end_address}.{arch}.txt``.
+
+    Parameters
+    ----------
+    inner:
+        The underlying :class:`_CacheMissMode` instance that performs the
+        actual assembly formatting (e.g. :class:`_NoCacheMiss`,
+        :class:`_StochasticCacheMiss`, :class:`_AverageCacheMiss`).
+    dump_dir:
+        Directory where formatted assembly files are written.  Created on
+        first use if it does not already exist.  Defaults to ``"dump"``.
+    """
+
+    def __init__(self, inner: _CacheMissMode, dump_dir: str = "dump"):
+        self._inner = inner
+        self._dump_dir = dump_dir
+
+    def format_asm(self, instrs, arch: ArchBase) -> str:
+        """Format *instrs* by delegating to the inner mode and write to disk.
+
+        The formatted assembly is written to
+        ``{dump_dir}/{start:x}_{end:x}.{arch.name}.txt`` as a side effect,
+        where *start* and *end* are the addresses of the first and last
+        instructions in *instrs*.  The formatted string is also returned so
+        that the caller (typically :func:`_run_mca`) can pass it to llvm-mca.
+
+        Nothing is written when *instrs* is empty.
+        """
+        result = self._inner.format_asm(instrs, arch)
+        if instrs:
+            os.makedirs(self._dump_dir, exist_ok=True)
+            start = instrs[0][0]
+            end = instrs[-1][0]
+            filename = f"{start:x}_{end:x}.{arch.name}.txt"
+            path = os.path.join(self._dump_dir, filename)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(result)
+        return result
+
+    def extra_mca_args(self) -> list:
+        """Return extra llvm-mca arguments from the inner mode."""
+        return self._inner.extra_mca_args()
+
+
 # ---------------------------------------------------------------------------
 # llvm-mca runner
 # ---------------------------------------------------------------------------
@@ -675,17 +725,22 @@ class Analyzer:
     cache_miss_mode:
         ``"stochastic"`` (default) or ``"average"``.  See :func:`analyze`
         for a full description.
+    dump:
+        When ``True``, the formatted assembly for each analysed region is
+        written to a file in a ``"dump"`` directory.  Filename format:
+        ``{start_address}_{end_address}.{arch}.txt``.
     """
 
     def __init__(self, binary: str, mcpu: str = "", mode: str = "blocks",
                  cache_miss: float = float("inf"), cache_latency: int = 0,
-                 cache_miss_mode: str = "stochastic"):
+                 cache_miss_mode: str = "stochastic", dump: bool = False):
         self.binary = binary
         self.mcpu = mcpu
         self.mode = mode
         self.cache_miss = cache_miss
         self.cache_latency = cache_latency
         self.cache_miss_mode = cache_miss_mode
+        self.dump = dump
 
     def _effective_mca_args(self, arch: ArchBase) -> list:
         """Return mca_args for *arch*, applying any :attr:`mcpu` override."""
@@ -701,6 +756,8 @@ class Analyzer:
         mca_args = self._effective_mca_args(arch)
         cache_mode = _build_cache_mode(self.cache_miss, self.cache_latency,
                                        self.cache_miss_mode)
+        if self.dump:
+            cache_mode = Dumper(cache_mode)
 
         for _func_name, instrs in disassemble(self.binary, arch):
             if self.mode == "functions":
@@ -841,6 +898,16 @@ def main():
             "of cache misses uniformly across all loads."
         ),
     )
+    parser.add_argument(
+        "--dump",
+        action="store_true",
+        default=False,
+        help=(
+            "Write the formatted assembly for each analysed region to a text "
+            "file inside a 'dump' directory.  Each file is named "
+            "{start_address}_{end_address}.{arch}.txt."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.binary):
@@ -858,6 +925,7 @@ def main():
         cache_miss=args.cache_miss,
         cache_latency=args.cache_latency,
         cache_miss_mode=args.cache_miss_mode,
+        dump=args.dump,
     )
 
     if args.mode == "functions":
