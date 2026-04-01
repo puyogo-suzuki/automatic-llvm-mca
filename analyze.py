@@ -271,7 +271,8 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
 
 def _format_asm_with_cache_miss(instrs, arch: ArchBase,
                                  cache_miss: float = 0.0,
-                                 cache_latency: int = 0) -> str:
+                                 cache_latency: int = 0,
+                                 front_loaded: bool = False) -> str:
     """Format *instrs* as assembly for llvm-mca with cache-miss simulation.
 
     *cache_miss* is the average number of cache misses per load instruction
@@ -286,12 +287,15 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
 
     * **Fractional adjustment** — let ``frac = cache_miss - floor(cache_miss)``
       (in the range ``[0, 1)``).  A fraction ``frac`` of load instances across
-      the repeated block receives an additional ``+cache_latency`` penalty,
-      placed deterministically using the same evenly-spaced formula as the
-      original stochastic logic.
+      the repeated block receives an additional ``+cache_latency`` penalty.
+      When *front_loaded* is ``False`` (default), penalties are placed
+      deterministically using an evenly-spaced (Bresenham) formula.
+      When *front_loaded* is ``True``, the first ``a`` loads receive the
+      penalty and the remaining loads do not.
 
     When ``cache_miss < 1`` the base penalty is zero and only the fractional
-    stochastic component operates (identical to the original behaviour).
+    adjustment operates (identical to the original behaviour for the default
+    placement).
 
     Labels are made unique per repetition so that backward branches within a
     loop still resolve to the correct iteration-local target.
@@ -306,7 +310,8 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
 
     # n: load instructions per repetition; b: total generated load count.
     # a: number of loads that receive the +cache_latency fractional adjustment.
-    # Adjustment positions are floor(m * b / a) for m in 0..a-1.
+    # Adjustment positions are floor(m * b / a) for m in 0..a-1 (stochastic),
+    # or 0..a-1 (front-loaded).
     n = sum(
         1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
     )
@@ -320,10 +325,15 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
         """Append a load instruction with the appropriate latency directive."""
         nonlocal load_counter, miss_counter, next_miss_position
         tail = f" {operands}" if operands else ""
-        if miss_counter < a and load_counter == next_miss_position:
+        if front_loaded:
+            is_miss = load_counter < a
+        else:
+            is_miss = miss_counter < a and load_counter == next_miss_position
+        if is_miss:
             lat = base_latency + cache_latency
             miss_counter += 1
-            next_miss_position = int(miss_counter * b / a)
+            if not front_loaded:
+                next_miss_position = int(miss_counter * b / a)
         else:
             lat = base_latency
         if lat > 0:
@@ -425,6 +435,48 @@ class _StochasticCacheMiss(_CacheMissMode):
         return ["-iterations=1"]
 
 
+class _EarlyCacheMiss(_CacheMissMode):
+    """Early (front-loaded) cache-miss simulation based on instructions-per-cache-miss.
+
+    Like :class:`_StochasticCacheMiss`, the assembly is repeated
+    ``_CACHE_MISS_REPEAT`` times with ``# LLVM-MCA-LATENCY`` directives
+    inserted deterministically.  The difference is in *placement*: all cache
+    misses occur on the **first** loads in the repeated block rather than being
+    spread uniformly.
+
+    For example, with 5 loads and 3 expected misses the pattern is::
+
+        miss miss miss hit hit
+
+    instead of the uniform stochastic pattern::
+
+        miss hit miss hit miss
+
+    ``-iterations=1`` is added to llvm-mca so that it does not add its own
+    repetitions.
+    """
+
+    def __init__(self, instructions_per_cache_miss: float, cache_latency: int):
+        self.instructions_per_cache_miss = instructions_per_cache_miss
+        self.cache_latency = cache_latency
+
+    def format_asm(self, instrs, arch: ArchBase) -> str:
+        num_instrs = len(instrs)
+        num_loads = sum(
+            1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
+        )
+        if num_loads == 0:
+            return _format_asm(instrs, arch)
+        expected_misses = num_instrs / self.instructions_per_cache_miss
+        miss_fraction = expected_misses / num_loads
+        return _format_asm_with_cache_miss(instrs, arch, miss_fraction,
+                                           self.cache_latency,
+                                           front_loaded=True)
+
+    def extra_mca_args(self) -> list:
+        return ["-iterations=1"]
+
+
 class _AverageCacheMiss(_CacheMissMode):
     """Average cache-miss simulation based on instructions-per-cache-miss.
 
@@ -464,6 +516,8 @@ def _build_cache_mode(instructions_per_cache_miss: float, cache_latency: int,
         return _NoCacheMiss()
     if cache_miss_mode == "average":
         return _AverageCacheMiss(instructions_per_cache_miss, cache_latency)
+    if cache_miss_mode == "early":
+        return _EarlyCacheMiss(instructions_per_cache_miss, cache_latency)
     return _StochasticCacheMiss(instructions_per_cache_miss, cache_latency)
 
 
@@ -723,7 +777,7 @@ class Analyzer:
         Cache-miss penalty in cycles.  Only used when *instructions_per_cache_miss*
         is finite.
     cache_miss_mode:
-        ``"stochastic"`` (default) or ``"average"``.  See :func:`analyze`
+        ``"stochastic"`` (default), ``"average"``, or ``"early"``.  See :func:`analyze`
         for a full description.
     dump:
         When ``True``, the formatted assembly for each analysed region is
@@ -815,6 +869,11 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
         from ``(num_instructions / cache_miss / num_loads) * cache_latency``
         cycles; models the average cost of cache misses uniformly across all
         loads.
+
+        ``"early"`` — like ``"stochastic"`` but all cache-miss penalties are
+        placed on the first loads in the repeated block rather than distributed
+        uniformly (e.g. ``miss miss miss hit hit`` instead of
+        ``miss hit miss hit miss``).
     """
     return Analyzer(
         binary=binary,
@@ -882,7 +941,7 @@ def main():
     )
     parser.add_argument(
         "--cache-miss-mode",
-        choices=["stochastic", "average"],
+        choices=["stochastic", "average", "early"],
         default="stochastic",
         dest="cache_miss_mode",
         help=(
@@ -895,7 +954,11 @@ def main():
             "'average': all load instructions receive a fixed latency derived "
             "from (num_instructions / --instructions-per-cache-miss / "
             "num_loads) * --cache-latency cycles, modelling the average cost "
-            "of cache misses uniformly across all loads."
+            "of cache misses uniformly across all loads. "
+            "'early': like 'stochastic' but all cache misses are placed on "
+            "the first loads in the repeated block rather than distributed "
+            "uniformly (e.g. miss miss miss hit hit instead of "
+            "miss hit miss hit miss)."
         ),
     )
     parser.add_argument(

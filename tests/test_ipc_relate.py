@@ -324,6 +324,23 @@ class TestMainIpcmValues:
         assert len(captured_ipcm) == 1
         assert captured_ipcm[0] == [5.0, 100.0, float("inf")]
 
+    def test_cache_miss_mode_early_passed_to_ipc_relate(self, monkeypatch):
+        """main() passes --cache-miss-mode early to ipc_relate()."""
+        captured_mode = []
+
+        def fake_ipc_relate(binary, mcpu="", cache_latency=100,
+                             cache_miss_mode="stochastic",
+                             instructions_per_cache_miss=None):
+            captured_mode.append(cache_miss_mode)
+            return iter([])
+
+        self._run_main(
+            ["ipc_relate.py", "dummy.o", "--cache-miss-mode", "early"],
+            monkeypatch,
+            fake_ipc_relate=fake_ipc_relate,
+        )
+        assert captured_mode == ["early"]
+
 
 # ---------------------------------------------------------------------------
 # Integration tests — AMD64 (x86-64)
