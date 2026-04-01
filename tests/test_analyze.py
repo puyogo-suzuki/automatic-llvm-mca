@@ -727,6 +727,47 @@ class TestIsLoadInstruction:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests — _count_load_proportion
+# ---------------------------------------------------------------------------
+
+class TestCountLoadProportion:
+    """Unit tests for analyze._count_load_proportion."""
+
+    def test_empty_instrs_returns_zero(self):
+        assert analyze._count_load_proportion([], analyze.X86Arch()) == 0.0
+
+    def test_all_loads_returns_one(self):
+        instrs = [
+            (0, "mov", "(%rdi),%rax"),
+            (4, "add", "(%rsi),%rcx"),
+        ]
+        assert analyze._count_load_proportion(instrs, analyze.X86Arch()) == 1.0
+
+    def test_no_loads_returns_zero(self):
+        instrs = [
+            (0, "add", "%eax,%edx"),
+            (4, "ret", ""),
+        ]
+        assert analyze._count_load_proportion(instrs, analyze.X86Arch()) == 0.0
+
+    def test_half_loads(self):
+        instrs = [
+            (0, "mov", "(%rdi),%rax"),
+            (4, "add", "%eax,%edx"),
+        ]
+        assert analyze._count_load_proportion(instrs, analyze.X86Arch()) == 0.5
+
+    def test_aarch64_load_proportion(self):
+        instrs = [
+            (0, "ldr", "x0, [x1]"),
+            (4, "add", "x0, x1, x2"),
+            (8, "ldp", "x2, x3, [sp]"),
+            (12, "str", "x0, [x1]"),
+        ]
+        assert analyze._count_load_proportion(instrs, analyze.AArch64Arch()) == 0.5
+
+
+# ---------------------------------------------------------------------------
 # Unit tests — _format_asm_with_cache_miss
 # ---------------------------------------------------------------------------
 

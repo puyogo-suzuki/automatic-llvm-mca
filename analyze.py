@@ -487,52 +487,17 @@ def _find_llvm_mca() -> str:
 _LLVM_MCA = None  # resolved lazily
 
 
-def _parse_load_proportion(mca_output: str) -> float:
-    """Parse the Instruction Information section of llvm-mca output.
+def _count_load_proportion(instrs, arch: ArchBase) -> float:
+    """Return the proportion of *instrs* that are load instructions.
 
-    Returns the proportion of instructions with the MayLoad attribute set,
-    or 0.0 if the section is absent or no instructions are listed.
-
-    llvm-mca emits a table like::
-
-        [1]    [2]    [3]    [4]    [5]    [6]    Instructions:
-         1      4     1.00    *                    mov rax, qword ptr [rdi]
-         1      1     0.25                         inc rax
-
-    where column [4] contains ``*`` when the instruction may perform a load.
-    The column position is determined from the header line so that it remains
-    correct regardless of the exact whitespace used by different llvm-mca
-    versions.
+    Uses :meth:`ArchBase.is_load_instruction` to identify loads, so the result
+    is based on the disassembled instruction text rather than llvm-mca metadata.
+    Returns 0.0 when *instrs* is empty.
     """
-    lines = mca_output.splitlines()
-    col4_pos = None
-    in_table = False
-    total = 0
-    loads = 0
-    for line in lines:
-        if not in_table:
-            # Locate the table header to determine the MayLoad column position.
-            if "[4]" in line and "[1]" in line:
-                m = re.search(r"\[4\]", line)
-                if m:
-                    col4_pos = m.start()
-                    in_table = True
-            continue
-        # A blank line signals the end of the instruction-info table.
-        if not line.strip():
-            break
-        # Instruction data rows start with optional whitespace then a digit.
-        if re.match(r"^\s+\d", line):
-            total += 1
-            if col4_pos is not None:
-                # Each column in the instruction-info table is 7 characters
-                # wide, matching the header pattern "[N]    " (3 chars for the
-                # bracket notation plus 4 spaces).  A '*' anywhere within that
-                # range indicates a load instruction.
-                field = line[col4_pos:col4_pos + 7] if len(line) > col4_pos else ""
-                if "*" in field:
-                    loads += 1
-    return loads / total if total > 0 else 0.0
+    if not instrs:
+        return 0.0
+    loads = sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops))
+    return loads / len(instrs)
 
 
 def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
@@ -570,9 +535,7 @@ def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
     extra = cache_mode.extra_mca_args()
 
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
-    # -instruction-info adds the per-instruction table used to extract MayLoad.
-    cmd = [_LLVM_MCA, *mca_args, *extra,
-           "--call-latency=0", "-instruction-info", "-"]
+    cmd = [_LLVM_MCA, *mca_args, *extra, "--call-latency=0", "-"]
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None
@@ -580,7 +543,7 @@ def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
     if m is None:
         return None
     ipc = float(m.group(1))
-    load_proportion = _parse_load_proportion(proc.stdout)
+    load_proportion = _count_load_proportion(instrs, arch)
     return ipc, load_proportion
 
 
