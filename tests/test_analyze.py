@@ -959,8 +959,12 @@ class TestRunMcaCacheMissPlumbing:
             "Expected -iterations=1 in llvm-mca command for stochastic mode"
         )
 
-    def test_call_latency_flag_is_passed(self, monkeypatch):
-        """_run_mca always passes the undocumented --call-latency=0 flag."""
+    def test_call_latency_flag_is_not_passed(self, monkeypatch):
+        """_run_mca must NOT pass the unsupported --call-latency=0 flag.
+
+        llvm-mca 16-18 rejects ``--call-latency=0`` with an 'Unknown command
+        line argument' error, causing every analysis to silently return None.
+        """
         captured_cmd = {}
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
 
@@ -976,8 +980,8 @@ class TestRunMcaCacheMissPlumbing:
         monkeypatch.setattr(subprocess, "run", fake_run)
 
         analyze._run_mca([(0x0, "nop", "")], cache_mode=analyze._NoCacheMiss())
-        assert "--call-latency=0" in captured_cmd.get("cmd", []), (
-            "Expected --call-latency=0 in llvm-mca command"
+        assert "--call-latency=0" not in captured_cmd.get("cmd", []), (
+            "--call-latency=0 must not be passed; it is unsupported by llvm-mca 16-18"
         )
 
 

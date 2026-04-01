@@ -26,6 +26,42 @@ are reported separately.
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
+### Dump mode
+
+`analyze.py --dump` writes the formatted assembly for each analysed region to a
+text file in a `dump/` directory.  Each file is named
+`{start_address}_{end_address}.{arch}.txt`:
+
+```
+python3 analyze.py --dump [--mcpu <cpu>] <elf-binary>
+```
+
+### Re-analysing a dump file (`analyze_str.py`)
+
+`analyze_str.py` reads a single dump file produced by `analyze.py --dump` and
+runs `llvm-mca` on it, printing the same CSV format as `analyze.py`:
+
+```
+python3 analyze_str.py [--mcpu <cpu>] [options] <textfile>
+```
+
+The textfile must follow the `{start}_{end}.{arch}.txt` naming convention (e.g.
+`dump/1000_1080.x86.txt`).  The architecture and the start/end addresses are
+inferred from the filename.
+
+Optional cache-miss simulation can be applied to the dump on the fly:
+
+```
+python3 analyze_str.py --instructions-per-cache-miss 50 --cache-latency 200 dump/1000_1080.x86.txt
+```
+
+* `--mcpu` overrides the default CPU inferred from the filename.
+* `--instructions-per-cache-miss` (default: `inf`, i.e. no simulation) sets
+  the number of retired instructions per cache miss.
+* `--cache-latency` (default: 0) sets the simulated cache-miss penalty in cycles.
+* `--cache-miss-mode` (default: `stochastic`) selects the simulation mode
+  (`stochastic` or `average`); see `analyze.py` for a full description.
+
 ### Cache-miss sensitivity (CPI vs instructions-per-cache-miss)
 
 `ipc_relate.py` reports how the estimated CPI (the reciprocal of IPC) changes as
