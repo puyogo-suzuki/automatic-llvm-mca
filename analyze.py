@@ -5,15 +5,15 @@
 Procedure:
   1. Disassemble the ELF binary with objdump.
   2. Decompose each function into loops and (for non-loop code) basic blocks.
-  3. Run llvm-mca on each region to estimate IPC and the proportion of load
-     instructions (those with the MayLoad attribute).
-  4. Print a CSV with start address, end address, estimated throughput and
-     proportion of load instructions for every region.
+  3. Run llvm-mca on each region to obtain retired instructions, elapsed cycles,
+     and the proportion of load instructions (those with the MayLoad attribute).
+  4. Print a CSV with start address, end address, retired instructions, elapsed
+     cycles, and proportion of load instructions for every region.
 
 For nested loops the outer loop (including the inner loop body) and the inner
 loop are reported separately:
-  0x2,0x6,1.00,0.2500
-  0x0,0x8,1.20,0.1250
+  0x2,0x6,200,103,0.2500
+  0x0,0x8,960,800,0.1250
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
@@ -606,7 +606,7 @@ def _count_load_proportion(instrs, arch: ArchBase) -> float:
 
 def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
              cache_mode: _CacheMissMode = None):
-    """Run llvm-mca on *instrs* and return ``(ipc, load_proportion)``, or None.
+    """Run llvm-mca on *instrs* and return ``(retired, cycles, load_proportion)``, or None.
 
     Parameters
     ----------
@@ -643,25 +643,27 @@ def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None
-    m = re.search(r"\bIPC:\s+([\d.]+)", proc.stdout)
-    if m is None:
+    m_retired = re.search(r"\bInstructions:\s+(\d+)", proc.stdout)
+    m_cycles = re.search(r"\bTotal Cycles:\s+(\d+)", proc.stdout)
+    if m_retired is None or m_cycles is None:
         return None
-    ipc = float(m.group(1))
+    retired = int(m_retired.group(1))
+    cycles = int(m_cycles.group(1))
     load_proportion = _count_load_proportion(instrs, arch)
-    return ipc, load_proportion
+    return retired, cycles, load_proportion
 
 
 def _yield_mca_result(instrs, mca_args, arch: ArchBase,
                       cache_mode: _CacheMissMode):
-    """Run llvm-mca on *instrs* and yield a ``(start, end, ipc, load_proportion)`` tuple.
+    """Run llvm-mca on *instrs* and yield a ``(start, end, retired, cycles, load_proportion)`` tuple.
 
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
         result = _run_mca(instrs, mca_args, arch, cache_mode)
         if result is not None:
-            ipc, load_proportion = result
-            yield instrs[0][0], instrs[-1][0], ipc, load_proportion
+            retired, cycles, load_proportion = result
+            yield instrs[0][0], instrs[-1][0], retired, cycles, load_proportion
 
 
 # ---------------------------------------------------------------------------
@@ -672,7 +674,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
                       cache_mode: _CacheMissMode = None):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, ipc, load_proportion, kind)`` tuples for
+    Yields ``(start_addr, end_addr, retired, cycles, load_proportion, kind)`` tuples for
     every loop and every basic block that is not part of a loop.  *kind* is
     ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
     """
@@ -686,9 +688,9 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        for start, end, ipc, lp in _yield_mca_result(region, mca_args, arch,
-                                                      cache_mode):
-            yield start, end, ipc, lp, "loop"
+        for start, end, retired, cycles, lp in _yield_mca_result(region, mca_args, arch,
+                                                                  cache_mode):
+            yield start, end, retired, cycles, lp, "loop"
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -697,29 +699,26 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
         addr, mnemonic, operands = instr
         bb.append(instr)
         if arch.ends_basic_block(mnemonic, operands):
-            for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch,
-                                                          cache_mode):
-                yield start, end, ipc, lp, "block"
+            for start, end, retired, cycles, lp in _yield_mca_result(bb, mca_args, arch,
+                                                                      cache_mode):
+                yield start, end, retired, cycles, lp, "block"
             bb = []
-    for start, end, ipc, lp in _yield_mca_result(bb, mca_args, arch,
-                                                  cache_mode):
-        yield start, end, ipc, lp, "block"
+    for start, end, retired, cycles, lp in _yield_mca_result(bb, mca_args, arch,
+                                                              cache_mode):
+        yield start, end, retired, cycles, lp, "block"
 
 
 def _analyze_function_ipc(instrs, mca_args=(), arch: ArchBase = None,
                            cache_mode: _CacheMissMode = None):
-    """Compute the IPC estimate for one function.
+    """Select the hottest region for one function.
 
-    IPC_f = max { IPC_l  for l in loops inside f }
+    Hottest region = highest IPC (retired / cycles) among loops, falling back
+    to basic blocks when the function contains no loops.
 
-    If the function contains no loops, falls back to:
-
-    IPC_f = max { IPC_b  for b in basic blocks inside f }
-
-    Returns a ``(start_addr, end_addr, ipc, load_proportion)`` tuple where the
-    address range spans the whole function, *ipc* is the highest IPC found, and
-    *load_proportion* belongs to that highest-IPC region.  Returns ``None``
-    when llvm-mca produces no results for any region in the function.
+    Returns a ``(start_addr, end_addr, retired, cycles, load_proportion)`` tuple
+    where the address range spans the whole function, *retired* and *cycles* are
+    taken from the hottest region, and *load_proportion* belongs to that region.
+    Returns ``None`` when llvm-mca produces no results for any region.
     """
     if not instrs:
         return None
@@ -731,19 +730,20 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: ArchBase = None,
 
     loop_candidates = []
     block_candidates = []
-    for _, _, ipc, lp, kind in _analyze_function(instrs, mca_args, arch,
-                                                  cache_mode):
-        if ipc > 0:
+    for _, _, retired, cycles, lp, kind in _analyze_function(instrs, mca_args, arch,
+                                                              cache_mode):
+        if cycles > 0 and retired > 0:
+            ipc_equiv = retired / cycles
             if kind == "loop":
-                loop_candidates.append((ipc, lp))
+                loop_candidates.append((ipc_equiv, retired, cycles, lp))
             else:
-                block_candidates.append((ipc, lp))
+                block_candidates.append((ipc_equiv, retired, cycles, lp))
 
     candidates = loop_candidates or block_candidates
     if not candidates:
         return None
-    best_ipc, best_lp = max(candidates, key=lambda r: r[0])
-    return instrs[0][0], instrs[-1][0], best_ipc, best_lp
+    _, best_retired, best_cycles, best_lp = max(candidates, key=lambda r: r[0])
+    return instrs[0][0], instrs[-1][0], best_retired, best_cycles, best_lp
 
 
 # ---------------------------------------------------------------------------
@@ -765,11 +765,11 @@ class Analyzer:
         If non-empty, overrides the default ``-mcpu`` value chosen by
         :func:`_detect_arch` and is forwarded to llvm-mca.
     mode:
-        ``"blocks"`` (default) — yield ``(start, end, ipc, load_proportion)``
+        ``"blocks"`` (default) — yield ``(start, end, retired, cycles, load_proportion)``
         for every loop and non-loop basic block.
 
-        ``"functions"`` — yield one tuple per function where *ipc* is the
-        maximum IPC across all loops (or basic blocks when no loops exist).
+        ``"functions"`` — yield one tuple per function where *retired* and *cycles*
+        are from the hottest region (highest retired/cycles ratio).
     cache_miss:
         Number of retired instructions per cache miss (``instructions_per_cache_miss``).
         Use ``float('inf')`` (default) for no cache-miss simulation.
@@ -805,7 +805,7 @@ class Analyzer:
         return mca_args
 
     def run(self):
-        """Analyse :attr:`binary` and yield ``(start, end, ipc, load_proportion)`` tuples."""
+        """Analyse :attr:`binary` and yield ``(start, end, retired, cycles, load_proportion)`` tuples."""
         arch = _detect_arch(self.binary)
         mca_args = self._effective_mca_args(arch)
         cache_mode = _build_cache_mode(self.cache_miss, self.cache_latency,
@@ -820,9 +820,9 @@ class Analyzer:
                 if result is not None:
                     yield result
             else:
-                for start, end, ipc, lp, _kind in _analyze_function(
+                for start, end, retired, cycles, lp, _kind in _analyze_function(
                         instrs, mca_args, arch, cache_mode):
-                    yield start, end, ipc, lp
+                    yield start, end, retired, cycles, lp
 
 
 # ---------------------------------------------------------------------------
@@ -845,13 +845,13 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
         If non-empty, overrides the default ``-mcpu`` value chosen by
         ``_detect_arch`` and is forwarded to llvm-mca.
     mode:
-        ``"blocks"`` (default) — yield ``(start, end, ipc, load_proportion)``
-        for every loop and non-loop basic block, as in the original behaviour.
+        ``"blocks"`` (default) — yield ``(start, end, retired, cycles, load_proportion)``
+        for every loop and non-loop basic block.
 
-        ``"functions"`` — yield ``(start, end, ipc, load_proportion)`` for
+        ``"functions"`` — yield ``(start, end, retired, cycles, load_proportion)`` for
         every function, where *start*/*end* span the whole function and
-        ``ipc = max { IPC_l  for all loops l in f }`` (or the max over basic
-        blocks when the function has no loops).
+        *retired*/*cycles* are from the hottest region (highest retired/cycles ratio)
+        across all loops (or basic blocks when the function has no loops).
     cache_miss:
         Number of retired instructions per cache miss
         (``instructions_per_cache_miss``).  Use ``float('inf')`` (default) for
@@ -910,10 +910,10 @@ def main():
         default="blocks",
         help=(
             "Analysis mode. 'blocks' (default) reports each basic block and "
-            "loop separately with its IPC. 'functions' reports one IPC "
-            "estimate per function (address range = whole function; "
-            "IPC = max IPC across all loops in the function, or max IPC "
-            "across basic blocks if the function has no loops)."
+            "loop separately with its retired instructions and elapsed cycles. "
+            "'functions' reports one estimate per function (address range = "
+            "whole function; retired/cycles from the hottest region across all "
+            "loops in the function, or hottest basic block if no loops exist)."
         ),
     )
     parser.add_argument(
@@ -993,17 +993,17 @@ def main():
 
     if args.mode == "functions":
         # Function mode: one row per function, same output format as block mode.
-        print("start_address,end_address,throughput,load_proportion")
-        for start, end, ipc, load_proportion in runner.run():
-            print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
+        print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
+        for start, end, retired, elapsed_cycles, load_proportion in runner.run():
+            print(f"0x{start:x},0x{end:x},{retired},{elapsed_cycles},{load_proportion:.4f}")
     else:
         # Block mode (default): existing behaviour — one row per loop/BB, sorted.
         results = sorted(
             runner.run(),
             key=lambda x: (x[1], -x[0]))
-        print("start_address,end_address,throughput,load_proportion")
-        for start, end, ipc, load_proportion in results:
-            print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
+        print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
+        for start, end, retired, elapsed_cycles, load_proportion in results:
+            print(f"0x{start:x},0x{end:x},{retired},{elapsed_cycles},{load_proportion:.4f}")
 
 
 if __name__ == "__main__":

@@ -9,13 +9,18 @@ python3 analyze.py [--mcpu <cpu>] <elf-binary>
 
 The program disassembles the ELF binary with `objdump`, splits each function
 into loops and basic blocks, runs `llvm-mca` on each region, and prints a CSV
-with the estimated throughput and proportion of load instructions for every
-region:
+with the retired instructions, elapsed cycles, and proportion of load
+instructions for every region:
 
 ```
-start_address,end_address,throughput,load_proportion
-0xSTART,0xEND,IPC,LOAD_PROPORTION
+start_address,end_address,retired_instructions,elapsed_cycles,load_proportion
+0xSTART,0xEND,RETIRED,CYCLES,LOAD_PROPORTION
 ```
+
+`retired_instructions` is the total number of instructions retired across all
+llvm-mca iterations for the region.  `elapsed_cycles` is the total number of
+cycles elapsed.  Dividing `retired_instructions` by `elapsed_cycles` gives the
+IPC estimate for the region.
 
 `load_proportion` is the fraction of instructions in the region that carry the
 `MayLoad` attribute as reported by `llvm-mca -instruction-info` (e.g. `0.2500`
@@ -60,34 +65,7 @@ python3 analyze_str.py --instructions-per-cache-miss 50 --cache-latency 200 dump
   the number of retired instructions per cache miss.
 * `--cache-latency` (default: 0) sets the simulated cache-miss penalty in cycles.
 * `--cache-miss-mode` (default: `stochastic`) selects the simulation mode
-  (`stochastic` or `average`); see `analyze.py` for a full description.
-
-### Cache-miss sensitivity (CPI vs instructions-per-cache-miss)
-
-`ipc_relate.py` reports how the estimated CPI (the reciprocal of IPC) changes as
-the instructions-per-cache-miss (IPCM) ratio varies.  A lower IPCM means more
-frequent cache misses.
-
-```
-python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] [--cache-miss-mode {stochastic,average}] [--ipcm-values IPCM [IPCM ...]] <elf-binary>
-```
-
-* `--cache-latency` (default: 100) sets the latency in cycles used for simulated
-  cache misses via `# LLVM-MCA-LATENCY` directives.
-* `--cache-miss-mode` (default: `stochastic`) controls how misses are distributed
-  across load instructions.  `stochastic` gives a fraction of loads the full
-  `--cache-latency` penalty; `average` gives all loads an averaged latency.
-* `--ipcm-values` (default: `1 2 5 10 1000 inf`) sets the list of
-  instructions-per-cache-miss values to sweep over.  Provide one or more
-  space-separated positive numbers and/or `inf` (no cache miss).
-  Example: `--ipcm-values 1 10 100 inf`
-* The script runs `llvm-mca` for each loop and basic block at the specified IPCM
-  values and writes:
-
-```
-start_address,end_address,load_proportion,cpi_ipcm1,cpi_ipcm2,cpi_ipcm5,cpi_ipcm10,cpi_ipcm1000,cpi_ipcm_inf
-0xSTART,0xEND,LOAD_PROP,CPI_IPCM1,CPI_IPCM2,CPI_IPCM5,CPI_IPCM10,CPI_IPCM1000,CPI_IPCM_INF
-```
+  (`stochastic`, `average`, or `early`); see `analyze.py` for a full description.
 
 ## How llvm-mca handles jump instructions
 

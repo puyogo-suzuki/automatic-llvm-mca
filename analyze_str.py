@@ -172,11 +172,18 @@ def load_str_file(path: str):
 
     return instrs, arch, start, end
 
-def analyze_str(instrs, arch, mcpu: str = "",
+def analyze_str(path: str, mcpu: str = "",
                 cache_miss: float = float("inf"),
                 cache_latency: int = 0,
                 cache_miss_mode: str = "stochastic"):
-    """
+    """Analyse a dump file produced by ``analyze.py --dump``.
+
+    Parameters
+    ----------
+    path:
+        Path to a text file in the format produced by ``analyze.py --dump``
+        (filename ``{start}_{end}.{arch}.txt``).  The architecture and
+        start/end addresses are inferred from the filename.
     mcpu:
         If non-empty, overrides the default ``-mcpu`` value chosen by the
         architecture and is forwarded to llvm-mca.
@@ -188,7 +195,14 @@ def analyze_str(instrs, arch, mcpu: str = "",
     cache_miss_mode:
         ``"stochastic"`` (default), ``"average"``, or ``"early"``.  See
         :func:`analyze.analyze` for details.
+
+    Yields
+    ------
+    ``(start, end, retired_instructions, elapsed_cycles, load_proportion)``
+    tuples.  Raises :class:`ValueError` for unrecognised filenames or
+    architectures.
     """
+    instrs, arch, start, end = load_str_file(path)
     cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
 
     # Build llvm-mca argument list, optionally overriding -mcpu.
@@ -197,11 +211,10 @@ def analyze_str(instrs, arch, mcpu: str = "",
         mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
         mca_args = mca_args + [f"-mcpu={mcpu}"]
 
-    result = _run_mca(instrs, arch.mca_args, arch, cache_mode)
+    result = _run_mca(instrs, mca_args, arch, cache_mode)
     if result is not None:
-        ipc, load_proportion = result
-        return ipc, load_proportion
-    return None
+        retired, cycles, load_proportion = result
+        yield start, end, retired, cycles, load_proportion
 
 def main():
     parser = argparse.ArgumentParser(
@@ -297,8 +310,6 @@ def main():
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
 
-    inst, arch, start, end = load_str_file(args.textfile)
-
     ipcm_values = []
     if args.ipcm_values is not None:
         for raw in args.ipcm_values:
@@ -322,12 +333,13 @@ def main():
     else:
         ipcm_values.append(args.cache_miss)
     for ipcm in ipcm_values:
-        res = analyze_str(inst, arch, args.mcpu, ipcm, args.cache_latency, args.cache_miss_mode)
+        results = list(analyze_str(args.textfile, args.mcpu, ipcm,
+                                   args.cache_latency, args.cache_miss_mode))
 
-        if res is None:
+        if not results:
             return
-        ipc, load_proportion = res
-        print(f"{ipcm:.2f},{ipc:.2f}")
+        _, _, retired, elapsed_cycles, _ = results[0]
+        print(f"{ipcm:.2f},{retired},{elapsed_cycles}")
 
 
 if __name__ == "__main__":
