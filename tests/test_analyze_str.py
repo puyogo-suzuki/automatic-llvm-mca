@@ -13,6 +13,8 @@ import os
 import shutil
 import sys
 import tempfile
+import io
+import contextlib
 
 import pytest
 
@@ -407,3 +409,37 @@ class TestRoundTrip:
         assert abs(new_lp - orig_lp) < 1e-6, (
             f"load_proportion mismatch: original={orig_lp}, re-analysed={new_lp}"
         )
+
+
+class TestMainCli:
+    """Unit tests for analyze_str.main() CLI argument plumbing."""
+
+    def test_cache_miss_mode_early_passed_to_analyze_str(self, monkeypatch):
+        """main() passes --cache-miss-mode early to analyze_str()."""
+        captured_mode = []
+
+        class _DummyArch:
+            pass
+
+        def fake_load(path):
+            return [(0x0, "nop", "")], _DummyArch(), 0x0, 0x0
+
+        def fake_analyze_str(instrs, arch, mcpu="", cache_miss=float("inf"),
+                             cache_latency=0, cache_miss_mode="stochastic"):
+            captured_mode.append(cache_miss_mode)
+            return (1.0, 0.0)
+
+        monkeypatch.setattr(sys, "argv", [
+            "analyze_str.py",
+            "dummy.txt",
+            "--cache-miss-mode",
+            "early",
+        ])
+        monkeypatch.setattr(os.path, "isfile", lambda p: True)
+        monkeypatch.setattr(analyze_str, "load_str_file", fake_load)
+        monkeypatch.setattr(analyze_str, "analyze_str", fake_analyze_str)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            analyze_str.main()
+
+        assert captured_mode == ["early"]

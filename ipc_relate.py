@@ -79,7 +79,8 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
         ``"stochastic"`` (default) — a fraction of loads receive the full
         *cache_latency* penalty, derived from the instructions-per-cache-miss
         ratio.  ``"average"`` — all loads receive an average latency computed
-        from the ratio.
+        from the ratio. ``"early"`` — like ``"stochastic"`` but all miss
+        penalties are placed on the first loads in the repeated block.
     instructions_per_cache_miss:
         List of instructions-per-cache-miss values to sweep over.  Each entry
         is either a positive finite float or ``float('inf')`` (representing no
@@ -162,7 +163,7 @@ def main():
     )
     parser.add_argument(
         "--cache-miss-mode",
-        choices=["stochastic", "average"],
+        choices=["stochastic", "average", "early"],
         default="stochastic",
         dest="cache_miss_mode",
         help=(
@@ -171,7 +172,11 @@ def main():
             "penalty according to the effective miss fraction derived from the "
             "instructions-per-cache-miss ratio. "
             "'average': all loads receive an average latency derived from the "
-            "instructions-per-cache-miss ratio and --cache-latency."
+            "instructions-per-cache-miss ratio and --cache-latency. "
+            "'early': like 'stochastic' but all cache misses are placed on "
+            "the first loads in the repeated block rather than distributed "
+            "uniformly (e.g. miss miss miss hit hit instead of "
+            "miss hit miss hit miss)."
         ),
     )
     parser.add_argument(

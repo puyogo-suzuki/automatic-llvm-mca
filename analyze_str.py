@@ -186,7 +186,7 @@ def analyze_str(instrs, arch, mcpu: str = "",
     cache_latency:
         Cache-miss penalty in cycles.  Only used when *cache_miss* is finite.
     cache_miss_mode:
-        ``"stochastic"`` (default) or ``"average"``.  See
+        ``"stochastic"`` (default), ``"average"``, or ``"early"``.  See
         :func:`analyze.analyze` for details.
     """
     cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
@@ -253,7 +253,7 @@ def main():
     )
     parser.add_argument(
         "--cache-miss-mode",
-        choices=["stochastic", "average"],
+        choices=["stochastic", "average", "early"],
         default="stochastic",
         dest="cache_miss_mode",
         help=(
@@ -266,7 +266,11 @@ def main():
             "'average': all load instructions receive a fixed latency derived "
             "from (num_instructions / --instructions-per-cache-miss / "
             "num_loads) * --cache-latency cycles, modelling the average cost "
-            "of cache misses uniformly across all loads."
+            "of cache misses uniformly across all loads. "
+            "'early': like 'stochastic' but all cache misses are placed on "
+            "the first loads in the repeated block rather than distributed "
+            "uniformly (e.g. miss miss miss hit hit instead of "
+            "miss hit miss hit miss)."
         ),
     )
 
