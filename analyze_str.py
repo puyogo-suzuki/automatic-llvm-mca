@@ -172,18 +172,19 @@ def load_str_file(path: str):
 
     return instrs, arch, start, end
 
-def analyze_str(path: str, mcpu: str = "",
+def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
                 cache_miss: float = float("inf"),
                 cache_latency: int = 0,
                 cache_miss_mode: str = "stochastic"):
-    """Analyse a dump file produced by ``analyze.py --dump``.
+    """Run llvm-mca on pre-loaded instruction tuples.
 
     Parameters
     ----------
-    path:
-        Path to a text file in the format produced by ``analyze.py --dump``
-        (filename ``{start}_{end}.{arch}.txt``).  The architecture and
-        start/end addresses are inferred from the filename.
+    instrs:
+        List of ``(addr, mnemonic, operands)`` triples, as returned by
+        :func:`load_str_file`.
+    arch:
+        Architecture object, as returned by :func:`load_str_file`.
     mcpu:
         If non-empty, overrides the default ``-mcpu`` value chosen by the
         architecture and is forwarded to llvm-mca.
@@ -196,13 +197,11 @@ def analyze_str(path: str, mcpu: str = "",
         ``"stochastic"`` (default), ``"average"``, or ``"early"``.  See
         :func:`analyze.analyze` for details.
 
-    Yields
-    ------
-    ``(start, end, retired_instructions, elapsed_cycles, load_proportion)``
-    tuples.  Raises :class:`ValueError` for unrecognised filenames or
-    architectures.
+    Returns
+    -------
+    ``(retired_instructions, elapsed_cycles, load_proportion)`` on success,
+    or ``None`` when llvm-mca produces no result.
     """
-    instrs, arch, start, end = load_str_file(path)
     cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
 
     # Build llvm-mca argument list, optionally overriding -mcpu.
@@ -212,9 +211,7 @@ def analyze_str(path: str, mcpu: str = "",
         mca_args = mca_args + [f"-mcpu={mcpu}"]
 
     result = _run_mca(instrs, mca_args, arch, cache_mode)
-    if result is not None:
-        retired, cycles, load_proportion = result
-        yield start, end, retired, cycles, load_proportion
+    return result  # (retired, cycles, load_proportion) or None
 
 def main():
     parser = argparse.ArgumentParser(
@@ -332,13 +329,16 @@ def main():
             parser.error("--ipcm-values: at least one value required")
     else:
         ipcm_values.append(args.cache_miss)
-    for ipcm in ipcm_values:
-        results = list(analyze_str(args.textfile, args.mcpu, ipcm,
-                                   args.cache_latency, args.cache_miss_mode))
 
-        if not results:
+    instrs, arch, start, end = load_str_file(args.textfile)
+
+    for ipcm in ipcm_values:
+        result = analyze_str(instrs, arch, args.mcpu, ipcm,
+                             args.cache_latency, args.cache_miss_mode)
+
+        if result is None:
             return
-        _, _, retired, elapsed_cycles, _ = results[0]
+        retired, elapsed_cycles, _ = result
         print(f"{ipcm:.2f},{retired},{elapsed_cycles}")
 
 
