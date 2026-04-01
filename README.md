@@ -33,7 +33,7 @@ the instructions-per-cache-miss (IPCM) ratio varies.  A lower IPCM means more
 frequent cache misses.
 
 ```
-python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] [--cache-miss-mode {stochastic,average}] <elf-binary>
+python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] [--cache-miss-mode {stochastic,average}] [--ipcm-values IPCM [IPCM ...]] <elf-binary>
 ```
 
 * `--cache-latency` (default: 100) sets the latency in cycles used for simulated
@@ -41,12 +41,16 @@ python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] [--cache-miss-mo
 * `--cache-miss-mode` (default: `stochastic`) controls how misses are distributed
   across load instructions.  `stochastic` gives a fraction of loads the full
   `--cache-latency` penalty; `average` gives all loads an averaged latency.
-* The script runs `llvm-mca` for each loop and basic block at IPCM values of
-  1, 10, 20, 50, 100, and infinity (no cache miss) and writes:
+* `--ipcm-values` (default: `1 2 5 10 1000 inf`) sets the list of
+  instructions-per-cache-miss values to sweep over.  Provide one or more
+  space-separated positive numbers and/or `inf` (no cache miss).
+  Example: `--ipcm-values 1 10 100 inf`
+* The script runs `llvm-mca` for each loop and basic block at the specified IPCM
+  values and writes:
 
 ```
-start_address,end_address,load_proportion,cpi_ipcm1,cpi_ipcm10,cpi_ipcm20,cpi_ipcm50,cpi_ipcm100,cpi_ipcm_inf
-0xSTART,0xEND,LOAD_PROP,CPI_IPCM1,CPI_IPCM10,CPI_IPCM20,CPI_IPCM50,CPI_IPCM100,CPI_IPCM_INF
+start_address,end_address,load_proportion,cpi_ipcm1,cpi_ipcm2,cpi_ipcm5,cpi_ipcm10,cpi_ipcm1000,cpi_ipcm_inf
+0xSTART,0xEND,LOAD_PROP,CPI_IPCM1,CPI_IPCM2,CPI_IPCM5,CPI_IPCM10,CPI_IPCM1000,CPI_IPCM_INF
 ```
 
 ## How llvm-mca handles jump instructions
