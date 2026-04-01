@@ -153,17 +153,30 @@ def _parse_instrs_from_dump(text: str) -> list:
     return instrs
 
 
-def analyze_str(path: str, mcpu: str = "",
-                cache_miss: float = float("inf"),
-                cache_latency: int = 0,
-                cache_miss_mode: str = "stochastic"):
-    """Analyse a dump file and yield ``(start, end, ipc, load_proportion)``.
+def load_str_file(path: str):
+    """Load a dump file.
 
     Parameters
     ----------
     path:
         Path to a text file in the format produced by ``analyze.py --dump``
         (filename ``{start}_{end}.{arch}.txt``).
+    """
+    start, end, arch_name = _parse_filename(path)
+    arch = _arch_from_name(arch_name)
+
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+
+    instrs = _parse_instrs_from_dump(text)
+
+    return instrs, arch, start, end
+
+def analyze_str(instrs, arch, mcpu: str = "",
+                cache_miss: float = float("inf"),
+                cache_latency: int = 0,
+                cache_miss_mode: str = "stochastic"):
+    """
     mcpu:
         If non-empty, overrides the default ``-mcpu`` value chosen by the
         architecture and is forwarded to llvm-mca.
@@ -176,8 +189,7 @@ def analyze_str(path: str, mcpu: str = "",
         ``"stochastic"`` (default) or ``"average"``.  See
         :func:`analyze.analyze` for details.
     """
-    start, end, arch_name = _parse_filename(path)
-    arch = _arch_from_name(arch_name)
+    cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
 
     # Build llvm-mca argument list, optionally overriding -mcpu.
     mca_args = arch.mca_args
@@ -185,17 +197,11 @@ def analyze_str(path: str, mcpu: str = "",
         mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
         mca_args = mca_args + [f"-mcpu={mcpu}"]
 
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-
-    instrs = _parse_instrs_from_dump(text)
-    cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
-
-    result = _run_mca(instrs, mca_args, arch, cache_mode)
+    result = _run_mca(instrs, arch.mca_args, arch, cache_mode)
     if result is not None:
         ipc, load_proportion = result
-        yield start, end, ipc, load_proportion
-
+        return ipc, load_proportion
+    return None
 
 def main():
     parser = argparse.ArgumentParser(
@@ -263,6 +269,20 @@ def main():
             "of cache misses uniformly across all loads."
         ),
     )
+
+    parser.add_argument(
+        "--ipcm-values",
+        nargs="+",
+        metavar="IPCM",
+        default=None,
+        dest="ipcm_values",
+        help=(
+            "Space-separated list of instructions-per-cache-miss values to "
+            "sweep over. Each value must be a positive number; use 'inf' to "
+            "represent no cache miss. "
+            "Example: --ipcm-values 1 10 100 inf"
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.textfile):
@@ -273,15 +293,37 @@ def main():
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
 
-    print("start_address,end_address,throughput,load_proportion")
-    for start, end, ipc, load_proportion in analyze_str(
-        path=args.textfile,
-        mcpu=args.mcpu,
-        cache_miss=args.cache_miss,
-        cache_latency=args.cache_latency,
-        cache_miss_mode=args.cache_miss_mode,
-    ):
-        print(f"0x{start:x},0x{end:x},{ipc:.2f},{load_proportion:.4f}")
+    inst, arch, start, end = load_str_file(args.textfile)
+
+    ipcm_values = []
+    if args.ipcm_values is not None:
+        for raw in args.ipcm_values:
+            if raw.lower() == "inf":
+                ipcm_values.append(float("inf"))
+            else:
+                try:
+                    val = float(raw)
+                except ValueError:
+                    parser.error(
+                        f"--ipcm-values: invalid value '{raw}' "
+                        "(expected a positive number or 'inf')"
+                    )
+                if val <= 0:
+                    parser.error(
+                        f"--ipcm-values: value '{raw}' must be > 0"
+                    )
+                ipcm_values.append(val)
+        if not ipcm_values:
+            parser.error("--ipcm-values: at least one value required")
+    else:
+        ipcm_values.append(args.cache_miss)
+    for ipcm in ipcm_values:
+        res = analyze_str(inst, arch, args.mcpu, ipcm, args.cache_latency, args.cache_miss_mode)
+
+        if res is None:
+            return
+        ipc, load_proportion = res
+        print(f"{ipcm:.2f},{ipc:.2f}")
 
 
 if __name__ == "__main__":
