@@ -133,12 +133,12 @@ class TestInstructionsPerCacheMiss:
     """Sanity checks on the _INSTRUCTIONS_PER_CACHE_MISS constant."""
 
     def test_length(self):
-        """There are 6 instructions-per-cache-miss steps (1, 10, 20, 50, 100, inf)."""
+        """There are 6 instructions-per-cache-miss steps (1, 2, 5, 10, 1000, inf)."""
         assert len(ipc_relate._INSTRUCTIONS_PER_CACHE_MISS) == 6
 
     def test_values(self):
-        """The values are 1, 10, 20, 50, 100, inf."""
-        assert ipc_relate._INSTRUCTIONS_PER_CACHE_MISS == [1, 10, 20, 50, 100, float("inf")]
+        """The values are 1, 2, 5, 10, 1000, inf."""
+        assert ipc_relate._INSTRUCTIONS_PER_CACHE_MISS == [1, 2, 5, 10, 1000, float("inf")]
 
     def test_strictly_increasing(self):
         rates = ipc_relate._INSTRUCTIONS_PER_CACHE_MISS
@@ -291,7 +291,7 @@ class TestMainIpcmValues:
         header = output.splitlines()[0]
         assert header == (
             "start_address,end_address,load_proportion,"
-            "cpi_ipcm1,cpi_ipcm10,cpi_ipcm20,cpi_ipcm50,cpi_ipcm100,cpi_ipcm_inf"
+            "cpi_ipcm1,cpi_ipcm2,cpi_ipcm5,cpi_ipcm10,cpi_ipcm1000,cpi_ipcm_inf"
         )
 
     def test_custom_ipcm_header(self, monkeypatch):
