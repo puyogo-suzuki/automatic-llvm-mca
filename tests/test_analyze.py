@@ -1389,6 +1389,167 @@ class TestCacheMissIpcmLogic:
         mode = analyze._build_cache_mode(10, 100, "average")
         assert isinstance(mode, analyze._AverageCacheMiss)
 
+    def test_build_cache_mode_finite_early(self):
+        """_build_cache_mode(10, ..., 'early') returns _EarlyCacheMiss."""
+        mode = analyze._build_cache_mode(10, 100, "early")
+        assert isinstance(mode, analyze._EarlyCacheMiss)
+
+
+class TestEarlyCacheMiss:
+    """Tests for the _EarlyCacheMiss cache-miss simulation mode."""
+
+    _ARCH = analyze.X86Arch()
+
+    # 5 loads, 2 non-loads
+    _INSTRS = [
+        (0x0, "mov", "(%eax),%ebx"),
+        (0x2, "mov", "(%ebx),%ecx"),
+        (0x4, "mov", "(%ecx),%edx"),
+        (0x6, "mov", "(%edx),%esi"),
+        (0x8, "mov", "(%esi),%edi"),
+        (0xa, "add", "%ebx,%ecx"),
+        (0xc, "ret", ""),
+    ]
+
+    def _count_latency_directives(self, asm: str) -> int:
+        """Return the number of opening # LLVM-MCA-LATENCY N directives."""
+        return sum(
+            1 for line in asm.splitlines()
+            if line.startswith("# LLVM-MCA-LATENCY") and line != "# LLVM-MCA-LATENCY"
+        )
+
+    def test_early_mode_returns_early_cache_miss_class(self):
+        """_build_cache_mode with 'early' returns _EarlyCacheMiss."""
+        mode = analyze._build_cache_mode(10, 100, "early")
+        assert isinstance(mode, analyze._EarlyCacheMiss)
+
+    def test_early_mode_extra_mca_args(self):
+        """_EarlyCacheMiss adds -iterations=1 to llvm-mca args."""
+        mode = analyze._EarlyCacheMiss(10, 100)
+        assert mode.extra_mca_args() == ["-iterations=1"]
+
+    def test_early_mode_no_loads_uses_plain_format_asm(self, monkeypatch):
+        """When num_loads=0, _format_asm is used."""
+        called = {}
+
+        def fake_plain(instrs, arch):
+            called["plain"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm", fake_plain)
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._EarlyCacheMiss(instructions_per_cache_miss=10,
+                                       cache_latency=100)
+        mode.format_asm(no_load_instrs, self._ARCH)
+        assert called.get("plain"), "Expected _format_asm for no-load region"
+
+    def test_early_mode_misses_at_front(self):
+        """With 5 loads and miss_fraction=3/5, the first 3 loads get the penalty
+        and the last 2 do not (across all repetitions).
+
+        miss_fraction = 0.6 → a = round(0.6 * 100 * 5) = 300 out of 500 loads.
+        The first 300 loads each have a latency directive; the last 200 do not.
+        """
+        # 5 loads, miss_fraction=0.6 over 100 repetitions → 300 misses out of 500
+        instrs = [
+            (0x0, "mov", "(%eax),%ebx"),
+            (0x2, "mov", "(%ebx),%ecx"),
+            (0x4, "mov", "(%ecx),%edx"),
+            (0x6, "mov", "(%edx),%esi"),
+            (0x8, "mov", "(%esi),%edi"),
+        ]
+        asm = analyze._format_asm_with_cache_miss(
+            instrs, self._ARCH, 0.6, 100, front_loaded=True
+        )
+        lines = asm.splitlines()
+        # Collect per-load latency values in order
+        latencies = [
+            int(line.split()[-1])
+            for line in lines
+            if line.startswith("# LLVM-MCA-LATENCY ") and line != "# LLVM-MCA-LATENCY"
+        ]
+
+        # 300 misses (latency=100), then 200 hits (no latency directive → not in list)
+        assert len(latencies) == 300, f"Expected 300 latency directives, got {len(latencies)}"
+        assert all(lat == 100 for lat in latencies), "All latency values should be 100"
+
+    def test_early_mode_misses_before_hits_in_each_rep(self):
+        """In each repetition of 5 loads with miss_fraction=3/5, the first 3
+        loads have the penalty and the last 2 do not."""
+        # Use 100 repetitions, 5 loads each → 500 total
+        # First 300 loads are misses (first 60 repetitions fully missed,
+        # then rep 60 has 0 more misses since 300/5=60 full reps).
+        # Actually with 300 misses across 500 loads placed at the front,
+        # first 300 loads are reps 0..59 fully (60 reps * 5 = 300 loads).
+        instrs = [
+            (0x0, "mov", "(%eax),%ebx"),
+            (0x2, "mov", "(%ebx),%ecx"),
+            (0x4, "mov", "(%ecx),%edx"),
+            (0x6, "mov", "(%edx),%esi"),
+            (0x8, "mov", "(%esi),%edi"),
+        ]
+        asm = analyze._format_asm_with_cache_miss(
+            instrs, self._ARCH, 0.6, 100, front_loaded=True
+        )
+        lines = asm.splitlines()
+        # Build a list of booleans: True if a load got a latency directive.
+        # A load with a directive is preceded by "# LLVM-MCA-LATENCY N";
+        # a load without a directive appears directly as "\tmov ...".
+        _OPEN_DIRECTIVE = "# LLVM-MCA-LATENCY "
+        _CLOSE_DIRECTIVE = "# LLVM-MCA-LATENCY"
+        load_has_latency = []
+        for idx, line in enumerate(lines):
+            if line.startswith(_OPEN_DIRECTIVE) and line != _CLOSE_DIRECTIVE:
+                load_has_latency.append(True)
+            elif line.startswith("\tmov") and "%" in line:
+                # Only add False when not already accounted for by a directive
+                prev = lines[idx - 1] if idx > 0 else ""
+                if not (prev.startswith(_OPEN_DIRECTIVE) and prev != _CLOSE_DIRECTIVE):
+                    load_has_latency.append(False)
+
+        # First 300 entries should be True, last 200 should be False
+        assert load_has_latency[:300] == [True] * 300
+        assert load_has_latency[300:] == [False] * 200
+
+    def test_early_mode_same_miss_count_as_stochastic(self):
+        """Early and stochastic modes produce the same total number of miss
+        latency directives for the same miss_fraction."""
+        instrs = [
+            (0x0, "mov", "(%eax),%ebx"),
+            (0x2, "add", "%eax,%ebx"),
+            (0x4, "mov", "(%ebx),%ecx"),
+        ]
+        asm_early = analyze._format_asm_with_cache_miss(
+            instrs, self._ARCH, 0.5, 100, front_loaded=True
+        )
+        asm_stoch = analyze._format_asm_with_cache_miss(
+            instrs, self._ARCH, 0.5, 100, front_loaded=False
+        )
+        count_early = self._count_latency_directives(asm_early)
+        count_stoch = self._count_latency_directives(asm_stoch)
+        assert count_early == count_stoch, (
+            f"Early ({count_early}) and stochastic ({count_stoch}) should "
+            "produce the same number of miss latency directives"
+        )
+
+    def test_early_mode_calls_format_with_front_loaded_true(self, monkeypatch):
+        """_EarlyCacheMiss.format_asm calls _format_asm_with_cache_miss with
+        front_loaded=True."""
+        called = {}
+
+        def fake_fmt(instrs, arch, cache_miss, cache_latency, front_loaded=False):
+            called["front_loaded"] = front_loaded
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
+
+        mode = analyze._EarlyCacheMiss(instructions_per_cache_miss=10,
+                                       cache_latency=100)
+        mode.format_asm(self._INSTRS, self._ARCH)
+        assert called.get("front_loaded") is True, (
+            "_EarlyCacheMiss must call _format_asm_with_cache_miss with front_loaded=True"
+        )
+
 
 class TestDumper:
     """Tests for the Dumper wrapper class."""
