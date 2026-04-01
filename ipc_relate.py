@@ -2,15 +2,15 @@
 """ipc_relate.py: Estimate CPI at varying instructions-per-cache-miss rates for ELF binaries.
 
 For each basic block / loop in the binary, estimates CPI (= 1/IPC) at
-instructions-per-cache-miss values of 1, 5, 10, 100, 1000, and infinity
+instructions-per-cache-miss values of 1, 10, 20, 50, 100, and infinity
 (no cache miss) using llvm-mca.
 
 Output CSV columns:
   start_address, end_address, load_proportion,
-  cpi_ipcm1, cpi_ipcm5, cpi_ipcm10, cpi_ipcm100, cpi_ipcm1000, cpi_ipcm_inf
+  cpi_ipcm1, cpi_ipcm10, cpi_ipcm20, cpi_ipcm50, cpi_ipcm100, cpi_ipcm_inf
 
 Usage:
-  python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] <elf-binary>
+  python3 ipc_relate.py [--mcpu <cpu>] [--cache-latency <cycles>] [--ipcm-values IPCM [IPCM ...]] <elf-binary>
 """
 
 import argparse
@@ -22,21 +22,24 @@ import analyze
 
 # Instructions-per-cache-miss values to sweep over.
 # float('inf') represents no cache miss.
-_INSTRUCTIONS_PER_CACHE_MISS = [1, 5, 10, 100, 1000, float("inf")]
+_INSTRUCTIONS_PER_CACHE_MISS = [1, 10, 20, 50, 100, float("inf")]
 
 
 def _region_cpis(region, mca_args, arch: analyze.ArchBase, cache_latency: int,
-                 cache_miss_mode: str = "stochastic"):
+                 cache_miss_mode: str = "stochastic",
+                 instructions_per_cache_miss=None):
     """Run llvm-mca on *region* at each instructions-per-cache-miss value.
 
     Returns ``(cpis, load_proportion)`` where *cpis* is a list of CPI values
-    (one per entry in ``_INSTRUCTIONS_PER_CACHE_MISS``) and *load_proportion*
+    (one per entry in *instructions_per_cache_miss*) and *load_proportion*
     is taken from the no-miss run.  Returns ``None`` if llvm-mca fails for any
     value.
     """
+    if instructions_per_cache_miss is None:
+        instructions_per_cache_miss = _INSTRUCTIONS_PER_CACHE_MISS
     cpis = []
     load_proportion = None
-    for ipcm in _INSTRUCTIONS_PER_CACHE_MISS:
+    for ipcm in instructions_per_cache_miss:
         if load_proportion == 0:
             cpis.append(cpis[-1])
             continue
@@ -54,12 +57,13 @@ def _region_cpis(region, mca_args, arch: analyze.ArchBase, cache_latency: int,
 
 
 def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
-               cache_miss_mode: str = "stochastic"):
+               cache_miss_mode: str = "stochastic",
+               instructions_per_cache_miss=None):
     """Analyse *binary* and yield CPI-vs-instructions-per-cache-miss tuples.
 
-    Yields ``(start, end, load_proportion, cpi_ipcm1, cpi_ipcm5, cpi_ipcm10,
-    cpi_ipcm100, cpi_ipcm1000, cpi_ipcm_inf)`` for every loop and non-loop
-    basic block in the binary.
+    Yields ``(start, end, load_proportion, cpi_ipcm1, ...)`` for every loop
+    and non-loop basic block in the binary, with one CPI column per entry in
+    *instructions_per_cache_miss*.
 
     Parameters
     ----------
@@ -76,7 +80,14 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
         *cache_latency* penalty, derived from the instructions-per-cache-miss
         ratio.  ``"average"`` — all loads receive an average latency computed
         from the ratio.
+    instructions_per_cache_miss:
+        List of instructions-per-cache-miss values to sweep over.  Each entry
+        is either a positive finite float or ``float('inf')`` (representing no
+        cache miss).  Defaults to ``_INSTRUCTIONS_PER_CACHE_MISS`` when
+        ``None``.
     """
+    if instructions_per_cache_miss is None:
+        instructions_per_cache_miss = _INSTRUCTIONS_PER_CACHE_MISS
     arch = analyze._detect_arch(binary)
     mca_args = arch.mca_args
     if mcpu:
@@ -92,7 +103,7 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
             if not region:
                 continue
             result = _region_cpis(region, mca_args, arch, cache_latency,
-                                   cache_miss_mode)
+                                   cache_miss_mode, instructions_per_cache_miss)
             if result is not None:
                 cpis, load_proportion = result
                 yield (region[0][0], region[-1][0], load_proportion) + tuple(cpis)
@@ -107,14 +118,14 @@ def ipc_relate(binary: str, mcpu: str = "", cache_latency: int = 100,
             if arch.ends_basic_block(mnemonic, operands):
                 if bb:
                     result = _region_cpis(bb, mca_args, arch, cache_latency,
-                                          cache_miss_mode)
+                                          cache_miss_mode, instructions_per_cache_miss)
                     if result is not None:
                         cpis, load_proportion = result
                         yield (bb[0][0], bb[-1][0], load_proportion) + tuple(cpis)
                 bb = []
         if bb:
             result = _region_cpis(bb, mca_args, arch, cache_latency,
-                                   cache_miss_mode)
+                                   cache_miss_mode, instructions_per_cache_miss)
             if result is not None:
                 cpis, load_proportion = result
                 yield (bb[0][0], bb[-1][0], load_proportion) + tuple(cpis)
@@ -163,6 +174,19 @@ def main():
             "instructions-per-cache-miss ratio and --cache-latency."
         ),
     )
+    parser.add_argument(
+        "--ipcm-values",
+        nargs="+",
+        metavar="IPCM",
+        default=None,
+        dest="ipcm_values",
+        help=(
+            "Space-separated list of instructions-per-cache-miss values to "
+            "sweep over (default: 1 10 20 50 100 inf). Each value must be a "
+            "positive number; use 'inf' to represent no cache miss. "
+            "Example: --ipcm-values 1 10 100 inf"
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.binary):
@@ -170,15 +194,39 @@ def main():
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
 
-    def _col_name(ipcm):
-        return "cpi_ipcm_inf" if math.isinf(ipcm) else f"cpi_ipcm{int(ipcm)}"
+    # Parse --ipcm-values into a list of floats.
+    if args.ipcm_values is not None:
+        ipcm_values = []
+        for raw in args.ipcm_values:
+            if raw.lower() == "inf":
+                ipcm_values.append(float("inf"))
+            else:
+                try:
+                    val = float(raw)
+                except ValueError:
+                    parser.error(
+                        f"--ipcm-values: invalid value '{raw}' "
+                        "(expected a positive number or 'inf')"
+                    )
+                if val <= 0:
+                    parser.error(
+                        f"--ipcm-values: value '{raw}' must be > 0"
+                    )
+                ipcm_values.append(val)
+        if not ipcm_values:
+            parser.error("--ipcm-values: at least one value required")
+    else:
+        ipcm_values = _INSTRUCTIONS_PER_CACHE_MISS
 
-    ipcm_cols = ",".join(_col_name(ipcm) for ipcm in _INSTRUCTIONS_PER_CACHE_MISS)
+    def _col_name(ipcm):
+        return "cpi_ipcm_inf" if math.isinf(ipcm) else f"cpi_ipcm{ipcm:g}"
+
+    ipcm_cols = ",".join(_col_name(ipcm) for ipcm in ipcm_values)
     print(f"start_address,end_address,load_proportion,{ipcm_cols}")
 
     results = sorted(
         ipc_relate(args.binary, args.mcpu, args.cache_latency,
-                   args.cache_miss_mode),
+                   args.cache_miss_mode, ipcm_values),
         # Sort by end address ascending; for equal end, larger start first
         # (inner loop before outer).  Matches analyze.py's output ordering.
         key=lambda x: (x[1], -x[0]),

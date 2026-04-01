@@ -199,6 +199,131 @@ class TestRegionCpis:
         # load_proportion should come from the first (miss_rate=0) call.
         assert abs(load_proportion - 0.1) < 1e-9
 
+    def test_custom_instructions_per_cache_miss(self, monkeypatch):
+        """_region_cpis respects a custom instructions_per_cache_miss list."""
+        monkeypatch.setattr(analyze, "_run_mca", lambda *a, **kw: (2.0, 0.5))
+        custom = [1, 50, float("inf")]
+        cpis, _ = ipc_relate._region_cpis(
+            self._dummy_region(), [], "x86", 100,
+            instructions_per_cache_miss=custom,
+        )
+        assert len(cpis) == len(custom)
+
+    def test_single_ipcm_value(self, monkeypatch):
+        """_region_cpis works with a single-element instructions_per_cache_miss."""
+        monkeypatch.setattr(analyze, "_run_mca", lambda *a, **kw: (5.0, 0.0))
+        cpis, _ = ipc_relate._region_cpis(
+            self._dummy_region(), [], "x86", 100,
+            instructions_per_cache_miss=[float("inf")],
+        )
+        assert len(cpis) == 1
+        assert abs(cpis[0] - 0.2) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — ipc_relate() function with custom IPCM values
+# ---------------------------------------------------------------------------
+
+class TestIpcRelateCustomIpcm:
+    """Unit tests for ipc_relate.ipc_relate() with custom instructions_per_cache_miss."""
+
+    def _dummy_region(self):
+        return [(0x0, "add", "%eax,%edx"), (0x2, "jne", "0")]
+
+    def test_custom_ipcm_tuple_length(self, monkeypatch):
+        """ipc_relate() yields tuples with one CPI per custom IPCM value."""
+        custom = [1, 50, float("inf")]
+
+        def fake_run_mca(region, mca_args, arch, cache_mode):
+            return (2.0, 0.25)
+
+        monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
+        monkeypatch.setattr(analyze, "_detect_arch", lambda b: analyze.X86Arch())
+        monkeypatch.setattr(
+            analyze, "disassemble",
+            lambda binary, arch: [("func", self._dummy_region())],
+        )
+        monkeypatch.setattr(analyze, "_find_loops", lambda instrs, arch: [])
+        monkeypatch.setattr(analyze, "_in_any_loop", lambda addr, loops: False)
+
+        results = list(
+            ipc_relate.ipc_relate(
+                "dummy.o", instructions_per_cache_miss=custom,
+            )
+        )
+        assert results, "Expected at least one result"
+        for row in results:
+            # start, end, load_proportion + one CPI per IPCM value
+            assert len(row) == 3 + len(custom)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — main() CLI argument --ipcm-values
+# ---------------------------------------------------------------------------
+
+class TestMainIpcmValues:
+    """Unit tests for the --ipcm-values CLI argument in main()."""
+
+    def _run_main(self, argv, monkeypatch, fake_ipc_relate=None):
+        """Helper: run ipc_relate.main() with patched sys.argv."""
+        import io
+
+        if fake_ipc_relate is None:
+            def fake_ipc_relate(*a, **kw):
+                return iter([])
+
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(ipc_relate, "ipc_relate", fake_ipc_relate)
+        # Patch os.path.isfile to avoid needing a real binary.
+        monkeypatch.setattr(os.path, "isfile", lambda p: True)
+
+        captured = io.StringIO()
+        import contextlib
+        with contextlib.redirect_stdout(captured):
+            ipc_relate.main()
+        return captured.getvalue()
+
+    def test_default_ipcm_header(self, monkeypatch):
+        """main() emits the default IPCM column headers when --ipcm-values is not given."""
+        output = self._run_main(
+            ["ipc_relate.py", "dummy.o"], monkeypatch
+        )
+        header = output.splitlines()[0]
+        assert header == (
+            "start_address,end_address,load_proportion,"
+            "cpi_ipcm1,cpi_ipcm10,cpi_ipcm20,cpi_ipcm50,cpi_ipcm100,cpi_ipcm_inf"
+        )
+
+    def test_custom_ipcm_header(self, monkeypatch):
+        """main() emits custom IPCM column headers when --ipcm-values is given."""
+        output = self._run_main(
+            ["ipc_relate.py", "dummy.o", "--ipcm-values", "1", "50", "inf"],
+            monkeypatch,
+        )
+        header = output.splitlines()[0]
+        assert header == (
+            "start_address,end_address,load_proportion,"
+            "cpi_ipcm1,cpi_ipcm50,cpi_ipcm_inf"
+        )
+
+    def test_custom_ipcm_passed_to_ipc_relate(self, monkeypatch):
+        """main() passes the parsed --ipcm-values to ipc_relate()."""
+        captured_ipcm = []
+
+        def fake_ipc_relate(binary, mcpu="", cache_latency=100,
+                             cache_miss_mode="stochastic",
+                             instructions_per_cache_miss=None):
+            captured_ipcm.append(instructions_per_cache_miss)
+            return iter([])
+
+        self._run_main(
+            ["ipc_relate.py", "dummy.o", "--ipcm-values", "5", "100", "inf"],
+            monkeypatch,
+            fake_ipc_relate=fake_ipc_relate,
+        )
+        assert len(captured_ipcm) == 1
+        assert captured_ipcm[0] == [5.0, 100.0, float("inf")]
+
 
 # ---------------------------------------------------------------------------
 # Integration tests — AMD64 (x86-64)
