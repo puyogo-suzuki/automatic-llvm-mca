@@ -267,27 +267,31 @@ class TestAnalyzeStrIntegration:
 
     @_NEED_MCA
     def test_basic_block_returns_result(self, tmp_path):
-        """analyze_str() returns at least one result for an x86-64 basic block."""
+        """analyze_str() returns a result for an x86-64 basic block."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        results = list(analyze_str.analyze_str(path))
-        assert results, "Expected at least one result"
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        result = analyze_str.analyze_str(instrs, arch)
+        assert result is not None, "Expected a result"
 
     @_NEED_MCA
     def test_ipc_positive(self, tmp_path):
-        """IPC from the basic block dump is strictly positive."""
+        """Retired instructions and elapsed cycles from the basic block dump are strictly positive."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        results = list(analyze_str.analyze_str(path))
-        assert results
-        _, _, ipc, _ = results[0]
-        assert ipc > 0, f"Expected positive IPC, got {ipc}"
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        result = analyze_str.analyze_str(instrs, arch)
+        assert result is not None
+        retired, cycles, _ = result
+        assert retired > 0, f"Expected positive retired instructions, got {retired}"
+        assert cycles > 0, f"Expected positive elapsed cycles, got {cycles}"
 
     @_NEED_MCA
     def test_load_proportion_nonzero(self, tmp_path):
         """The basic block has one load, so load_proportion must be > 0."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        results = list(analyze_str.analyze_str(path))
-        assert results
-        _, _, _, load_proportion = results[0]
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        result = analyze_str.analyze_str(instrs, arch)
+        assert result is not None
+        _, _, load_proportion = result
         assert load_proportion > 0, (
             f"Expected load_proportion > 0 (block has a load), got {load_proportion}"
         )
@@ -298,9 +302,7 @@ class TestAnalyzeStrIntegration:
         path = _write_dump_file(
             tmp_path, "1000_100c.x86.txt", _X86_BASIC_BLOCK_DUMP
         )
-        results = list(analyze_str.analyze_str(path))
-        assert results
-        start, end, _, _ = results[0]
+        instrs, arch, start, end = analyze_str.load_str_file(path)
         assert start == 0x1000
         assert end == 0x100c
 
@@ -308,54 +310,58 @@ class TestAnalyzeStrIntegration:
     def test_loop_dump_returns_result(self, tmp_path):
         """analyze_str() handles a loop dump file (with .Lmca_xx: labels)."""
         path = _write_dump_file(tmp_path, "0_18.x86.txt", _X86_LOOP_DUMP)
-        results = list(analyze_str.analyze_str(path))
-        assert results, "Expected at least one result for loop dump"
-        _, _, ipc, _ = results[0]
-        assert ipc > 0
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        result = analyze_str.analyze_str(instrs, arch)
+        assert result is not None, "Expected a result for loop dump"
+        retired, cycles, _ = result
+        assert retired > 0
+        assert cycles > 0
 
     @_NEED_MCA
     def test_cache_miss_average_mode(self, tmp_path):
         """analyze_str with average cache miss mode returns a valid result."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        results = list(analyze_str.analyze_str(
-            path,
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        result = analyze_str.analyze_str(
+            instrs, arch,
             cache_miss=10.0,
             cache_latency=100,
             cache_miss_mode="average",
-        ))
-        assert results
-        _, _, ipc, _ = results[0]
-        assert ipc > 0
+        )
+        assert result is not None
+        retired, cycles, _ = result
+        assert retired > 0
 
     @_NEED_MCA
     def test_cache_miss_stochastic_mode(self, tmp_path):
         """analyze_str with stochastic cache miss mode returns a valid result."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        results = list(analyze_str.analyze_str(
-            path,
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        result = analyze_str.analyze_str(
+            instrs, arch,
             cache_miss=10.0,
             cache_latency=100,
             cache_miss_mode="stochastic",
-        ))
-        assert results
-        _, _, ipc, _ = results[0]
-        assert ipc > 0
+        )
+        assert result is not None
+        retired, cycles, _ = result
+        assert retired > 0
 
     @_NEED_MCA
     def test_unknown_arch_in_filename_raises(self, tmp_path):
-        """analyze_str() raises ValueError for an unknown arch in the filename."""
+        """load_str_file() raises ValueError for an unknown arch in the filename."""
         path = _write_dump_file(
             tmp_path, "0_8.mips.txt", _X86_BASIC_BLOCK_DUMP
         )
         with pytest.raises(ValueError, match="Unknown architecture"):
-            list(analyze_str.analyze_str(path))
+            analyze_str.load_str_file(path)
 
     @_NEED_MCA
     def test_bad_filename_format_raises(self, tmp_path):
-        """analyze_str() raises ValueError for a filename that does not match the pattern."""
+        """load_str_file() raises ValueError for a filename that does not match the pattern."""
         path = _write_dump_file(tmp_path, "badname.txt", _X86_BASIC_BLOCK_DUMP)
         with pytest.raises(ValueError, match="Cannot parse filename"):
-            list(analyze_str.analyze_str(path))
+            analyze_str.load_str_file(path)
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +372,9 @@ class TestRoundTrip:
     """Test that analyze.py --dump output is correctly re-analysed by analyze_str."""
 
     @_NEED_MCA
-    def test_dump_and_reanalyze_produces_same_ipc(self, tmp_path):
+    def test_dump_and_reanalyze_produces_same_counts(self, tmp_path):
         """A region dumped by analyze.Dumper and re-analyzed by analyze_str
-        produces the same IPC as the original _run_mca call."""
+        produces the same retired/cycles counts as the original _run_mca call."""
         import analyze as _analyze
 
         instrs = [
@@ -383,7 +389,7 @@ class TestRoundTrip:
         original = _analyze._run_mca(instrs, mca_args, arch, _analyze._NoCacheMiss())
         if original is None:
             pytest.skip("llvm-mca returned None for the original run")
-        orig_ipc, orig_lp = original
+        orig_retired, orig_cycles, orig_lp = original
 
         # Dump to a temp file using Dumper.
         dump_dir = str(tmp_path / "dump")
@@ -396,15 +402,19 @@ class TestRoundTrip:
         dump_path = os.path.join(dump_dir, f"{start:x}_{end:x}.{arch.name}.txt")
         assert os.path.isfile(dump_path), f"Dump file not created: {dump_path}"
 
-        # Re-analyse with analyze_str.
-        results = list(analyze_str.analyze_str(dump_path))
-        assert results, "analyze_str returned no results"
-        new_start, new_end, new_ipc, new_lp = results[0]
+        # Re-analyse with analyze_str (loading done by the caller, as in main()).
+        new_instrs, new_arch, new_start, new_end = analyze_str.load_str_file(dump_path)
+        result = analyze_str.analyze_str(new_instrs, new_arch)
+        assert result is not None, "analyze_str returned None"
+        new_retired, new_cycles, new_lp = result
 
         assert new_start == start
         assert new_end == end
-        assert abs(new_ipc - orig_ipc) < 1e-6, (
-            f"IPC mismatch: original={orig_ipc}, re-analysed={new_ipc}"
+        assert new_retired == orig_retired, (
+            f"retired mismatch: original={orig_retired}, re-analysed={new_retired}"
+        )
+        assert new_cycles == orig_cycles, (
+            f"cycles mismatch: original={orig_cycles}, re-analysed={new_cycles}"
         )
         assert abs(new_lp - orig_lp) < 1e-6, (
             f"load_proportion mismatch: original={orig_lp}, re-analysed={new_lp}"
@@ -427,7 +437,7 @@ class TestMainCli:
         def fake_analyze_str(instrs, arch, mcpu="", cache_miss=float("inf"),
                              cache_latency=0, cache_miss_mode="stochastic"):
             captured_mode.append(cache_miss_mode)
-            return (1.0, 0.0)
+            return (100, 103, 0.0)
 
         monkeypatch.setattr(sys, "argv", [
             "analyze_str.py",

@@ -368,18 +368,19 @@ class TestAMD64:
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_ipc_positive(self, x86_obj):
-        """IPC values for x86-64 are strictly positive."""
+        """Retired instructions and elapsed cycles for x86-64 are strictly positive."""
         results = list(analyze.analyze(x86_obj))
         assert results
-        for start, end, ipc, _lp in results:
-            assert ipc > 0, f"IPC should be positive, got {ipc} for region 0x{start:x}–0x{end:x}"
+        for start, end, retired, cycles, _lp in results:
+            assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
+            assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
 
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_load_proportion_in_range(self, x86_obj):
         """load_proportion values are in [0, 1]."""
         results = list(analyze.analyze(x86_obj))
-        for start, end, _ipc, load_proportion in results:
+        for start, end, _retired, _cycles, load_proportion in results:
             assert 0.0 <= load_proportion <= 1.0, (
                 f"load_proportion {load_proportion} out of range for "
                 f"region 0x{start:x}–0x{end:x}"
@@ -390,7 +391,7 @@ class TestAMD64:
     def test_loop_detected(self, x86_obj):
         """The backward branch in sum() is detected as a loop (start < end)."""
         results = list(analyze.analyze(x86_obj))
-        loops = [(s, e, ipc, lp) for s, e, ipc, lp in results if s < e]
+        loops = [(s, e, retired, cycles, lp) for s, e, retired, cycles, lp in results if s < e]
         assert loops, (
             "Expected at least one loop region (start < end). "
             f"All results: {results}"
@@ -401,7 +402,7 @@ class TestAMD64:
     def test_addresses_are_nonneg_ints(self, x86_obj):
         """Start and end addresses are non-negative integers."""
         results = list(analyze.analyze(x86_obj))
-        for start, end, _ipc, _lp in results:
+        for start, end, _retired, _cycles, _lp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
 
@@ -423,18 +424,19 @@ class TestAArch64:
     @_NEED_MCA
     @_NEED_AARCH64
     def test_ipc_positive(self, aarch64_obj):
-        """IPC values for AArch64 are strictly positive."""
+        """Retired instructions and elapsed cycles for AArch64 are strictly positive."""
         results = list(analyze.analyze(aarch64_obj))
         assert results
-        for start, end, ipc, _lp in results:
-            assert ipc > 0, f"IPC should be positive, got {ipc} for region 0x{start:x}–0x{end:x}"
+        for start, end, retired, cycles, _lp in results:
+            assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
+            assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
 
     @_NEED_MCA
     @_NEED_AARCH64
     def test_load_proportion_in_range(self, aarch64_obj):
         """load_proportion values are in [0, 1]."""
         results = list(analyze.analyze(aarch64_obj))
-        for start, end, _ipc, load_proportion in results:
+        for start, end, _retired, _cycles, load_proportion in results:
             assert 0.0 <= load_proportion <= 1.0, (
                 f"load_proportion {load_proportion} out of range for "
                 f"region 0x{start:x}–0x{end:x}"
@@ -445,7 +447,7 @@ class TestAArch64:
     def test_loop_detected(self, aarch64_obj):
         """The backward branch in sum() is detected as a loop (start < end)."""
         results = list(analyze.analyze(aarch64_obj))
-        loops = [(s, e, ipc, lp) for s, e, ipc, lp in results if s < e]
+        loops = [(s, e, retired, cycles, lp) for s, e, retired, cycles, lp in results if s < e]
         assert loops, (
             "Expected at least one loop region (start < end). "
             f"All results: {results}"
@@ -456,7 +458,7 @@ class TestAArch64:
     def test_addresses_are_nonneg_ints(self, aarch64_obj):
         """Start and end addresses are non-negative integers."""
         results = list(analyze.analyze(aarch64_obj))
-        for start, end, _ipc, _lp in results:
+        for start, end, _retired, _cycles, _lp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
 
@@ -473,24 +475,25 @@ class TestAnalyzeFunctionIpc:
         assert analyze._analyze_function_ipc([]) is None
 
     def test_loop_ipc_returned(self, monkeypatch):
-        """IPC returned equals the llvm-mca IPC of the single loop."""
+        """Retired/cycles from the single loop are returned."""
         # Backward branch at 0x2 → 0x0 forms a loop.
         instrs = [
             (0x0, "add", "%eax,%edx"),
             (0x2, "jne", "0"),
         ]
         monkeypatch.setattr(analyze, "_run_mca",
-                            lambda *a, **kw: (2.0, 0.25))
+                            lambda *a, **kw: (200, 100, 0.25))
         result = analyze._analyze_function_ipc(instrs)
         assert result is not None
-        start, end, ipc, lp = result
+        start, end, retired, cycles, lp = result
         assert start == 0x0
         assert end == 0x2
-        assert abs(ipc - 2.0) < 1e-9
+        assert retired == 200
+        assert cycles == 100
         assert abs(lp - 0.25) < 1e-9
 
     def test_max_loop_ipc_selected(self, monkeypatch):
-        """The loop with the highest IPC (hottest loop) is chosen."""
+        """The loop with the highest IPC (retired/cycles — hottest loop) is chosen."""
         # Two non-overlapping loops + one basic block outside loops.
         # Loop 1: [0x0, 0x2], loop 2: [0x10, 0x12], basic block: [0x20].
         instrs = [
@@ -503,24 +506,25 @@ class TestAnalyzeFunctionIpc:
 
         def fake_run_mca(region, *a, **kw):
             if region[0][0] == 0x0:
-                return (4.0, 0.10)   # loop 1 (high IPC — hottest)
+                return (400, 100, 0.10)   # loop 1 (high IPC=4.0 — hottest)
             if region[0][0] == 0x10:
-                return (1.0, 0.50)   # loop 2 (low IPC)
-            return (2.0, 0.00)       # basic block — must be ignored
+                return (100, 100, 0.50)   # loop 2 (low IPC=1.0)
+            return (200, 100, 0.00)       # basic block — must be ignored
 
         monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
         result = analyze._analyze_function_ipc(instrs)
         assert result is not None
-        start, end, ipc, lp = result
+        start, end, retired, cycles, lp = result
         # Address range spans all instructions
         assert start == 0x0
         assert end == 0x20
-        # IPC_f = max(4.0, 1.0) = 4.0; load_proportion from hottest loop
-        assert abs(ipc - 4.0) < 1e-9
+        # Hottest loop: IPC=4.0 (retired=400, cycles=100); load_proportion from it
+        assert retired == 400
+        assert cycles == 100
         assert abs(lp - 0.10) < 1e-9
 
     def test_no_loops_falls_back_to_blocks(self, monkeypatch):
-        """A function with no loops falls back to the max-IPC basic block."""
+        """A function with no loops falls back to the hottest basic block."""
         instrs = [
             (0x0,  "add", "%eax,%edx"),
             (0x2,  "jmp", "10"),           # forward branch — no loop
@@ -530,17 +534,18 @@ class TestAnalyzeFunctionIpc:
 
         def fake_run_mca(region, *a, **kw):
             if region[0][0] == 0x0:
-                return (3.0, 0.20)   # first BB
-            return (1.5, 0.40)       # second BB
+                return (300, 100, 0.20)   # first BB (IPC=3.0)
+            return (150, 100, 0.40)       # second BB (IPC=1.5)
 
         monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
         result = analyze._analyze_function_ipc(instrs)
         assert result is not None
-        start, end, ipc, lp = result
+        start, end, retired, cycles, lp = result
         assert start == 0x0
         assert end == 0x12
-        # Falls back to max over blocks: max(3.0, 1.5) = 3.0
-        assert abs(ipc - 3.0) < 1e-9
+        # Falls back to hottest block: IPC=3.0 (retired=300, cycles=100)
+        assert retired == 300
+        assert cycles == 100
         assert abs(lp - 0.20) < 1e-9
 
     def test_no_mca_results_returns_none(self, monkeypatch):
@@ -582,12 +587,16 @@ class TestAMD64FunctionMode:
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_ipc_positive(self, x86_obj):
-        """IPC values are strictly positive."""
+        """Retired instructions and elapsed cycles are strictly positive."""
         results = list(analyze.analyze(x86_obj, mode="functions"))
         assert results
-        for start, end, ipc, _lp in results:
-            assert ipc > 0, (
-                f"IPC should be positive, got {ipc} for function "
+        for start, end, retired, cycles, _lp in results:
+            assert retired > 0, (
+                f"retired should be positive, got {retired} for function "
+                f"0x{start:x}–0x{end:x}"
+            )
+            assert cycles > 0, (
+                f"cycles should be positive, got {cycles} for function "
                 f"0x{start:x}–0x{end:x}"
             )
 
@@ -596,7 +605,7 @@ class TestAMD64FunctionMode:
     def test_load_proportion_in_range(self, x86_obj):
         """load_proportion values are in [0, 1]."""
         results = list(analyze.analyze(x86_obj, mode="functions"))
-        for start, end, _ipc, lp in results:
+        for start, end, _retired, _cycles, lp in results:
             assert 0.0 <= lp <= 1.0, (
                 f"load_proportion {lp} out of range for function "
                 f"0x{start:x}–0x{end:x}"
@@ -607,26 +616,25 @@ class TestAMD64FunctionMode:
     def test_addresses_are_nonneg_ints(self, x86_obj):
         """Start and end addresses are non-negative integers."""
         results = list(analyze.analyze(x86_obj, mode="functions"))
-        for start, end, _ipc, _lp in results:
+        for start, end, _retired, _cycles, _lp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
 
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_ipc_le_max_block_ipc(self, x86_obj):
-        """Function IPC must be <= global max block IPC."""
+        """Function retired/cycles must not exceed global max block retired/cycles."""
         block_results = list(analyze.analyze(x86_obj))
         func_results = list(analyze.analyze(x86_obj, mode="functions"))
         assert func_results
-        # IPC_f is the max over loops (or blocks if no loops); either way it is
-        # drawn from the same pool of regions as block mode, so it cannot exceed
-        # the global maximum block IPC.
-        max_block_ipc = max(ipc for _, _, ipc, _ in block_results if ipc > 0)
-        for _start, _end, func_ipc, _lp in func_results:
+        # The hottest region is drawn from the same pool as block mode, so its
+        # IPC (retired/cycles) cannot exceed the global maximum block IPC.
+        max_block_ipc = max(r / c for _, _, r, c, _ in block_results if c > 0 and r > 0)
+        for _start, _end, func_r, func_c, _lp in func_results:
+            func_ipc = func_r / func_c if func_c > 0 else float("inf")
             assert func_ipc <= max_block_ipc + 1e-9, (
                 f"Function IPC {func_ipc:.4f} exceeds maximum block IPC "
-                f"{max_block_ipc:.4f}; expected IPC_f = max of all loop IPCs "
-                f"(or block IPCs when no loops exist)"
+                f"{max_block_ipc:.4f}; expected hottest region IPC <= global max"
             )
 
 
