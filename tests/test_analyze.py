@@ -331,7 +331,7 @@ class TestFormatAsm:
             (0x0,  "add", "a0, a0, a1"),
             (0x4,  "jr",  "a0"),
         ]
-        asm = analyze._format_asm(instrs, analyze.RISCVArch())
+        asm, _ = analyze._format_asm(instrs, analyze.RISCVArch())
         assert "jr a0" in asm, (
             f"Expected 'jr a0' to be preserved as an indirect branch. Got:\n{asm}"
         )
@@ -345,7 +345,7 @@ class TestFormatAsm:
             (0x0, "addi", "a1, a1, 4"),
             (0x4, "jalr", "a1"),
         ]
-        asm = analyze._format_asm(instrs, analyze.RISCVArch())
+        asm, _ = analyze._format_asm(instrs, analyze.RISCVArch())
         assert "jalr a1" in asm, (
             f"Expected 'jalr a1' to be preserved. Got:\n{asm}"
         )
@@ -461,181 +461,6 @@ class TestAArch64:
         for start, end, _retired, _cycles, _lp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
-
-
-# ---------------------------------------------------------------------------
-# Unit tests — _analyze_function_ipc
-# ---------------------------------------------------------------------------
-
-class TestAnalyzeFunctionIpc:
-    """Unit tests for analyze._analyze_function_ipc."""
-
-    def test_empty_instrs_returns_none(self):
-        """An empty instruction list must return None."""
-        assert analyze._analyze_function_ipc([]) is None
-
-    def test_loop_ipc_returned(self, monkeypatch):
-        """Retired/cycles from the single loop are returned."""
-        # Backward branch at 0x2 → 0x0 forms a loop.
-        instrs = [
-            (0x0, "add", "%eax,%edx"),
-            (0x2, "jne", "0"),
-        ]
-        monkeypatch.setattr(analyze, "_run_mca",
-                            lambda *a, **kw: (200, 100, 0.25))
-        result = analyze._analyze_function_ipc(instrs)
-        assert result is not None
-        start, end, retired, cycles, lp = result
-        assert start == 0x0
-        assert end == 0x2
-        assert retired == 200
-        assert cycles == 100
-        assert abs(lp - 0.25) < 1e-9
-
-    def test_max_loop_ipc_selected(self, monkeypatch):
-        """The loop with the highest IPC (retired/cycles — hottest loop) is chosen."""
-        # Two non-overlapping loops + one basic block outside loops.
-        # Loop 1: [0x0, 0x2], loop 2: [0x10, 0x12], basic block: [0x20].
-        instrs = [
-            (0x0,  "add", "%eax,%edx"),
-            (0x2,  "jne", "0"),            # loop 1: backward branch to 0x0
-            (0x10, "xor", "%eax,%eax"),
-            (0x12, "jne", "10"),           # loop 2: backward branch to 0x10
-            (0x20, "ret", ""),             # basic block outside loops
-        ]
-
-        def fake_run_mca(region, *a, **kw):
-            if region[0][0] == 0x0:
-                return (400, 100, 0.10)   # loop 1 (high IPC=4.0 — hottest)
-            if region[0][0] == 0x10:
-                return (100, 100, 0.50)   # loop 2 (low IPC=1.0)
-            return (200, 100, 0.00)       # basic block — must be ignored
-
-        monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
-        result = analyze._analyze_function_ipc(instrs)
-        assert result is not None
-        start, end, retired, cycles, lp = result
-        # Address range spans all instructions
-        assert start == 0x0
-        assert end == 0x20
-        # Hottest loop: IPC=4.0 (retired=400, cycles=100); load_proportion from it
-        assert retired == 400
-        assert cycles == 100
-        assert abs(lp - 0.10) < 1e-9
-
-    def test_no_loops_falls_back_to_blocks(self, monkeypatch):
-        """A function with no loops falls back to the hottest basic block."""
-        instrs = [
-            (0x0,  "add", "%eax,%edx"),
-            (0x2,  "jmp", "10"),           # forward branch — no loop
-            (0x10, "xor", "%eax,%eax"),
-            (0x12, "ret", ""),
-        ]
-
-        def fake_run_mca(region, *a, **kw):
-            if region[0][0] == 0x0:
-                return (300, 100, 0.20)   # first BB (IPC=3.0)
-            return (150, 100, 0.40)       # second BB (IPC=1.5)
-
-        monkeypatch.setattr(analyze, "_run_mca", fake_run_mca)
-        result = analyze._analyze_function_ipc(instrs)
-        assert result is not None
-        start, end, retired, cycles, lp = result
-        assert start == 0x0
-        assert end == 0x12
-        # Falls back to hottest block: IPC=3.0 (retired=300, cycles=100)
-        assert retired == 300
-        assert cycles == 100
-        assert abs(lp - 0.20) < 1e-9
-
-    def test_no_mca_results_returns_none(self, monkeypatch):
-        """If llvm-mca returns None for every region, return None."""
-        instrs = [
-            (0x0, "add", "%eax,%edx"),
-            (0x2, "ret", ""),
-        ]
-        monkeypatch.setattr(analyze, "_run_mca", lambda *a, **kw: None)
-        assert analyze._analyze_function_ipc(instrs) is None
-
-
-# ---------------------------------------------------------------------------
-# Integration tests — function mode (x86-64)
-# ---------------------------------------------------------------------------
-
-class TestAMD64FunctionMode:
-    """Integration tests for analyze() in 'functions' mode (x86-64)."""
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
-    def test_results_nonempty(self, x86_obj):
-        """analyze() in 'functions' mode produces at least one result."""
-        results = list(analyze.analyze(x86_obj, mode="functions"))
-        assert results, "Expected at least one result from analyze(mode='functions')"
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
-    def test_one_row_per_function(self, x86_obj):
-        """Function mode yields at most one row for the compiled source file."""
-        results = list(analyze.analyze(x86_obj, mode="functions"))
-        # The test binary has a single function (sum); allow for compiler-injected
-        # helpers but there should be far fewer rows than in block mode.
-        block_results = list(analyze.analyze(x86_obj))
-        assert len(results) <= len(block_results), (
-            "Function mode should yield no more rows than block mode"
-        )
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
-    def test_ipc_positive(self, x86_obj):
-        """Retired instructions and elapsed cycles are strictly positive."""
-        results = list(analyze.analyze(x86_obj, mode="functions"))
-        assert results
-        for start, end, retired, cycles, _lp in results:
-            assert retired > 0, (
-                f"retired should be positive, got {retired} for function "
-                f"0x{start:x}–0x{end:x}"
-            )
-            assert cycles > 0, (
-                f"cycles should be positive, got {cycles} for function "
-                f"0x{start:x}–0x{end:x}"
-            )
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
-    def test_load_proportion_in_range(self, x86_obj):
-        """load_proportion values are in [0, 1]."""
-        results = list(analyze.analyze(x86_obj, mode="functions"))
-        for start, end, _retired, _cycles, lp in results:
-            assert 0.0 <= lp <= 1.0, (
-                f"load_proportion {lp} out of range for function "
-                f"0x{start:x}–0x{end:x}"
-            )
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
-    def test_addresses_are_nonneg_ints(self, x86_obj):
-        """Start and end addresses are non-negative integers."""
-        results = list(analyze.analyze(x86_obj, mode="functions"))
-        for start, end, _retired, _cycles, _lp in results:
-            assert isinstance(start, int) and start >= 0
-            assert isinstance(end, int) and end >= 0
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
-    def test_ipc_le_max_block_ipc(self, x86_obj):
-        """Function retired/cycles must not exceed global max block retired/cycles."""
-        block_results = list(analyze.analyze(x86_obj))
-        func_results = list(analyze.analyze(x86_obj, mode="functions"))
-        assert func_results
-        # The hottest region is drawn from the same pool as block mode, so its
-        # IPC (retired/cycles) cannot exceed the global maximum block IPC.
-        max_block_ipc = max(r / c for _, _, r, c, _ in block_results if c > 0 and r > 0)
-        for _start, _end, func_r, func_c, _lp in func_results:
-            func_ipc = func_r / func_c if func_c > 0 else float("inf")
-            assert func_ipc <= max_block_ipc + 1e-9, (
-                f"Function IPC {func_ipc:.4f} exceeds maximum block IPC "
-                f"{max_block_ipc:.4f}; expected hottest region IPC <= global max"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -791,20 +616,20 @@ class TestFormatAsmWithCacheMiss:
 
     def test_no_cache_miss_no_latency_directives(self):
         """With cache_miss=0 no LLVM-MCA-LATENCY directives must appear."""
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             self._LOAD_INSTRS, self._ARCH, cache_miss=0.0, cache_latency=100)
         assert "LLVM-MCA-LATENCY" not in asm
 
     def test_full_cache_miss_all_loads_get_latency(self):
         """With cache_miss=1.0 every load must be wrapped with directives."""
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             self._LOAD_INSTRS, self._ARCH, cache_miss=1.0, cache_latency=100)
         assert "# LLVM-MCA-LATENCY 100" in asm
         assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
 
     def test_non_load_not_wrapped(self):
         """Non-load instructions must never have an opening latency directive."""
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             self._LOAD_INSTRS, self._ARCH, cache_miss=1.0, cache_latency=100)
         lines = asm.splitlines()
         _open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
@@ -818,8 +643,8 @@ class TestFormatAsmWithCacheMiss:
 
     def test_code_repeated_100_times(self):
         """The instruction block must appear 100 times in the output."""
-        instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
-        asm = analyze._format_asm_with_cache_miss(
+        instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx"), (0x4, "ret", "")]
+        asm, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, cache_miss=0.0, cache_latency=0)
         # The non-branch instruction appears once per iteration.
         assert asm.count("add %eax,%edx") == 100
@@ -827,10 +652,11 @@ class TestFormatAsmWithCacheMiss:
     def test_labels_are_unique_per_iteration(self):
         """Backward-branch labels must be unique per repetition."""
         instrs = [
-            (0x0, "add", "%eax,%edx"),
-            (0x2, "jne", "0"),
+            (0x0, "mov", "(%edi),%eax"),
+            (0x2, "add", "%eax,%edx"),
+            (0x4, "jne", "0"),
         ]
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, cache_miss=0.0, cache_latency=0)
         # Per-iteration label suffix: _r0, _r1, …, _r99
         assert ".Lmca_0_r0:" in asm
@@ -840,7 +666,7 @@ class TestFormatAsmWithCacheMiss:
 
     def test_lmca_end_label_present(self):
         """The closing .Lmca_end: label must be present exactly once."""
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             self._LOAD_INSTRS, self._ARCH, cache_miss=0.0, cache_latency=0)
         assert asm.count(".Lmca_end:") == 1
 
@@ -851,7 +677,7 @@ class TestFormatAsmWithCacheMiss:
         # Use a block with 10 loads so we can check various rates precisely.
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
         for rate, expected_per_rep in [(0.0, 0), (0.3, 3), (0.5, 5), (1.0, 10)]:
-            asm = analyze._format_asm_with_cache_miss(
+            asm, _ = analyze._format_asm_with_cache_miss(
                 instrs, self._ARCH, cache_miss=rate, cache_latency=100)
             # Count opening latency directives (one per cache-miss event).
             total_misses = asm.count("# LLVM-MCA-LATENCY 100")
@@ -869,7 +695,7 @@ class TestFormatAsmWithCacheMiss:
         """
         # Build 10 loads with distinct operands so we can identify them.
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(10)]
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, cache_miss=0.3, cache_latency=999)
 
         lines = asm.splitlines()
@@ -892,9 +718,9 @@ class TestFormatAsmWithCacheMiss:
     def test_deterministic_no_randomness(self):
         """Two calls with the same arguments must produce identical output."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
-        asm1 = analyze._format_asm_with_cache_miss(
+        asm1, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, cache_miss=0.4, cache_latency=200)
-        asm2 = analyze._format_asm_with_cache_miss(
+        asm2, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, cache_miss=0.4, cache_latency=200)
         assert asm1 == asm2, "Output must be deterministic across calls"
 
@@ -912,11 +738,11 @@ class TestRunMcaCacheMissPlumbing:
 
         def fake_format_asm(instrs, arch):
             called["format_asm"] = True
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         def fake_format_asm_with_cache_miss(instrs, arch, cache_miss, cache_latency):
             called["format_asm_with_cache_miss"] = True
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm", fake_format_asm)
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss",
@@ -931,6 +757,7 @@ class TestRunMcaCacheMissPlumbing:
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
 
         analyze._run_mca([(0x0, "nop", "")],
+                         arch=analyze.X86Arch(),
                          cache_mode=analyze._NoCacheMiss())
         assert called.get("format_asm"), "Expected _format_asm to be called"
         assert not called.get("format_asm_with_cache_miss"), (
@@ -943,7 +770,7 @@ class TestRunMcaCacheMissPlumbing:
         captured_cmd = {}
 
         def fake_format_asm_with_cache_miss(instrs, arch, cache_miss, cache_latency):
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss",
                             fake_format_asm_with_cache_miss)
@@ -962,6 +789,7 @@ class TestRunMcaCacheMissPlumbing:
 
         # Use a region with a load instruction so stochastic mode activates.
         analyze._run_mca([(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")],
+                         arch=analyze.X86Arch(),
                          cache_mode=analyze._StochasticCacheMiss(10, 100))
         assert "-iterations=1" in captured_cmd.get("cmd", []), (
             "Expected -iterations=1 in llvm-mca command for stochastic mode"
@@ -987,7 +815,8 @@ class TestRunMcaCacheMissPlumbing:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        analyze._run_mca([(0x0, "nop", "")], cache_mode=analyze._NoCacheMiss())
+        analyze._run_mca([(0x0, "nop", "")], arch=analyze.X86Arch(),
+                         cache_mode=analyze._NoCacheMiss())
         assert "--call-latency=0" not in captured_cmd.get("cmd", []), (
             "--call-latency=0 must not be passed; it is unsupported by llvm-mca 16-18"
         )
@@ -1009,20 +838,20 @@ class TestFormatAsmWithAverageLoadLatency:
 
     def test_all_loads_get_latency_directive(self):
         """Every load must be wrapped with opening and closing latency directives."""
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=50)
         assert "# LLVM-MCA-LATENCY 50" in asm
         assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
 
     def test_zero_latency_still_wraps_loads(self):
         """A latency of 0 still inserts directives (latency=0 is valid)."""
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=0)
         assert "# LLVM-MCA-LATENCY 0" in asm
 
     def test_non_load_not_wrapped(self):
         """Non-load instructions must not be preceded by a latency directive."""
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=75)
         lines = asm.splitlines()
         open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
@@ -1037,28 +866,28 @@ class TestFormatAsmWithAverageLoadLatency:
     def test_no_repetition(self):
         """The instruction block must appear exactly once (no repetition)."""
         instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "ret", "")]
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             instrs, self._ARCH, latency=10)
         # Load appears once; not repeated 100 times like stochastic mode.
         assert asm.count("mov (%edi),%eax") == 1
 
     def test_lmca_end_label_present(self):
         """The closing .Lmca_end: label must be present."""
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=0)
         assert ".Lmca_end:" in asm
 
     def test_no_loads_no_latency_directives(self):
         """A block with no loads must produce no LLVM-MCA-LATENCY directives."""
         instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             instrs, self._ARCH, latency=100)
         assert "LLVM-MCA-LATENCY" not in asm
 
     def test_multiple_loads_all_wrapped(self):
         """All load instructions in a block must each be wrapped."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
-        asm = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_average_load_latency(
             instrs, self._ARCH, latency=30)
         # There should be exactly 5 opening latency directives.
         assert asm.count("# LLVM-MCA-LATENCY 30") == 5
@@ -1066,9 +895,9 @@ class TestFormatAsmWithAverageLoadLatency:
     def test_deterministic(self):
         """Two calls with the same arguments produce identical output."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(3)]
-        asm1 = analyze._format_asm_with_average_load_latency(
+        asm1, _ = analyze._format_asm_with_average_load_latency(
             instrs, self._ARCH, latency=20)
-        asm2 = analyze._format_asm_with_average_load_latency(
+        asm2, _ = analyze._format_asm_with_average_load_latency(
             instrs, self._ARCH, latency=20)
         assert asm1 == asm2
 
@@ -1088,7 +917,7 @@ class TestRunMcaAverageModePlumbing:
 
         def fake_avg_load(instrs, arch, latency):
             called["latency"] = latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
                             fake_avg_load)
@@ -1108,6 +937,7 @@ class TestRunMcaAverageModePlumbing:
         ]
         analyze._run_mca(
             instrs,
+            arch=analyze.X86Arch(),
             cache_mode=analyze._AverageCacheMiss(10, 100),
         )
         assert "latency" in called, (
@@ -1123,7 +953,7 @@ class TestRunMcaAverageModePlumbing:
 
         monkeypatch.setattr(
             analyze, "_format_asm_with_average_load_latency",
-            lambda *a, **kw: "\tnop\n.Lmca_end:\n",
+            lambda *a, **kw: ("\tnop\n.Lmca_end:\n", []),
         )
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
 
@@ -1141,6 +971,7 @@ class TestRunMcaAverageModePlumbing:
         # Use a region with a load instruction to activate average-mode formatter.
         analyze._run_mca(
             [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")],
+            arch=analyze.X86Arch(),
             cache_mode=analyze._AverageCacheMiss(10, 100),
         )
         assert "-iterations=1" not in captured_cmd.get("cmd", []), (
@@ -1153,7 +984,7 @@ class TestRunMcaAverageModePlumbing:
 
         def fake_format_stochastic(instrs, arch, cache_miss, cache_latency):
             called["stochastic"] = True
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss",
                             fake_format_stochastic)
@@ -1169,6 +1000,7 @@ class TestRunMcaAverageModePlumbing:
         # Use a region with a load instruction so the stochastic formatter is used.
         analyze._run_mca(
             [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")],
+            arch=analyze.X86Arch(),
             cache_mode=analyze._StochasticCacheMiss(10, 100),
         )
         assert called.get("stochastic"), (
@@ -1185,7 +1017,7 @@ class TestRunMcaAverageModePlumbing:
 
         def fake_avg_load(instrs, arch, latency):
             called["latency"] = latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
                             fake_avg_load)
@@ -1223,28 +1055,28 @@ class TestFormatAsmWithCacheMissGreaterOne:
     def test_cache_miss_exact_2_all_loads_get_double_latency(self):
         """With cache_miss=2.0, every load gets exactly 2*cache_latency."""
         instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
-        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 2.0, 100)
+        out, _ = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 2.0, 100)
         assert "# LLVM-MCA-LATENCY 200" in out
         assert "# LLVM-MCA-LATENCY 100" not in out
 
     def test_cache_miss_fractional_gt1_produces_floor_and_ceil_latencies(self):
         """With cache_miss=1.7, some loads get 2*latency and the rest get 1*latency."""
         instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
-        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 1.7, 100)
+        out, _ = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 1.7, 100)
         assert "# LLVM-MCA-LATENCY 200" in out
         assert "# LLVM-MCA-LATENCY 100" in out
 
     def test_cache_miss_exact_3_all_loads_get_triple_latency(self):
         """With cache_miss=3.0, every load gets exactly 3*cache_latency."""
         instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "add", "%eax,%edx")]
-        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 3.0, 100)
+        out, _ = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 3.0, 100)
         assert "# LLVM-MCA-LATENCY 300" in out
         assert "# LLVM-MCA-LATENCY 200" not in out
 
     def test_lmca_end_label_present(self):
         """The .Lmca_end: label is always present."""
         instrs = [(0x0, "mov", "(%edi),%eax")]
-        out = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 2.0, 100)
+        out, _ = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 2.0, 100)
         assert ".Lmca_end:" in out
 
     def test_unique_labels_per_repetition(self):
@@ -1253,7 +1085,7 @@ class TestFormatAsmWithCacheMissGreaterOne:
             (0x0, "mov", "(%edi),%eax"),
             (0x2, "jne", "0x0"),           # back-branch → labels addr 0x0
         ]
-        out = analyze._format_asm_with_cache_miss(loop_instrs, self._ARCH, 2.0, 100)
+        out, _ = analyze._format_asm_with_cache_miss(loop_instrs, self._ARCH, 2.0, 100)
         assert ".Lmca_0_r0:" in out
         assert ".Lmca_0_r1:" in out
 
@@ -1289,7 +1121,7 @@ class TestCacheMissIpcmLogic:
         def fake_fmt(instrs, arch, cache_miss, cache_latency):
             called["cache_miss"] = cache_miss
             called["cache_latency"] = cache_latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
 
@@ -1316,7 +1148,7 @@ class TestCacheMissIpcmLogic:
         def fake_fmt(instrs, arch, cache_miss, cache_latency):
             called["cache_miss"] = cache_miss
             called["cache_latency"] = cache_latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
 
@@ -1332,19 +1164,14 @@ class TestCacheMissIpcmLogic:
         )
 
     def test_stochastic_no_loads_uses_plain_format_asm(self, monkeypatch):
-        """When num_loads=0, _format_asm is used (no miss possible)."""
+        """When num_loads=0, _format_asm_with_cache_miss falls back to _format_asm."""
         called = {}
 
         def fake_plain(instrs, arch):
             called["plain"] = True
-            return "\tnop\n.Lmca_end:\n"
-
-        def fake_miss(instrs, arch, cache_miss, cache_latency):
-            called["miss"] = True
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm", fake_plain)
-        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_miss)
 
         no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
         mode = analyze._StochasticCacheMiss(instructions_per_cache_miss=10,
@@ -1352,8 +1179,33 @@ class TestCacheMissIpcmLogic:
         mode.format_asm(no_load_instrs, self._ARCH)
 
         assert called.get("plain"), "Expected _format_asm to be called for no-load region"
-        assert not called.get("miss"), (
-            "Did not expect _format_asm_with_cache_miss for no-load region"
+
+    def test_stochastic_no_loads_returns_empty_extra_args(self):
+        """When the region has no load instructions, _StochasticCacheMiss.format_asm
+        must return [] as extra args (not ['-iterations=1']).
+
+        The repetition loop in _format_asm_with_cache_miss is skipped when
+        n==0, so -iterations=1 must not be injected into the llvm-mca command.
+        """
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._StochasticCacheMiss(instructions_per_cache_miss=10,
+                                             cache_latency=100)
+        _asm, extra = mode.format_asm(no_load_instrs, self._ARCH)
+        assert extra == [], (
+            "No-load region must not produce extra args; "
+            f"got {extra!r}"
+        )
+
+    def test_early_no_loads_returns_empty_extra_args(self):
+        """When the region has no load instructions, _EarlyCacheMiss.format_asm
+        must return [] as extra args."""
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._EarlyCacheMiss(instructions_per_cache_miss=10,
+                                       cache_latency=100)
+        _asm, extra = mode.format_asm(no_load_instrs, self._ARCH)
+        assert extra == [], (
+            "No-load region must not produce extra args; "
+            f"got {extra!r}"
         )
 
     def test_average_multiple_misses_per_load_uses_average_load_latency(
@@ -1368,7 +1220,7 @@ class TestCacheMissIpcmLogic:
 
         def fake_avg_load(instrs, arch, latency):
             called["latency"] = latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
                             fake_avg_load)
@@ -1432,9 +1284,11 @@ class TestEarlyCacheMiss:
         assert isinstance(mode, analyze._EarlyCacheMiss)
 
     def test_early_mode_extra_mca_args(self):
-        """_EarlyCacheMiss adds -iterations=1 to llvm-mca args."""
+        """_EarlyCacheMiss includes -iterations=1 in the extra args returned by format_asm."""
         mode = analyze._EarlyCacheMiss(10, 100)
-        assert mode.extra_mca_args() == ["-iterations=1"]
+        instrs = [(0x0, "mov", "(%eax),%ebx")]
+        _asm, extra = mode.format_asm(instrs, self._ARCH)
+        assert extra == ["-iterations=1"]
 
     def test_early_mode_no_loads_uses_plain_format_asm(self, monkeypatch):
         """When num_loads=0, _format_asm is used."""
@@ -1442,7 +1296,7 @@ class TestEarlyCacheMiss:
 
         def fake_plain(instrs, arch):
             called["plain"] = True
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm", fake_plain)
         no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
@@ -1466,7 +1320,7 @@ class TestEarlyCacheMiss:
             (0x6, "mov", "(%edx),%esi"),
             (0x8, "mov", "(%esi),%edi"),
         ]
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, 0.6, 100, front_loaded=True
         )
         lines = asm.splitlines()
@@ -1496,7 +1350,7 @@ class TestEarlyCacheMiss:
             (0x6, "mov", "(%edx),%esi"),
             (0x8, "mov", "(%esi),%edi"),
         ]
-        asm = analyze._format_asm_with_cache_miss(
+        asm, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, 0.6, 100, front_loaded=True
         )
         lines = asm.splitlines()
@@ -1527,10 +1381,10 @@ class TestEarlyCacheMiss:
             (0x2, "add", "%eax,%ebx"),
             (0x4, "mov", "(%ebx),%ecx"),
         ]
-        asm_early = analyze._format_asm_with_cache_miss(
+        asm_early, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, 0.5, 100, front_loaded=True
         )
-        asm_stoch = analyze._format_asm_with_cache_miss(
+        asm_stoch, _ = analyze._format_asm_with_cache_miss(
             instrs, self._ARCH, 0.5, 100, front_loaded=False
         )
         count_early = self._count_latency_directives(asm_early)
@@ -1547,7 +1401,7 @@ class TestEarlyCacheMiss:
 
         def fake_fmt(instrs, arch, cache_miss, cache_latency, front_loaded=False):
             called["front_loaded"] = front_loaded
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
 
@@ -1582,7 +1436,7 @@ class TestCacheMissRateClasses:
         def fake_fmt(instrs, arch, cache_miss, cache_latency):
             called["cache_miss"] = cache_miss
             called["cache_latency"] = cache_latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
 
@@ -1601,7 +1455,7 @@ class TestCacheMissRateClasses:
         def fake_fmt(instrs, arch, cache_miss, cache_latency, front_loaded=False):
             called["cache_miss"] = cache_miss
             called["front_loaded"] = front_loaded
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", ["-iterations=1"]
 
         monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
 
@@ -1621,7 +1475,7 @@ class TestCacheMissRateClasses:
 
         def fake_avg(instrs, arch, latency):
             called["latency"] = latency
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency", fake_avg)
 
@@ -1638,7 +1492,7 @@ class TestCacheMissRateClasses:
 
         def fake_plain(instrs, arch):
             called["plain"] = True
-            return "\tnop\n.Lmca_end:\n"
+            return "\tnop\n.Lmca_end:\n", []
 
         monkeypatch.setattr(analyze, "_format_asm", fake_plain)
         no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
@@ -1647,15 +1501,39 @@ class TestCacheMissRateClasses:
 
         assert called.get("plain"), "Expected _format_asm for no-load region"
 
+    def test_stochastic_rate_no_loads_returns_empty_extra_args(self):
+        """When the region has no load instructions, _StochasticCacheMissRate.format_asm
+        must return [] as extra args (not ['-iterations=1'])."""
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._StochasticCacheMissRate(cache_miss_rate=1.5, cache_latency=100)
+        _asm, extra = mode.format_asm(no_load_instrs, self._ARCH)
+        assert extra == [], (
+            "No-load region must not produce extra args; "
+            f"got {extra!r}"
+        )
+
+    def test_early_rate_no_loads_returns_empty_extra_args(self):
+        """When the region has no load instructions, _EarlyCacheMissRate.format_asm
+        must return [] as extra args."""
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._EarlyCacheMissRate(cache_miss_rate=1.5, cache_latency=100)
+        _asm, extra = mode.format_asm(no_load_instrs, self._ARCH)
+        assert extra == [], (
+            "No-load region must not produce extra args; "
+            f"got {extra!r}"
+        )
+
     def test_stochastic_rate_extra_mca_args(self):
-        """_StochasticCacheMissRate adds -iterations=1."""
+        """_StochasticCacheMissRate includes -iterations=1 in the extra args returned by format_asm."""
         mode = analyze._StochasticCacheMissRate(1.5, 100)
-        assert mode.extra_mca_args() == ["-iterations=1"]
+        _asm, extra = mode.format_asm(self._INSTRS, self._ARCH)
+        assert extra == ["-iterations=1"]
 
     def test_early_rate_extra_mca_args(self):
-        """_EarlyCacheMissRate adds -iterations=1."""
+        """_EarlyCacheMissRate includes -iterations=1 in the extra args returned by format_asm."""
         mode = analyze._EarlyCacheMissRate(1.5, 100)
-        assert mode.extra_mca_args() == ["-iterations=1"]
+        _asm, extra = mode.format_asm(self._INSTRS, self._ARCH)
+        assert extra == ["-iterations=1"]
 
     def test_build_cache_mode_from_rate_inf_returns_no_cache_miss(self):
         """_build_cache_mode_from_rate(inf, ...) returns _NoCacheMiss."""
@@ -1705,7 +1583,7 @@ class TestCacheMissRateClasses:
             (0x4, "mov", "(%ecx),%edx"),
             (0x6, "mov", "(%edx),%esi"),
         ]
-        asm = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 1.5, 100)
+        asm, _ = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 1.5, 100)
         count_200 = asm.count("# LLVM-MCA-LATENCY 200")
         count_100 = asm.count("# LLVM-MCA-LATENCY 100")
         assert count_200 == 200, f"Expected 200 loads with latency 200, got {count_200}"
@@ -1751,15 +1629,18 @@ class TestDumper:
         dump_dir = tmp_path / "dump"
         inner = analyze._NoCacheMiss()
         dumper = analyze.Dumper(inner, dump_dir=str(dump_dir))
-        result = dumper.format_asm(self._INSTRS, self._ARCH)
+        result, _extra = dumper.format_asm(self._INSTRS, self._ARCH)
         written = (dump_dir / "10_11.x86.txt").read_text(encoding="utf-8")
         assert written == result
 
     def test_delegates_extra_mca_args_to_inner(self, tmp_path):
-        """Dumper.extra_mca_args returns the inner mode's extra args."""
+        """Dumper.format_asm returns the same extra args as the inner mode."""
         inner = analyze._StochasticCacheMiss(10, 100)
+        instrs = [(0x10, "mov", "(%eax),%ebx")]
         dumper = analyze.Dumper(inner, dump_dir=str(tmp_path / "dump"))
-        assert dumper.extra_mca_args() == inner.extra_mca_args()
+        _inner_asm, inner_extra = inner.format_asm(instrs, self._ARCH)
+        _dumper_asm, dumper_extra = dumper.format_asm(instrs, self._ARCH)
+        assert dumper_extra == inner_extra
 
     def test_no_file_written_for_empty_instrs(self, tmp_path):
         """Dumper does not create any file when instrs is empty."""

@@ -386,7 +386,8 @@ class TestRoundTrip:
         mca_args = arch.mca_args
 
         # Run llvm-mca directly.
-        original = _analyze._run_mca(instrs, mca_args, arch, _analyze._NoCacheMiss())
+        original = _analyze._run_mca(instrs, mca_args, arch=arch,
+                                     cache_mode=_analyze._NoCacheMiss())
         if original is None:
             pytest.skip("llvm-mca returned None for the original run")
         orig_retired, orig_cycles, orig_lp = original

@@ -206,7 +206,7 @@ def _format_branch_instr(mnemonic: str, operands: str, addr_set: set,
 _CACHE_MISS_REPEAT = 100
 
 
-def _format_asm(instrs, arch: ArchBase) -> str:
+def _format_asm(instrs, arch: ArchBase) -> tuple[str, list]:
     """Format *instrs* as assembly for llvm-mca.
 
     * Instructions whose address is a branch target within this region are
@@ -219,6 +219,9 @@ def _format_asm(instrs, arch: ArchBase) -> str:
     * Indirect branches (no resolvable target) are kept as-is.
     * A ``.Lmca_end:`` label is appended after the last instruction so that
       all forward/external branch targets resolve without assembler errors.
+
+    Returns a ``(asm, [])`` pair — no extra llvm-mca arguments are needed
+    for plain formatting.
     """
     addr_set = {a for a, _, _ in instrs}
     labeled = _compute_labeled_addrs(instrs, arch)
@@ -236,11 +239,11 @@ def _format_asm(instrs, arch: ArchBase) -> str:
             lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", []
 
 
 def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
-                                          latency: int = 0) -> str:
+                                          latency: int = 0) -> tuple[str, list]:
     """Format *instrs* as assembly where every load gets a fixed latency override.
 
     Every load instruction is wrapped with ``# LLVM-MCA-LATENCY <latency>``
@@ -251,6 +254,9 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
     This implements the *average* cache-miss mode where all loads take
     ``cache_latency * cache_miss`` cycles, as opposed to a fraction of loads
     taking the full *cache_latency*.
+
+    Returns a ``(asm, [])`` pair — no extra llvm-mca arguments are needed
+    for average-latency formatting.
     """
     addr_set = {a for a, _, _ in instrs}
     labeled = _compute_labeled_addrs(instrs, arch)
@@ -272,13 +278,13 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
             lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", []
 
 
 def _format_asm_with_cache_miss(instrs, arch: ArchBase,
                                  cache_miss: float = 0.0,
                                  cache_latency: int = 0,
-                                 front_loaded: bool = False) -> str:
+                                 front_loaded: bool = False) -> tuple[str, list]:
     """Format *instrs* as assembly for llvm-mca with cache-miss simulation.
 
     *cache_miss* is the average number of cache misses per load instruction
@@ -305,7 +311,17 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
 
     Labels are made unique per repetition so that backward branches within a
     loop still resolve to the correct iteration-local target.
+
+    Returns ``(asm, ["-iterations=1"])`` when the block is repeated (loads
+    are present), or ``(asm, [])`` via :func:`_format_asm` when there are no
+    load instructions in *instrs*.
     """
+    n = sum(
+        1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
+    )
+    if n == 0:
+        return _format_asm(instrs, arch)
+
     addr_set = {a for a, _, _ in instrs}
     labeled = _compute_labeled_addrs(instrs, arch)
 
@@ -318,9 +334,6 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
     # a: number of loads that receive the +cache_latency fractional adjustment.
     # Adjustment positions are floor(m * b / a) for m in 0..a-1 (stochastic),
     # or 0..a-1 (front-loaded).
-    n = sum(
-        1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
-    )
     b = _CACHE_MISS_REPEAT * n
     a = round(frac * b) if b > 0 else 0
     load_counter = 0
@@ -371,7 +384,7 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
                 lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", ["-iterations=1"]
 
 
 # ---------------------------------------------------------------------------
@@ -383,23 +396,24 @@ class _CacheMissMode:
 
     Each subclass encapsulates the cache-miss parameters as instance
     variables and provides a ``format_asm`` method that produces the
-    appropriate assembly for llvm-mca, as well as ``extra_mca_args`` for
-    any extra flags required by that strategy.
+    appropriate assembly for llvm-mca along with any extra llvm-mca flags
+    required by that strategy.
     """
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
-        """Format *instrs* as assembly with the cache-miss strategy applied."""
-        raise NotImplementedError
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
+        """Format *instrs* as assembly with the cache-miss strategy applied.
 
-    def extra_mca_args(self) -> list:
-        """Return extra arguments to add to the llvm-mca command."""
-        return []
+        Returns a ``(asm, extra_args)`` pair where *asm* is the formatted
+        assembly string and *extra_args* is a list of additional arguments to
+        pass to llvm-mca (e.g. ``["-iterations=1"]``).
+        """
+        raise NotImplementedError
 
 
 class _NoCacheMiss(_CacheMissMode):
     """No cache-miss simulation — plain assembly formatting."""
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         return _format_asm(instrs, arch)
 
 
@@ -429,20 +443,15 @@ class _StochasticCacheMiss(_CacheMissMode):
         self.instructions_per_cache_miss = instructions_per_cache_miss
         self.cache_latency = cache_latency
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         num_instrs = len(instrs)
         num_loads = sum(
             1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
         )
-        if num_loads == 0:
-            return _format_asm(instrs, arch)
         expected_misses = num_instrs / self.instructions_per_cache_miss
-        miss_fraction = expected_misses / num_loads
+        miss_fraction = expected_misses / num_loads if num_loads > 0 else 0.0
         return _format_asm_with_cache_miss(instrs, arch, miss_fraction,
                                            self.cache_latency)
-
-    def extra_mca_args(self) -> list:
-        return ["-iterations=1"]
 
 
 class _EarlyCacheMiss(_CacheMissMode):
@@ -470,21 +479,16 @@ class _EarlyCacheMiss(_CacheMissMode):
         self.instructions_per_cache_miss = instructions_per_cache_miss
         self.cache_latency = cache_latency
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         num_instrs = len(instrs)
         num_loads = sum(
             1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
         )
-        if num_loads == 0:
-            return _format_asm(instrs, arch)
         expected_misses = num_instrs / self.instructions_per_cache_miss
-        miss_fraction = expected_misses / num_loads
+        miss_fraction = expected_misses / num_loads if num_loads > 0 else 0.0
         return _format_asm_with_cache_miss(instrs, arch, miss_fraction,
                                            self.cache_latency,
                                            front_loaded=True)
-
-    def extra_mca_args(self) -> list:
-        return ["-iterations=1"]
 
 
 class _AverageCacheMiss(_CacheMissMode):
@@ -502,7 +506,7 @@ class _AverageCacheMiss(_CacheMissMode):
         self.instructions_per_cache_miss = instructions_per_cache_miss
         self.cache_latency = cache_latency
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         num_instrs = len(instrs)
         num_loads = sum(
             1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
@@ -551,17 +555,9 @@ class _StochasticCacheMissRate(_CacheMissMode):
         self.cache_miss_rate = cache_miss_rate
         self.cache_latency = cache_latency
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
-        num_loads = sum(
-            1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
-        )
-        if num_loads == 0:
-            return _format_asm(instrs, arch)
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         return _format_asm_with_cache_miss(instrs, arch, self.cache_miss_rate,
                                            self.cache_latency)
-
-    def extra_mca_args(self) -> list:
-        return ["-iterations=1"]
 
 
 class _EarlyCacheMissRate(_CacheMissMode):
@@ -580,18 +576,10 @@ class _EarlyCacheMissRate(_CacheMissMode):
         self.cache_miss_rate = cache_miss_rate
         self.cache_latency = cache_latency
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
-        num_loads = sum(
-            1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
-        )
-        if num_loads == 0:
-            return _format_asm(instrs, arch)
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         return _format_asm_with_cache_miss(instrs, arch, self.cache_miss_rate,
                                            self.cache_latency,
                                            front_loaded=True)
-
-    def extra_mca_args(self) -> list:
-        return ["-iterations=1"]
 
 
 class _AverageCacheMissRate(_CacheMissMode):
@@ -607,7 +595,7 @@ class _AverageCacheMissRate(_CacheMissMode):
         self.cache_miss_rate = cache_miss_rate
         self.cache_latency = cache_latency
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         num_loads = sum(
             1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
         )
@@ -658,7 +646,7 @@ class Dumper(_CacheMissMode):
         self._inner = inner
         self._dump_dir = dump_dir
 
-    def format_asm(self, instrs, arch: ArchBase) -> str:
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         """Format *instrs* by delegating to the inner mode and write to disk.
 
         The formatted assembly is written to
@@ -669,7 +657,7 @@ class Dumper(_CacheMissMode):
 
         Nothing is written when *instrs* is empty.
         """
-        result = self._inner.format_asm(instrs, arch)
+        result, extra = self._inner.format_asm(instrs, arch)
         if instrs:
             os.makedirs(self._dump_dir, exist_ok=True)
             start = instrs[0][0]
@@ -678,11 +666,7 @@ class Dumper(_CacheMissMode):
             path = os.path.join(self._dump_dir, filename)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(result)
-        return result
-
-    def extra_mca_args(self) -> list:
-        """Return extra llvm-mca arguments from the inner mode."""
-        return self._inner.extra_mca_args()
+        return result, extra
 
 
 # ---------------------------------------------------------------------------
@@ -718,8 +702,7 @@ def _count_load_proportion(instrs, arch: ArchBase) -> float:
     return loads / len(instrs)
 
 
-def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
-             cache_mode: _CacheMissMode = None):
+def _run_mca(instrs, mca_args=(), *, arch: ArchBase, cache_mode: _CacheMissMode):
     """Run llvm-mca on *instrs* and return ``(retired, cycles, load_proportion)``, or None.
 
     Parameters
@@ -729,10 +712,9 @@ def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
     mca_args:
         Extra arguments forwarded to llvm-mca (e.g. ``-march=``, ``-mcpu=``).
     arch:
-        Architecture object.  Defaults to :class:`X86Arch` when omitted.
+        Architecture object.
     cache_mode:
-        Cache-miss simulation strategy.  Defaults to :class:`_NoCacheMiss`
-        (no simulation) when omitted.
+        Cache-miss simulation strategy.
     """
     global _LLVM_MCA
     if not instrs:
@@ -744,13 +726,7 @@ def _run_mca(instrs, mca_args=(), arch: ArchBase = None,
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    if arch is None:
-        arch = X86Arch()
-    if cache_mode is None:
-        cache_mode = _NoCacheMiss()
-
-    asm = cache_mode.format_asm(instrs, arch)
-    extra = cache_mode.extra_mca_args()
+    asm, extra = cache_mode.format_asm(instrs, arch)
 
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
     cmd = [_LLVM_MCA, *mca_args, *extra, "-"]
@@ -774,7 +750,7 @@ def _yield_mca_result(instrs, mca_args, arch: ArchBase,
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
-        result = _run_mca(instrs, mca_args, arch, cache_mode)
+        result = _run_mca(instrs, mca_args, arch=arch, cache_mode=cache_mode)
         if result is not None:
             retired, cycles, load_proportion = result
             yield instrs[0][0], instrs[-1][0], retired, cycles, load_proportion
@@ -822,44 +798,6 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
         yield start, end, retired, cycles, lp, "block"
 
 
-def _analyze_function_ipc(instrs, mca_args=(), arch: ArchBase = None,
-                           cache_mode: _CacheMissMode = None):
-    """Select the hottest region for one function.
-
-    Hottest region = highest IPC (retired / cycles) among loops, falling back
-    to basic blocks when the function contains no loops.
-
-    Returns a ``(start_addr, end_addr, retired, cycles, load_proportion)`` tuple
-    where the address range spans the whole function, *retired* and *cycles* are
-    taken from the hottest region, and *load_proportion* belongs to that region.
-    Returns ``None`` when llvm-mca produces no results for any region.
-    """
-    if not instrs:
-        return None
-
-    if arch is None:
-        arch = X86Arch()
-    if cache_mode is None:
-        cache_mode = _NoCacheMiss()
-
-    loop_candidates = []
-    block_candidates = []
-    for _, _, retired, cycles, lp, kind in _analyze_function(instrs, mca_args, arch,
-                                                              cache_mode):
-        if cycles > 0 and retired > 0:
-            ipc_equiv = retired / cycles
-            if kind == "loop":
-                loop_candidates.append((ipc_equiv, retired, cycles, lp))
-            else:
-                block_candidates.append((ipc_equiv, retired, cycles, lp))
-
-    candidates = loop_candidates or block_candidates
-    if not candidates:
-        return None
-    _, best_retired, best_cycles, best_lp = max(candidates, key=lambda r: r[0])
-    return instrs[0][0], instrs[-1][0], best_retired, best_cycles, best_lp
-
-
 # ---------------------------------------------------------------------------
 # Analyzer class — encapsulates optional analysis parameters
 # ---------------------------------------------------------------------------
@@ -867,9 +805,9 @@ def _analyze_function_ipc(instrs, mca_args=(), arch: ArchBase = None,
 class Analyzer:
     """Analyses an ELF binary using llvm-mca.
 
-    Optional analysis parameters (CPU override, analysis mode, and cache-miss
-    simulation settings) are stored as instance variables rather than being
-    threaded through every function call as positional/keyword arguments.
+    Optional analysis parameters (CPU override and cache-miss simulation
+    settings) are stored as instance variables rather than being threaded
+    through every function call as positional/keyword arguments.
 
     Parameters
     ----------
@@ -878,12 +816,6 @@ class Analyzer:
     mcpu:
         If non-empty, overrides the default ``-mcpu`` value chosen by
         :func:`_detect_arch` and is forwarded to llvm-mca.
-    mode:
-        ``"blocks"`` (default) — yield ``(start, end, retired, cycles, load_proportion)``
-        for every loop and non-loop basic block.
-
-        ``"functions"`` — yield one tuple per function where *retired* and *cycles*
-        are from the hottest region (highest retired/cycles ratio).
     cache_miss:
         Number of retired instructions per cache miss (``instructions_per_cache_miss``).
         Use ``0`` (default) for no cache-miss simulation.
@@ -904,13 +836,12 @@ class Analyzer:
         ``{start_address}_{end_address}.{arch}.txt``.
     """
 
-    def __init__(self, binary: str, mcpu: str = "", mode: str = "blocks",
+    def __init__(self, binary: str, mcpu: str = "",
                  cache_miss: float = 0.0, cache_latency: int = 0,
                  cache_miss_mode: str = "stochastic", dump: bool = False,
                  cache_miss_rate: float = float("inf")):
         self.binary = binary
         self.mcpu = mcpu
-        self.mode = mode
         self.cache_miss = cache_miss
         self.cache_miss_rate = cache_miss_rate
         self.cache_latency = cache_latency
@@ -940,22 +871,16 @@ class Analyzer:
             cache_mode = Dumper(cache_mode)
 
         for _func_name, instrs in disassemble(self.binary, arch):
-            if self.mode == "functions":
-                result = _analyze_function_ipc(instrs, mca_args, arch,
-                                               cache_mode)
-                if result is not None:
-                    yield result
-            else:
-                for start, end, retired, cycles, lp, _kind in _analyze_function(
-                        instrs, mca_args, arch, cache_mode):
-                    yield start, end, retired, cycles, lp
+            for start, end, retired, cycles, lp, _kind in _analyze_function(
+                    instrs, mca_args, arch, cache_mode):
+                yield start, end, retired, cycles, lp
 
 
 # ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
-def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
+def analyze(binary: str, mcpu: str = "",
             cache_miss: float = 0.0, cache_latency: int = 0,
             cache_miss_mode: str = "stochastic",
             cache_miss_rate: float = float("inf")):
@@ -971,14 +896,6 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
     mcpu:
         If non-empty, overrides the default ``-mcpu`` value chosen by
         ``_detect_arch`` and is forwarded to llvm-mca.
-    mode:
-        ``"blocks"`` (default) — yield ``(start, end, retired, cycles, load_proportion)``
-        for every loop and non-loop basic block.
-
-        ``"functions"`` — yield ``(start, end, retired, cycles, load_proportion)`` for
-        every function, where *start*/*end* span the whole function and
-        *retired*/*cycles* are from the hottest region (highest retired/cycles ratio)
-        across all loops (or basic blocks when the function has no loops).
     cache_miss:
         Number of retired instructions per cache miss
         (``instructions_per_cache_miss``).  Use ``float('inf')`` (default) for
@@ -1009,7 +926,6 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
     return Analyzer(
         binary=binary,
         mcpu=mcpu,
-        mode=mode,
         cache_miss=cache_miss,
         cache_latency=cache_latency,
         cache_miss_mode=cache_miss_mode,
@@ -1034,18 +950,6 @@ def main():
             "Target CPU passed to llvm-mca via -mcpu (e.g. cortex-a72, "
             "neoverse-n1, sifive-u74). Overrides the default CPU chosen by "
             "architecture auto-detection."
-        ),
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["blocks", "functions"],
-        default="blocks",
-        help=(
-            "Analysis mode. 'blocks' (default) reports each basic block and "
-            "loop separately with its retired instructions and elapsed cycles. "
-            "'functions' reports one estimate per function (address range = "
-            "whole function; retired/cycles from the hottest region across all "
-            "loops in the function, or hottest basic block if no loops exist)."
         ),
     )
     parser.add_argument(
@@ -1134,7 +1038,6 @@ def main():
     runner = Analyzer(
         binary=args.binary,
         mcpu=args.mcpu,
-        mode=args.mode,
         cache_miss=args.cache_miss,
         cache_latency=args.cache_latency,
         cache_miss_mode=args.cache_miss_mode,
@@ -1142,19 +1045,12 @@ def main():
         cache_miss_rate=args.cache_miss_rate,
     )
 
-    if args.mode == "functions":
-        # Function mode: one row per function, same output format as block mode.
-        print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
-        for start, end, retired, elapsed_cycles, load_proportion in runner.run():
-            print(f"0x{start:x},0x{end:x},{retired},{elapsed_cycles},{load_proportion:.4f}")
-    else:
-        # Block mode (default): existing behaviour — one row per loop/BB, sorted.
-        results = sorted(
-            runner.run(),
-            key=lambda x: (x[1], -x[0]))
-        print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
-        for start, end, retired, elapsed_cycles, load_proportion in results:
-            print(f"0x{start:x},0x{end:x},{retired},{elapsed_cycles},{load_proportion:.4f}")
+    results = sorted(
+        runner.run(),
+        key=lambda x: (x[1], -x[0]))
+    print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
+    for start, end, retired, elapsed_cycles, load_proportion in results:
+        print(f"0x{start:x},0x{end:x},{retired},{elapsed_cycles},{load_proportion:.4f}")
 
 
 if __name__ == "__main__":
