@@ -31,6 +31,36 @@ are reported separately.
 
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
+### Cache-miss simulation (`analyze.py`)
+
+Cache-miss simulation can be enabled by passing either
+`--instructions-per-cache-miss` or `--cache-miss-rate` together with
+`--cache-latency`:
+
+```
+python3 analyze.py --cache-miss-rate 0.1 --cache-latency 200 <elf-binary>
+```
+
+* `--instructions-per-cache-miss` (default: `inf`, i.e. no simulation) sets
+  the number of retired instructions per cache miss.  Mutually exclusive with
+  `--cache-miss-rate`.
+* `--cache-miss-rate` (default: `inf`, i.e. no simulation) sets the average
+  number of cache misses per retired **load** instruction.  Values between 0
+  and 1 represent a miss probability (e.g. `0.1` means 10 % of loads miss);
+  values greater than 1 are also valid (e.g. `1.5` means each load causes an
+  average of 1.5 misses, as can happen in a multi-level cache hierarchy).
+  Mutually exclusive with `--instructions-per-cache-miss`.
+* `--cache-latency` (default: 0) sets the simulated cache-miss penalty in cycles.
+* `--cache-miss-mode` (default: `stochastic`) selects the simulation mode
+  (`stochastic`, `average`, or `early`).
+  * `stochastic`: the code block is repeated 100 times and load instructions
+    receive the full `--cache-latency` penalty according to the effective miss
+    fraction; llvm-mca is run with `-iterations=1`.
+  * `average`: all load instructions receive a fixed latency derived from the
+    miss fraction multiplied by `--cache-latency` cycles.
+  * `early`: like `stochastic` but all cache misses are placed on the first
+    loads in the repeated block rather than distributed uniformly.
+
 ### Dump mode
 
 `analyze.py --dump` writes the formatted assembly for each analysed region to a
@@ -62,10 +92,18 @@ python3 analyze_str.py --instructions-per-cache-miss 50 --cache-latency 200 dump
 
 * `--mcpu` overrides the default CPU inferred from the filename.
 * `--instructions-per-cache-miss` (default: `inf`, i.e. no simulation) sets
-  the number of retired instructions per cache miss.
+  the number of retired instructions per cache miss.  Mutually exclusive with
+  `--cache-miss-rate`.
+* `--cache-miss-rate` (default: `inf`, i.e. no simulation) sets the average
+  number of cache misses per retired **load** instruction.  Values between 0
+  and 1 represent a miss probability (e.g. `0.1` means 10 % of loads miss);
+  values greater than 1 are also valid (e.g. `1.5` means each load causes an
+  average of 1.5 misses, as can happen in a multi-level cache hierarchy).
+  Mutually exclusive with `--instructions-per-cache-miss`.
 * `--cache-latency` (default: 0) sets the simulated cache-miss penalty in cycles.
 * `--cache-miss-mode` (default: `stochastic`) selects the simulation mode
-  (`stochastic`, `average`, or `early`); see `analyze.py` for a full description.
+  (`stochastic`, `average`, or `early`); see the cache-miss simulation section
+  above for a full description.
 
 ## How llvm-mca handles jump instructions
 
