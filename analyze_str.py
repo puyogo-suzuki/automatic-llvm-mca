@@ -175,7 +175,7 @@ def load_str_file(path: str):
     return instrs, arch, start, end
 
 def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
-                cache_miss: float = float("inf"),
+                cache_miss: float = 0.0,
                 cache_latency: int = 0,
                 cache_miss_mode: str = "stochastic",
                 cache_miss_rate: float = float("inf")):
@@ -192,7 +192,7 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
         If non-empty, overrides the default ``-mcpu`` value chosen by the
         architecture and is forwarded to llvm-mca.
     cache_miss:
-        Number of retired instructions per cache miss.  Use ``float('inf')``
+        Number of retired instructions per cache miss.  Use ``0.0``
         (default) for no cache-miss simulation.
         Mutually exclusive with *cache_miss_rate*.
     cache_latency:
@@ -212,7 +212,7 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
     ``(retired_instructions, elapsed_cycles, load_proportion)`` on success,
     or ``None`` when llvm-mca produces no result.
     """
-    if not math.isinf(cache_miss_rate):
+    if cache_miss_rate > 0.0:
         cache_mode = _build_cache_mode_from_rate(cache_miss_rate, cache_latency,
                                                  cache_miss_mode)
     else:
@@ -296,11 +296,11 @@ def main():
     parser.add_argument(
         "--cache-miss-rate",
         type=float,
-        default=float("inf"),
+        default=0.0,
         metavar="R",
         dest="cache_miss_rate",
         help=(
-            "Cache misses per retired load instruction (>0, default inf "
+            "Cache misses per retired load instruction (>0, default 0.0 "
             "meaning no cache-miss simulation). "
             "May be greater than 1 (e.g. 1.5 means each load causes an "
             "average of 1.5 misses). "
@@ -331,10 +331,10 @@ def main():
         parser.error("--instructions-per-cache-miss must be > 0")
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
-    if not math.isinf(args.cache_miss_rate) and args.cache_miss_rate <= 0:
-        parser.error("--cache-miss-rate must be > 0")
+    if args.cache_miss_rate < 0:
+        parser.error("--cache-miss-rate must be >= 0")
 
-    if not math.isinf(args.cache_miss) and not math.isinf(args.cache_miss_rate):
+    if not math.isinf(args.cache_miss) and args.cache_miss_rate > 0:
         parser.error(
             "--instructions-per-cache-miss and --cache-miss-rate are mutually exclusive"
         )
@@ -368,7 +368,7 @@ def main():
 
     instrs, arch, start, end = load_str_file(args.textfile)
 
-    if not math.isinf(args.cache_miss_rate):
+    if args.cache_miss_rate > 0:
         result = analyze_str(instrs, arch, args.mcpu,
                              cache_latency=args.cache_latency,
                              cache_miss_mode=args.cache_miss_mode,
