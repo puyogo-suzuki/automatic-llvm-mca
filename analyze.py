@@ -799,95 +799,15 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
 
 
 # ---------------------------------------------------------------------------
-# Analyzer class — encapsulates optional analysis parameters
-# ---------------------------------------------------------------------------
-
-class Analyzer:
-    """Analyses an ELF binary using llvm-mca.
-
-    Optional analysis parameters (CPU override and cache-miss simulation
-    settings) are stored as instance variables rather than being threaded
-    through every function call as positional/keyword arguments.
-
-    Parameters
-    ----------
-    binary:
-        Path to the ELF binary to analyse.
-    mcpu:
-        If non-empty, overrides the default ``-mcpu`` value chosen by
-        :func:`_detect_arch` and is forwarded to llvm-mca.
-    cache_miss:
-        Number of retired instructions per cache miss (``instructions_per_cache_miss``).
-        Use ``0`` (default) for no cache-miss simulation.
-        Mutually exclusive with *cache_miss_rate*.
-    cache_miss_rate:
-        Cache misses per retired load instruction.  Use ``float('inf')``
-        (default) for no cache-miss simulation.  May be greater than 1.
-        Mutually exclusive with *cache_miss*.
-    cache_latency:
-        Cache-miss penalty in cycles.  Only used when *instructions_per_cache_miss*
-        or *cache_miss_rate* is finite.
-    cache_miss_mode:
-        ``"stochastic"`` (default), ``"average"``, or ``"early"``.  See :func:`analyze`
-        for a full description.
-    dump:
-        When ``True``, the formatted assembly for each analysed region is
-        written to a file in a ``"dump"`` directory.  Filename format:
-        ``{start_address}_{end_address}.{arch}.txt``.
-    """
-
-    def __init__(self, binary: str, mcpu: str = "",
-                 cache_miss: float = 0.0, cache_latency: int = 0,
-                 cache_miss_mode: str = "stochastic", dump: bool = False,
-                 cache_miss_rate: float = float("inf")):
-        self.binary = binary
-        self.mcpu = mcpu
-        self.cache_miss = cache_miss
-        self.cache_miss_rate = cache_miss_rate
-        self.cache_latency = cache_latency
-        self.cache_miss_mode = cache_miss_mode
-        self.dump = dump
-
-    def _effective_mca_args(self, arch: ArchBase) -> list:
-        """Return mca_args for *arch*, applying any :attr:`mcpu` override."""
-        mca_args = arch.mca_args
-        if self.mcpu:
-            mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
-            mca_args = mca_args + [f"-mcpu={self.mcpu}"]
-        return mca_args
-
-    def run(self):
-        """Analyse :attr:`binary` and yield ``(start, end, retired, cycles, load_proportion)`` tuples."""
-        arch = _detect_arch(self.binary)
-        mca_args = self._effective_mca_args(arch)
-        if self.cache_miss_rate > 0.0:
-            cache_mode = _build_cache_mode_from_rate(self.cache_miss_rate,
-                                                     self.cache_latency,
-                                                     self.cache_miss_mode)
-        else:
-            cache_mode = _build_cache_mode(self.cache_miss, self.cache_latency,
-                                           self.cache_miss_mode)
-        if self.dump:
-            cache_mode = Dumper(cache_mode)
-
-        for _func_name, instrs in disassemble(self.binary, arch):
-            for start, end, retired, cycles, lp, _kind in _analyze_function(
-                    instrs, mca_args, arch, cache_mode):
-                yield start, end, retired, cycles, lp
-
-
-# ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
 def analyze(binary: str, mcpu: str = "",
             cache_miss: float = 0.0, cache_latency: int = 0,
             cache_miss_mode: str = "stochastic",
-            cache_miss_rate: float = float("inf")):
-    """Analyse *binary* and yield result tuples.
-
-    This is a convenience wrapper around :class:`Analyzer`.  All parameters
-    are forwarded as instance variables; see :class:`Analyzer` for details.
+            cache_miss_rate: float = 0.0,
+            dump: bool = False):
+    """Analyse *binary* and yield ``(start, end, retired, cycles, load_proportion)`` tuples.
 
     Parameters
     ----------
@@ -898,7 +818,7 @@ def analyze(binary: str, mcpu: str = "",
         ``_detect_arch`` and is forwarded to llvm-mca.
     cache_miss:
         Number of retired instructions per cache miss
-        (``instructions_per_cache_miss``).  Use ``float('inf')`` (default) for
+        (``instructions_per_cache_miss``).  Use ``0`` (default) for
         no cache-miss simulation.  Interpretation depends on *cache_miss_mode*.
         Mutually exclusive with *cache_miss_rate*.
     cache_latency:
@@ -918,19 +838,32 @@ def analyze(binary: str, mcpu: str = "",
         uniformly (e.g. ``miss miss miss hit hit`` instead of
         ``miss hit miss hit miss``).
     cache_miss_rate:
-        Cache misses per retired load instruction.  Use ``0``
+        Cache misses per retired load instruction.  Use ``0.0``
         (default) for no cache-miss simulation.  May be greater than 1.
-        When finite, this takes precedence over *cache_miss*.
+        When non-zero, this takes precedence over *cache_miss*.
         Mutually exclusive with *cache_miss*.
+    dump:
+        When ``True``, the formatted assembly for each analysed region is
+        written to a file in a ``"dump"`` directory.  Filename format:
+        ``{start_address}_{end_address}.{arch}.txt``.
     """
-    return Analyzer(
-        binary=binary,
-        mcpu=mcpu,
-        cache_miss=cache_miss,
-        cache_latency=cache_latency,
-        cache_miss_mode=cache_miss_mode,
-        cache_miss_rate=cache_miss_rate,
-    ).run()
+    arch = _detect_arch(binary)
+    mca_args = arch.mca_args
+    if mcpu:
+        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
+        mca_args = mca_args + [f"-mcpu={mcpu}"]
+    if cache_miss_rate > 0.0:
+        cache_mode = _build_cache_mode_from_rate(cache_miss_rate, cache_latency,
+                                                 cache_miss_mode)
+    else:
+        cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
+    if dump:
+        cache_mode = Dumper(cache_mode)
+
+    for _func_name, instrs in disassemble(binary, arch):
+        for start, end, retired, cycles, lp, _kind in _analyze_function(
+                instrs, mca_args, arch, cache_mode):
+            yield start, end, retired, cycles, lp
 
 
 # ---------------------------------------------------------------------------
@@ -1035,18 +968,16 @@ def main():
             "--instructions-per-cache-miss and --cache-miss-rate are mutually exclusive"
         )
 
-    runner = Analyzer(
-        binary=args.binary,
-        mcpu=args.mcpu,
-        cache_miss=args.cache_miss,
-        cache_latency=args.cache_latency,
-        cache_miss_mode=args.cache_miss_mode,
-        dump=args.dump,
-        cache_miss_rate=args.cache_miss_rate,
-    )
-
     results = sorted(
-        runner.run(),
+        analyze(
+            binary=args.binary,
+            mcpu=args.mcpu,
+            cache_miss=args.cache_miss,
+            cache_latency=args.cache_latency,
+            cache_miss_mode=args.cache_miss_mode,
+            dump=args.dump,
+            cache_miss_rate=args.cache_miss_rate,
+        ),
         key=lambda x: (x[1], -x[0]))
     print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
     for start, end, retired, elapsed_cycles, load_proportion in results:
