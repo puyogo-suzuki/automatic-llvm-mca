@@ -206,7 +206,7 @@ def _format_branch_instr(mnemonic: str, operands: str, addr_set: set,
 _CACHE_MISS_REPEAT = 100
 
 
-def _format_asm(instrs, arch: ArchBase) -> str:
+def _format_asm(instrs, arch: ArchBase) -> tuple[str, list]:
     """Format *instrs* as assembly for llvm-mca.
 
     * Instructions whose address is a branch target within this region are
@@ -219,6 +219,9 @@ def _format_asm(instrs, arch: ArchBase) -> str:
     * Indirect branches (no resolvable target) are kept as-is.
     * A ``.Lmca_end:`` label is appended after the last instruction so that
       all forward/external branch targets resolve without assembler errors.
+
+    Returns a ``(asm, [])`` pair — no extra llvm-mca arguments are needed
+    for plain formatting.
     """
     addr_set = {a for a, _, _ in instrs}
     labeled = _compute_labeled_addrs(instrs, arch)
@@ -236,11 +239,11 @@ def _format_asm(instrs, arch: ArchBase) -> str:
             lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", []
 
 
 def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
-                                          latency: int = 0) -> str:
+                                          latency: int = 0) -> tuple[str, list]:
     """Format *instrs* as assembly where every load gets a fixed latency override.
 
     Every load instruction is wrapped with ``# LLVM-MCA-LATENCY <latency>``
@@ -251,6 +254,9 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
     This implements the *average* cache-miss mode where all loads take
     ``cache_latency * cache_miss`` cycles, as opposed to a fraction of loads
     taking the full *cache_latency*.
+
+    Returns a ``(asm, [])`` pair — no extra llvm-mca arguments are needed
+    for average-latency formatting.
     """
     addr_set = {a for a, _, _ in instrs}
     labeled = _compute_labeled_addrs(instrs, arch)
@@ -272,13 +278,13 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
             lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", []
 
 
 def _format_asm_with_cache_miss(instrs, arch: ArchBase,
                                  cache_miss: float = 0.0,
                                  cache_latency: int = 0,
-                                 front_loaded: bool = False) -> str:
+                                 front_loaded: bool = False) -> tuple[str, list]:
     """Format *instrs* as assembly for llvm-mca with cache-miss simulation.
 
     *cache_miss* is the average number of cache misses per load instruction
@@ -305,6 +311,10 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
 
     Labels are made unique per repetition so that backward branches within a
     loop still resolve to the correct iteration-local target.
+
+    Returns ``(asm, ["-iterations=1"])`` when the block is repeated (loads
+    are present), or ``(asm, [])`` via :func:`_format_asm` when there are no
+    load instructions in *instrs*.
     """
     n = sum(
         1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
@@ -374,7 +384,7 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
                 lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", ["-iterations=1"]
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +414,7 @@ class _NoCacheMiss(_CacheMissMode):
     """No cache-miss simulation — plain assembly formatting."""
 
     def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
-        return _format_asm(instrs, arch), []
+        return _format_asm(instrs, arch)
 
 
 class _StochasticCacheMiss(_CacheMissMode):
@@ -441,7 +451,7 @@ class _StochasticCacheMiss(_CacheMissMode):
         expected_misses = num_instrs / self.instructions_per_cache_miss
         miss_fraction = expected_misses / num_loads if num_loads > 0 else 0.0
         return _format_asm_with_cache_miss(instrs, arch, miss_fraction,
-                                           self.cache_latency), ["-iterations=1"]
+                                           self.cache_latency)
 
 
 class _EarlyCacheMiss(_CacheMissMode):
@@ -478,7 +488,7 @@ class _EarlyCacheMiss(_CacheMissMode):
         miss_fraction = expected_misses / num_loads if num_loads > 0 else 0.0
         return _format_asm_with_cache_miss(instrs, arch, miss_fraction,
                                            self.cache_latency,
-                                           front_loaded=True), ["-iterations=1"]
+                                           front_loaded=True)
 
 
 class _AverageCacheMiss(_CacheMissMode):
@@ -502,10 +512,10 @@ class _AverageCacheMiss(_CacheMissMode):
             1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
         )
         if num_loads == 0:
-            return _format_asm(instrs, arch), []
+            return _format_asm(instrs, arch)
         expected_misses = num_instrs / self.instructions_per_cache_miss
         avg_latency = round(expected_misses / num_loads * self.cache_latency)
-        return _format_asm_with_average_load_latency(instrs, arch, avg_latency), []
+        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
 
 
 def _build_cache_mode(instructions_per_cache_miss: float, cache_latency: int,
@@ -547,7 +557,7 @@ class _StochasticCacheMissRate(_CacheMissMode):
 
     def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         return _format_asm_with_cache_miss(instrs, arch, self.cache_miss_rate,
-                                           self.cache_latency), ["-iterations=1"]
+                                           self.cache_latency)
 
 
 class _EarlyCacheMissRate(_CacheMissMode):
@@ -569,7 +579,7 @@ class _EarlyCacheMissRate(_CacheMissMode):
     def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
         return _format_asm_with_cache_miss(instrs, arch, self.cache_miss_rate,
                                            self.cache_latency,
-                                           front_loaded=True), ["-iterations=1"]
+                                           front_loaded=True)
 
 
 class _AverageCacheMissRate(_CacheMissMode):
@@ -590,9 +600,9 @@ class _AverageCacheMissRate(_CacheMissMode):
             1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)
         )
         if num_loads == 0:
-            return _format_asm(instrs, arch), []
+            return _format_asm(instrs, arch)
         avg_latency = round(self.cache_miss_rate * self.cache_latency)
-        return _format_asm_with_average_load_latency(instrs, arch, avg_latency), []
+        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
 
 
 def _build_cache_mode_from_rate(cache_miss_rate: float, cache_latency: int,
