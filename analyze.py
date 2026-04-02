@@ -197,6 +197,8 @@ def _format_branch_instr(mnemonic: str, operands: str, addr_set: set,
     else:
         new_operands = operands
 
+    # Apply architecture-specific operand formatting for LLVM-MCA
+    new_operands = arch.format_operands_for_mca(mnemonic, new_operands)
     suffix = f" {new_operands}" if new_operands else ""
     return f"\t{mnemonic}{suffix}"
 
@@ -228,7 +230,9 @@ def _format_asm(instrs, arch: ArchBase) -> str:
         if arch.is_branch(mnemonic):
             lines.append(_format_branch_instr(mnemonic, operands, addr_set, arch))
         else:
-            tail = f" {operands}" if operands else ""
+            # Apply architecture-specific operand formatting for LLVM-MCA
+            formatted_operands = arch.format_operands_for_mca(mnemonic, operands)
+            tail = f" {formatted_operands}" if formatted_operands else ""
             lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")
@@ -255,7 +259,9 @@ def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
     for addr, mnemonic, operands in instrs:
         if addr in labeled:
             lines.append(f".Lmca_{addr:x}:")
-        tail = f" {operands}" if operands else ""
+        # Apply architecture-specific operand formatting for LLVM-MCA
+        formatted_operands = arch.format_operands_for_mca(mnemonic, operands)
+        tail = f" {formatted_operands}" if formatted_operands else ""
         if arch.is_load_instruction(mnemonic, operands):
             lines.append(f"# LLVM-MCA-LATENCY {latency}")
             lines.append(f"\t{mnemonic}{tail}")
@@ -324,7 +330,9 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
     def _emit_load(mnemonic: str, operands: str, lines: list) -> None:
         """Append a load instruction with the appropriate latency directive."""
         nonlocal load_counter, miss_counter, next_miss_position
-        tail = f" {operands}" if operands else ""
+        # Apply architecture-specific operand formatting for LLVM-MCA
+        formatted_operands = arch.format_operands_for_mca(mnemonic, operands)
+        tail = f" {formatted_operands}" if formatted_operands else ""
         if front_loaded:
             is_miss = load_counter < a
         else:
@@ -357,7 +365,9 @@ def _format_asm_with_cache_miss(instrs, arch: ArchBase,
             elif arch.is_load_instruction(mnemonic, operands):
                 _emit_load(mnemonic, operands, lines)
             else:
-                tail = f" {operands}" if operands else ""
+                # Apply architecture-specific operand formatting for LLVM-MCA
+                formatted_operands = arch.format_operands_for_mca(mnemonic, operands)
+                tail = f" {formatted_operands}" if formatted_operands else ""
                 lines.append(f"\t{mnemonic}{tail}")
 
     lines.append(".Lmca_end:")

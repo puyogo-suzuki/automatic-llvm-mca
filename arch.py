@@ -184,6 +184,18 @@ class ArchBase:
         """
         return re.sub(r"#.*$", "", text).strip()
 
+    def format_operands_for_mca(self, mnemonic: str, operands: str) -> str:
+        """Format operands for LLVM-MCA compatibility.
+
+        Some objdump outputs contain bare hex numbers (e.g., "1f000") that
+        LLVM-MCA requires to have a "0x" prefix. This method allows
+        architecture-specific fixups.
+
+        The default implementation returns operands unchanged; subclasses
+        override as needed.
+        """
+        return operands
+
 
 class X86Arch(ArchBase):
     """x86 / x86-64 architecture."""
@@ -254,6 +266,37 @@ class AArch64Arch(ArchBase):
         # AArch64 uses # for immediate operands (e.g. #0x1), so only
         # strip // style comments.
         return re.sub(r"//.*$", "", text).strip()
+
+    def format_operands_for_mca(self, mnemonic: str, operands: str) -> str:
+        """Format operands for LLVM-MCA compatibility.
+
+        objdump output for AArch64 can contain bare hex numbers like "1f000"
+        (from adrp instructions after symbol annotations are removed). LLVM-MCA
+        requires these to have a "0x" prefix.
+
+        This method adds "0x" to bare hex numbers that appear as standalone
+        tokens (not part of #immediate, register names, or floating-point literals).
+        """
+        # Match hex-looking tokens: sequences of hex digits that start with a
+        # digit (not a-f) to avoid matching register names like "x16".
+        # We require at least 4 hex digits to avoid matching small decimals.
+        # Also avoid matching floating-point literals (preceded by . or e/E).
+        def add_0x_prefix(match):
+            token = match.group(0)
+            # If it already has 0x prefix, leave it
+            if token.startswith("0x"):
+                return token
+            # Add 0x prefix
+            return "0x" + token
+
+        # Replace bare hex numbers (4+ hex digits starting with a digit)
+        # that are not preceded by:
+        #   - # (immediate marker)
+        #   - 0x (already has prefix)
+        #   - . (decimal point in floating-point number)
+        #   - e or E (exponent in floating-point number)
+        operands = re.sub(r"(?<![#0x.eE])\b([0-9][0-9a-fA-F]{3,})\b", add_0x_prefix, operands)
+        return operands
 
 
 class ARMArch(ArchBase):
