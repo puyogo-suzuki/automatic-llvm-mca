@@ -224,7 +224,7 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
         mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
         mca_args = mca_args + [f"-mcpu={mcpu}"]
 
-    return _run_mca(instrs, mca_args, arch, cache_mode)
+    return _run_mca(instrs, mca_args, arch=arch, cache_mode=cache_mode)
 
 def main():
     parser = argparse.ArgumentParser(
