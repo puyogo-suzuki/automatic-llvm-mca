@@ -886,7 +886,7 @@ class Analyzer:
         are from the hottest region (highest retired/cycles ratio).
     cache_miss:
         Number of retired instructions per cache miss (``instructions_per_cache_miss``).
-        Use ``float('inf')`` (default) for no cache-miss simulation.
+        Use ``0`` (default) for no cache-miss simulation.
         Mutually exclusive with *cache_miss_rate*.
     cache_miss_rate:
         Cache misses per retired load instruction.  Use ``float('inf')``
@@ -905,7 +905,7 @@ class Analyzer:
     """
 
     def __init__(self, binary: str, mcpu: str = "", mode: str = "blocks",
-                 cache_miss: float = float("inf"), cache_latency: int = 0,
+                 cache_miss: float = 0.0, cache_latency: int = 0,
                  cache_miss_mode: str = "stochastic", dump: bool = False,
                  cache_miss_rate: float = float("inf")):
         self.binary = binary
@@ -929,7 +929,7 @@ class Analyzer:
         """Analyse :attr:`binary` and yield ``(start, end, retired, cycles, load_proportion)`` tuples."""
         arch = _detect_arch(self.binary)
         mca_args = self._effective_mca_args(arch)
-        if not math.isinf(self.cache_miss_rate):
+        if self.cache_miss_rate > 0.0:
             cache_mode = _build_cache_mode_from_rate(self.cache_miss_rate,
                                                      self.cache_latency,
                                                      self.cache_miss_mode)
@@ -956,7 +956,7 @@ class Analyzer:
 # ---------------------------------------------------------------------------
 
 def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
-            cache_miss: float = float("inf"), cache_latency: int = 0,
+            cache_miss: float = 0.0, cache_latency: int = 0,
             cache_miss_mode: str = "stochastic",
             cache_miss_rate: float = float("inf")):
     """Analyse *binary* and yield result tuples.
@@ -1001,7 +1001,7 @@ def analyze(binary: str, mcpu: str = "", mode: str = "blocks",
         uniformly (e.g. ``miss miss miss hit hit`` instead of
         ``miss hit miss hit miss``).
     cache_miss_rate:
-        Cache misses per retired load instruction.  Use ``float('inf')``
+        Cache misses per retired load instruction.  Use ``0``
         (default) for no cache-miss simulation.  May be greater than 1.
         When finite, this takes precedence over *cache_miss*.
         Mutually exclusive with *cache_miss*.
@@ -1093,11 +1093,11 @@ def main():
     parser.add_argument(
         "--cache-miss-rate",
         type=float,
-        default=float("inf"),
+        default=0.0,
         metavar="R",
         dest="cache_miss_rate",
         help=(
-            "Cache misses per retired load instruction (>0, default inf "
+            "Cache misses per retired load instruction (>0, default 0.0 "
             "meaning no cache-miss simulation). "
             "May be greater than 1 (e.g. 1.5 means each load causes an "
             "average of 1.5 misses). "
@@ -1124,9 +1124,9 @@ def main():
         parser.error("--instructions-per-cache-miss must be > 0")
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
-    if not math.isinf(args.cache_miss_rate) and args.cache_miss_rate <= 0:
-        parser.error("--cache-miss-rate must be > 0")
-    if not math.isinf(args.cache_miss) and not math.isinf(args.cache_miss_rate):
+    if args.cache_miss_rate < 0:
+        parser.error("--cache-miss-rate must be >= 0")
+    if not math.isinf(args.cache_miss) and args.cache_miss_rate > 0:
         parser.error(
             "--instructions-per-cache-miss and --cache-miss-rate are mutually exclusive"
         )
