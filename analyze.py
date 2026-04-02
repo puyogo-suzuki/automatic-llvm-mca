@@ -805,7 +805,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
 def analyze(binary: str, mcpu: str = "",
             cache_miss: float = 0.0, cache_latency: int = 0,
             cache_miss_mode: str = "stochastic",
-            cache_miss_rate: float = float("inf"),
+            cache_miss_rate: float = 0.0,
             dump: bool = False):
     """Analyse *binary* and yield ``(start, end, retired, cycles, load_proportion)`` tuples.
 
@@ -838,9 +838,9 @@ def analyze(binary: str, mcpu: str = "",
         uniformly (e.g. ``miss miss miss hit hit`` instead of
         ``miss hit miss hit miss``).
     cache_miss_rate:
-        Cache misses per retired load instruction.  Use ``float('inf')``
+        Cache misses per retired load instruction.  Use ``0.0``
         (default) for no cache-miss simulation.  May be greater than 1.
-        When finite and non-zero, this takes precedence over *cache_miss*.
+        When non-zero, this takes precedence over *cache_miss*.
         Mutually exclusive with *cache_miss*.
     dump:
         When ``True``, the formatted assembly for each analysed region is
