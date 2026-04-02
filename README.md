@@ -44,7 +44,7 @@ python3 analyze.py --cache-miss-rate 0.1 --cache-latency 200 <elf-binary>
 * `--instructions-per-cache-miss` (default: `inf`, i.e. no simulation) sets
   the number of retired instructions per cache miss.  Mutually exclusive with
   `--cache-miss-rate`.
-* `--cache-miss-rate` (default: `inf`, i.e. no simulation) sets the average
+* `--cache-miss-rate` (default: `0.0`, i.e. no simulation) sets the average
   number of cache misses per retired **load** instruction.  Values between 0
   and 1 represent a miss probability (e.g. `0.1` means 10 % of loads miss);
   values greater than 1 are also valid (e.g. `1.5` means each load causes an
@@ -94,7 +94,7 @@ python3 analyze_str.py --instructions-per-cache-miss 50 --cache-latency 200 dump
 * `--instructions-per-cache-miss` (default: `inf`, i.e. no simulation) sets
   the number of retired instructions per cache miss.  Mutually exclusive with
   `--cache-miss-rate`.
-* `--cache-miss-rate` (default: `inf`, i.e. no simulation) sets the average
+* `--cache-miss-rate` (default: `0.0`, i.e. no simulation) sets the average
   number of cache misses per retired **load** instruction.  Values between 0
   and 1 represent a miss probability (e.g. `0.1` means 10 % of loads miss);
   values greater than 1 are also valid (e.g. `1.5` means each load causes an
