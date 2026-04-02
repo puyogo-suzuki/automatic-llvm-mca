@@ -15,12 +15,14 @@ Usage::
 """
 
 import argparse
+import math
 import os
 import re
 import sys
 
 from analyze import (
     _build_cache_mode,
+    _build_cache_mode_from_rate,
     _run_mca,
 )
 from arch import X86Arch, AArch64Arch, ARMArch, RISCVArch, ArchBase
@@ -175,7 +177,8 @@ def load_str_file(path: str):
 def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
                 cache_miss: float = float("inf"),
                 cache_latency: int = 0,
-                cache_miss_mode: str = "stochastic"):
+                cache_miss_mode: str = "stochastic",
+                cache_miss_rate: float = float("inf")):
     """Run llvm-mca on pre-loaded instruction tuples.
 
     Parameters
@@ -191,18 +194,29 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
     cache_miss:
         Number of retired instructions per cache miss.  Use ``float('inf')``
         (default) for no cache-miss simulation.
+        Mutually exclusive with *cache_miss_rate*.
     cache_latency:
-        Cache-miss penalty in cycles.  Only used when *cache_miss* is finite.
+        Cache-miss penalty in cycles.  Only used when *cache_miss* or
+        *cache_miss_rate* is finite.
     cache_miss_mode:
         ``"stochastic"`` (default), ``"average"``, or ``"early"``.  See
         :func:`analyze.analyze` for details.
+    cache_miss_rate:
+        Cache misses per retired load instruction.  Use ``float('inf')``
+        (default) for no cache-miss simulation.  May be greater than 1.
+        When finite, takes precedence over *cache_miss*.
+        Mutually exclusive with *cache_miss*.
 
     Returns
     -------
     ``(retired_instructions, elapsed_cycles, load_proportion)`` on success,
     or ``None`` when llvm-mca produces no result.
     """
-    cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
+    if not math.isinf(cache_miss_rate):
+        cache_mode = _build_cache_mode_from_rate(cache_miss_rate, cache_latency,
+                                                 cache_miss_mode)
+    else:
+        cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
 
     # Build llvm-mca argument list, optionally overriding -mcpu.
     mca_args = arch.mca_args
@@ -257,7 +271,7 @@ def main():
         help=(
             "Cache-miss latency in cycles (≥0, default 0). "
             "Used as the latency value in the # LLVM-MCA-LATENCY directive "
-            "when --instructions-per-cache-miss is finite."
+            "when --instructions-per-cache-miss or --cache-miss-rate is finite."
         ),
     )
     parser.add_argument(
@@ -269,17 +283,29 @@ def main():
             "Cache-miss simulation mode (default: stochastic). "
             "'stochastic': the code block is repeated 100 times and load "
             "instructions receive the full --cache-latency penalty according "
-            "to the effective miss fraction derived from "
-            "--instructions-per-cache-miss; llvm-mca is run with "
+            "to the effective miss fraction; llvm-mca is run with "
             "-iterations=1. "
             "'average': all load instructions receive a fixed latency derived "
-            "from (num_instructions / --instructions-per-cache-miss / "
-            "num_loads) * --cache-latency cycles, modelling the average cost "
-            "of cache misses uniformly across all loads. "
+            "from the miss fraction multiplied by --cache-latency cycles. "
             "'early': like 'stochastic' but all cache misses are placed on "
             "the first loads in the repeated block rather than distributed "
             "uniformly (e.g. miss miss miss hit hit instead of "
             "miss hit miss hit miss)."
+        ),
+    )
+    parser.add_argument(
+        "--cache-miss-rate",
+        type=float,
+        default=float("inf"),
+        metavar="R",
+        dest="cache_miss_rate",
+        help=(
+            "Cache misses per retired load instruction (>0, default inf "
+            "meaning no cache-miss simulation). "
+            "May be greater than 1 (e.g. 1.5 means each load causes an "
+            "average of 1.5 misses). "
+            "Cannot be combined with --instructions-per-cache-miss. "
+            "Interpretation depends on --cache-miss-mode."
         ),
     )
 
@@ -305,6 +331,17 @@ def main():
         parser.error("--instructions-per-cache-miss must be > 0")
     if args.cache_latency < 0:
         parser.error("--cache-latency must be >= 0")
+    if not math.isinf(args.cache_miss_rate) and args.cache_miss_rate <= 0:
+        parser.error("--cache-miss-rate must be > 0")
+
+    if not math.isinf(args.cache_miss) and not math.isinf(args.cache_miss_rate):
+        parser.error(
+            "--instructions-per-cache-miss and --cache-miss-rate are mutually exclusive"
+        )
+    if args.ipcm_values is not None and not math.isinf(args.cache_miss_rate):
+        parser.error(
+            "--ipcm-values and --cache-miss-rate are mutually exclusive"
+        )
 
     ipcm_values = []
     if args.ipcm_values is not None:
@@ -330,6 +367,17 @@ def main():
         ipcm_values.append(args.cache_miss)
 
     instrs, arch, start, end = load_str_file(args.textfile)
+
+    if not math.isinf(args.cache_miss_rate):
+        result = analyze_str(instrs, arch, args.mcpu,
+                             cache_latency=args.cache_latency,
+                             cache_miss_mode=args.cache_miss_mode,
+                             cache_miss_rate=args.cache_miss_rate)
+        if result is None:
+            return
+        retired, elapsed_cycles, _ = result
+        print(f"{args.cache_miss_rate:.2f},{retired},{elapsed_cycles}")
+        return
 
     for ipcm in ipcm_values:
         result = analyze_str(instrs, arch, args.mcpu, ipcm,

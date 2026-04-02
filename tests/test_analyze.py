@@ -1559,6 +1559,159 @@ class TestEarlyCacheMiss:
         )
 
 
+class TestCacheMissRateClasses:
+    """Unit tests for the cache-miss-rate-based simulation classes."""
+
+    _ARCH = analyze.X86Arch()
+
+    # 4 loads, 2 non-loads
+    _INSTRS = [
+        (0x0, "mov", "(%eax),%ebx"),
+        (0x2, "mov", "(%ebx),%ecx"),
+        (0x4, "add", "%ebx,%ecx"),
+        (0x6, "mov", "(%ecx),%edx"),
+        (0x8, "mov", "(%edx),%esi"),
+        (0xa, "ret", ""),
+    ]
+
+    def test_stochastic_rate_uses_rate_directly_as_miss_fraction(self, monkeypatch):
+        """_StochasticCacheMissRate passes cache_miss_rate directly as the
+        miss fraction to _format_asm_with_cache_miss."""
+        called = {}
+
+        def fake_fmt(instrs, arch, cache_miss, cache_latency):
+            called["cache_miss"] = cache_miss
+            called["cache_latency"] = cache_latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
+
+        mode = analyze._StochasticCacheMissRate(cache_miss_rate=1.5, cache_latency=100)
+        mode.format_asm(self._INSTRS, self._ARCH)
+
+        assert abs(called.get("cache_miss", 0) - 1.5) < 1e-9, (
+            f"Expected cache_miss=1.5, got {called.get('cache_miss')}"
+        )
+        assert called.get("cache_latency") == 100
+
+    def test_early_rate_uses_rate_directly_with_front_loaded(self, monkeypatch):
+        """_EarlyCacheMissRate passes cache_miss_rate directly and front_loaded=True."""
+        called = {}
+
+        def fake_fmt(instrs, arch, cache_miss, cache_latency, front_loaded=False):
+            called["cache_miss"] = cache_miss
+            called["front_loaded"] = front_loaded
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_cache_miss", fake_fmt)
+
+        mode = analyze._EarlyCacheMissRate(cache_miss_rate=0.5, cache_latency=200)
+        mode.format_asm(self._INSTRS, self._ARCH)
+
+        assert abs(called.get("cache_miss", 0) - 0.5) < 1e-9
+        assert called.get("front_loaded") is True
+
+    def test_average_rate_uses_rate_times_latency(self, monkeypatch):
+        """_AverageCacheMissRate passes round(rate * latency) to
+        _format_asm_with_average_load_latency.
+
+        rate=1.5, latency=100 → avg_latency=round(150)=150.
+        """
+        called = {}
+
+        def fake_avg(instrs, arch, latency):
+            called["latency"] = latency
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency", fake_avg)
+
+        mode = analyze._AverageCacheMissRate(cache_miss_rate=1.5, cache_latency=100)
+        mode.format_asm(self._INSTRS, self._ARCH)
+
+        assert called.get("latency") == 150, (
+            f"Expected avg_latency=150, got {called.get('latency')}"
+        )
+
+    def test_stochastic_rate_no_loads_uses_plain_format_asm(self, monkeypatch):
+        """When no load instructions are present, _format_asm is used."""
+        called = {}
+
+        def fake_plain(instrs, arch):
+            called["plain"] = True
+            return "\tnop\n.Lmca_end:\n"
+
+        monkeypatch.setattr(analyze, "_format_asm", fake_plain)
+        no_load_instrs = [(0x0, "nop", ""), (0x1, "ret", "")]
+        mode = analyze._StochasticCacheMissRate(cache_miss_rate=1.5, cache_latency=100)
+        mode.format_asm(no_load_instrs, self._ARCH)
+
+        assert called.get("plain"), "Expected _format_asm for no-load region"
+
+    def test_stochastic_rate_extra_mca_args(self):
+        """_StochasticCacheMissRate adds -iterations=1."""
+        mode = analyze._StochasticCacheMissRate(1.5, 100)
+        assert mode.extra_mca_args() == ["-iterations=1"]
+
+    def test_early_rate_extra_mca_args(self):
+        """_EarlyCacheMissRate adds -iterations=1."""
+        mode = analyze._EarlyCacheMissRate(1.5, 100)
+        assert mode.extra_mca_args() == ["-iterations=1"]
+
+    def test_build_cache_mode_from_rate_inf_returns_no_cache_miss(self):
+        """_build_cache_mode_from_rate(inf, ...) returns _NoCacheMiss."""
+        mode = analyze._build_cache_mode_from_rate(float("inf"), 100, "stochastic")
+        assert isinstance(mode, analyze._NoCacheMiss)
+
+    def test_build_cache_mode_from_rate_zero_returns_no_cache_miss(self):
+        """_build_cache_mode_from_rate(0, ...) returns _NoCacheMiss."""
+        mode = analyze._build_cache_mode_from_rate(0, 100, "stochastic")
+        assert isinstance(mode, analyze._NoCacheMiss)
+
+    def test_build_cache_mode_from_rate_negative_returns_no_cache_miss(self):
+        """_build_cache_mode_from_rate(-1, ...) returns _NoCacheMiss."""
+        mode = analyze._build_cache_mode_from_rate(-1, 100, "stochastic")
+        assert isinstance(mode, analyze._NoCacheMiss)
+
+    def test_build_cache_mode_from_rate_stochastic(self):
+        """_build_cache_mode_from_rate(1.5, ..., 'stochastic') returns
+        _StochasticCacheMissRate."""
+        mode = analyze._build_cache_mode_from_rate(1.5, 100, "stochastic")
+        assert isinstance(mode, analyze._StochasticCacheMissRate)
+
+    def test_build_cache_mode_from_rate_average(self):
+        """_build_cache_mode_from_rate(1.5, ..., 'average') returns
+        _AverageCacheMissRate."""
+        mode = analyze._build_cache_mode_from_rate(1.5, 100, "average")
+        assert isinstance(mode, analyze._AverageCacheMissRate)
+
+    def test_build_cache_mode_from_rate_early(self):
+        """_build_cache_mode_from_rate(1.5, ..., 'early') returns
+        _EarlyCacheMissRate."""
+        mode = analyze._build_cache_mode_from_rate(1.5, 100, "early")
+        assert isinstance(mode, analyze._EarlyCacheMissRate)
+
+    def test_stochastic_rate_gt1_produces_expected_miss_count(self):
+        """With cache_miss_rate=1.5 and 4 loads, every load gets at least
+        1 miss and some get 2 misses (total misses = round(1.5 * 4 * 100) = 600
+        across 100 repetitions).
+
+        base_misses=floor(1.5)=1, frac=0.5, a=round(0.5 * 100*4)=200.
+        Loads with base_latency=100: all 400.  Of those, 200 get +100 extra.
+        So 200 loads at latency 200 and 200 loads at latency 100.
+        """
+        instrs = [
+            (0x0, "mov", "(%eax),%ebx"),
+            (0x2, "mov", "(%ebx),%ecx"),
+            (0x4, "mov", "(%ecx),%edx"),
+            (0x6, "mov", "(%edx),%esi"),
+        ]
+        asm = analyze._format_asm_with_cache_miss(instrs, self._ARCH, 1.5, 100)
+        count_200 = asm.count("# LLVM-MCA-LATENCY 200")
+        count_100 = asm.count("# LLVM-MCA-LATENCY 100")
+        assert count_200 == 200, f"Expected 200 loads with latency 200, got {count_200}"
+        assert count_100 == 200, f"Expected 200 loads with latency 100, got {count_100}"
+
+
 class TestDumper:
     """Tests for the Dumper wrapper class."""
 
