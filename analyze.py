@@ -698,21 +698,10 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
     """
     if not instrs:
         return 0
-    return sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops))
-
-
-def _count_load_proportion(instrs, arch: ArchBase) -> float:
-    """Return the proportion of *instrs* that are load instructions.
-
-    Uses :meth:`ArchBase.is_load_instruction` to identify loads, so the result
-    is based on the disassembled instruction text rather than llvm-mca metadata.
-    Returns 0.0 when *instrs* is empty.
-    """
-    if not instrs:
-        return 0.0
-    loads = _count_load_instructions(instrs, arch)
-    return loads / len(instrs)
-
+    # Default llvm-mca implementation simulates 100 times.
+    # Also, cache miss simulation replicates 100 times.
+    # Thus, it multiplies 100.
+    return sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)) * 100
 
 def _run_mca(instrs, mca_args=(), *, arch: ArchBase, cache_mode: _CacheMissMode):
     """Run llvm-mca on *instrs* and return ``(retired, cycles, load_instructions)``, or None.
@@ -1080,7 +1069,7 @@ def main():
         for start, end, retired, load_instrs, cycles_list in sorted_results:
             print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles_list[0]}")
     else:
-        cycles_headers = ",".join([f"cycles_{i}" for i in range(len(cache_specs))])
+        cycles_headers = ",".join([f"cycles_{s[0]}_{s[1]}" for s in cache_specs])
         print(f"start_address,end_address,retired_instructions,load_instructions,cycles,{cycles_headers}")
         for start, end, retired, load_instrs, cycles_list in sorted_results:
             # cycles_list[0] = baseline; cycles_list[1:] = per-spec values.

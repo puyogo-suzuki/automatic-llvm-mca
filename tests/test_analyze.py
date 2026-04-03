@@ -31,7 +31,7 @@ import analyze  # noqa: E402  (import after sys.path manipulation)
 # ---------------------------------------------------------------------------
 # Simple C source used by all integration tests.
 # It contains a loop (backward branch) and a memory load so that both
-# loop-detection and load_proportion can be verified.
+# loop-detection can be verified.
 # ---------------------------------------------------------------------------
 _C_SOURCE = """\
 long sum(long *a, int n) {
@@ -377,17 +377,6 @@ class TestAMD64:
 
     @_NEED_MCA
     @_NEED_X86_GCC
-    def test_load_proportion_in_range(self, x86_obj):
-        """load_proportion values are in [0, 1]."""
-        results = list(analyze.analyze(x86_obj))
-        for start, end, _retired, _cycles, load_proportion in results:
-            assert 0.0 <= load_proportion <= 1.0, (
-                f"load_proportion {load_proportion} out of range for "
-                f"region 0x{start:x}–0x{end:x}"
-            )
-
-    @_NEED_MCA
-    @_NEED_X86_GCC
     def test_loop_detected(self, x86_obj):
         """The backward branch in sum() is detected as a loop (start < end)."""
         results = list(analyze.analyze(x86_obj))
@@ -430,17 +419,6 @@ class TestAArch64:
         for start, end, retired, cycles, _lp in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
-
-    @_NEED_MCA
-    @_NEED_AARCH64
-    def test_load_proportion_in_range(self, aarch64_obj):
-        """load_proportion values are in [0, 1]."""
-        results = list(analyze.analyze(aarch64_obj))
-        for start, end, _retired, _cycles, load_proportion in results:
-            assert 0.0 <= load_proportion <= 1.0, (
-                f"load_proportion {load_proportion} out of range for "
-                f"region 0x{start:x}–0x{end:x}"
-            )
 
     @_NEED_MCA
     @_NEED_AARCH64
@@ -557,47 +535,6 @@ class TestIsLoadInstruction:
 
     def test_riscv_add_not_load(self):
         assert not analyze.RISCVArch().is_load_instruction("add", "a0, a1, a2")
-
-
-# ---------------------------------------------------------------------------
-# Unit tests — _count_load_proportion
-# ---------------------------------------------------------------------------
-
-class TestCountLoadProportion:
-    """Unit tests for analyze._count_load_proportion."""
-
-    def test_empty_instrs_returns_zero(self):
-        assert analyze._count_load_proportion([], analyze.X86Arch()) == 0.0
-
-    def test_all_loads_returns_one(self):
-        instrs = [
-            (0, "mov", "(%rdi),%rax"),
-            (4, "add", "(%rsi),%rcx"),
-        ]
-        assert analyze._count_load_proportion(instrs, analyze.X86Arch()) == 1.0
-
-    def test_no_loads_returns_zero(self):
-        instrs = [
-            (0, "add", "%eax,%edx"),
-            (4, "ret", ""),
-        ]
-        assert analyze._count_load_proportion(instrs, analyze.X86Arch()) == 0.0
-
-    def test_half_loads(self):
-        instrs = [
-            (0, "mov", "(%rdi),%rax"),
-            (4, "add", "%eax,%edx"),
-        ]
-        assert analyze._count_load_proportion(instrs, analyze.X86Arch()) == 0.5
-
-    def test_aarch64_load_proportion(self):
-        instrs = [
-            (0, "ldr", "x0, [x1]"),
-            (4, "add", "x0, x1, x2"),
-            (8, "ldp", "x2, x3, [sp]"),
-            (12, "str", "x0, [x1]"),
-        ]
-        assert analyze._count_load_proportion(instrs, analyze.AArch64Arch()) == 0.5
 
 
 # ---------------------------------------------------------------------------
