@@ -988,8 +988,43 @@ def main():
                     "cycles_n": []
                 }
     else:
-        # Run analysis for each cache specification
-        for i, (spec_type, spec_value) in enumerate(cache_specs):
+        # Run analysis without cache miss first (baseline).
+        base_results = list(analyze(
+            binary=args.binary,
+            mcpu=args.mcpu,
+            cache_miss=float("inf"),
+            cache_latency=0,
+            cache_miss_mode=args.cache_miss_mode,
+            dump=args.dump,
+            cache_miss_rate=0.0,
+        ))
+        for start, end, retired, load_instrs, cycles in base_results:
+            key = (start, end)
+            all_results[key] = {
+                "start": start,
+                "end": end,
+                "retired": retired,
+                "load_instructions": load_instrs,
+                "cycles": cycles,
+                "cycles_n": [],
+            }
+
+        # Fast path: a basic block can skip cache-miss simulation when it has
+        # no load instructions (load_instructions == 0) or every retired
+        # instruction is a load (load_instructions == retired_instructions).
+        # If all blocks qualify, no extra analyze() calls are needed at all.
+        all_fast_path = all(
+            v["load_instructions"] == 0 or v["load_instructions"] == v["retired"]
+            for v in all_results.values()
+        )
+
+        for spec_type, spec_value in cache_specs:
+            if all_fast_path:
+                # Fast path: reuse baseline cycles for every block.
+                for res in all_results.values():
+                    res["cycles_n"].append(res["cycles"])
+                continue
+
             if spec_type == "cm":
                 # Cache miss rate
                 cache_miss_rate = spec_value
@@ -1011,32 +1046,26 @@ def main():
                 else:
                     cache_miss_rate = 1.0 / spec_value
                     cache_miss = float("inf")
-            
-            results = list(analyze(
+
+            cache_results = list(analyze(
                 binary=args.binary,
                 mcpu=args.mcpu,
                 cache_miss=cache_miss,
                 cache_latency=cache_latency,
                 cache_miss_mode=args.cache_miss_mode,
-                dump=args.dump if i == 0 else False,  # Only dump on first iteration
+                dump=False,
                 cache_miss_rate=cache_miss_rate,
             ))
-            
-            for start, end, retired, load_instrs, cycles in results:
-                key = (start, end)
-                if key not in all_results:
-                    # First iteration - initialize
-                    all_results[key] = {
-                        "start": start,
-                        "end": end,
-                        "retired": retired,
-                        "load_instructions": load_instrs,
-                        "cycles": cycles,
-                        "cycles_n": [cycles]
-                    }
+            cache_by_key = {(s, e): cyc for s, e, _r, _li, cyc in cache_results}
+
+            for key, res in all_results.items():
+                load_instrs = res["load_instructions"]
+                retired = res["retired"]
+                if load_instrs == 0 or load_instrs == retired:
+                    # Fast path for this block: use baseline cycles.
+                    res["cycles_n"].append(res["cycles"])
                 else:
-                    # Subsequent iterations - append cycles
-                    all_results[key]["cycles_n"].append(cycles)
+                    res["cycles_n"].append(cache_by_key.get(key, res["cycles"]))
 
     # Sort and print results
     sorted_results = sorted(all_results.values(), key=lambda x: (x["end"], -x["start"]))

@@ -325,12 +325,27 @@ def main():
         print(f"start_address,end_address,retired_instructions,load_instructions,cycles")
         print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles}")
     else:
-        # Run analysis for each cache specification
-        retired = None
-        load_instrs = None
-        base_cycles = None
-        
-        for i, (spec_type, spec_value) in enumerate(cache_specs):
+        # Run analysis without cache miss first (baseline).
+        base_result = analyze_str(instrs, arch, args.mcpu,
+                                  cache_miss=float("inf"),
+                                  cache_latency=0,
+                                  cache_miss_mode=args.cache_miss_mode,
+                                  cache_miss_rate=0.0)
+        if base_result is None:
+            return
+        retired, base_cycles, load_instrs = base_result
+
+        # Fast path: a basic block can skip cache-miss simulation when it has
+        # no load instructions (load_instrs == 0) or every retired instruction
+        # is a load (load_instrs == retired).
+        is_fast_path = (load_instrs == 0 or load_instrs == retired)
+
+        for spec_type, spec_value in cache_specs:
+            if is_fast_path:
+                # Fast path: reuse baseline cycles.
+                cycles_list.append(base_cycles)
+                continue
+
             if spec_type == "cm":
                 # Cache miss rate
                 cache_miss_rate = spec_value
@@ -350,31 +365,15 @@ def main():
                 else:
                     cache_miss_rate = 1.0 / spec_value
                     cache_miss = float("inf")
-            
+
             result = analyze_str(instrs, arch, args.mcpu,
-                               cache_miss=cache_miss,
-                               cache_latency=cache_latency,
-                               cache_miss_mode=args.cache_miss_mode,
-                               cache_miss_rate=cache_miss_rate)
-            
+                                 cache_miss=cache_miss,
+                                 cache_latency=cache_latency,
+                                 cache_miss_mode=args.cache_miss_mode,
+                                 cache_miss_rate=cache_miss_rate)
             if result is None:
                 return
-            
-            ret, cyc, load_i = result
-            
-            if i == 0:
-                retired = ret
-                load_instrs = load_i
-                # Base cycles (no cache miss)
-                base_result = analyze_str(instrs, arch, args.mcpu,
-                                         cache_miss=float("inf"),
-                                         cache_latency=0,
-                                         cache_miss_mode=args.cache_miss_mode,
-                                         cache_miss_rate=0.0)
-                if base_result is None:
-                    return
-                _, base_cycles, _ = base_result
-            
+            _, cyc, _ = result
             cycles_list.append(cyc)
         
         # Print results
