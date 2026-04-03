@@ -1009,18 +1009,19 @@ def main():
                 "cycles_n": [],
             }
 
-        # Fast path: a basic block can skip cache-miss simulation when it has
-        # no load instructions (load_instructions == 0) or every retired
-        # instruction is a load (load_instructions == retired_instructions).
-        # If all blocks qualify, no extra analyze() calls are needed at all.
-        all_fast_path = all(
-            v["load_instructions"] == 0 or v["load_instructions"] == v["retired"]
-            for v in all_results.values()
+        # Per-block fast-path eligibility: a basic block can skip cache-miss
+        # simulation when it has no load instructions (load_instructions == 0)
+        # or every retired instruction is a load
+        # (load_instructions == retired_instructions).
+        fast_path_keys = frozenset(
+            key
+            for key, v in all_results.items()
+            if v["load_instructions"] == 0 or v["load_instructions"] == v["retired"]
         )
 
         for spec_type, spec_value in cache_specs:
-            if all_fast_path:
-                # Fast path: reuse baseline cycles for every block.
+            if len(fast_path_keys) == len(all_results):
+                # All blocks qualify: skip the cache-miss analyze() call entirely.
                 for res in all_results.values():
                     res["cycles_n"].append(res["cycles"])
                 continue
@@ -1059,10 +1060,8 @@ def main():
             cache_by_key = {(s, e): cyc for s, e, _r, _li, cyc in cache_results}
 
             for key, res in all_results.items():
-                load_instrs = res["load_instructions"]
-                retired = res["retired"]
-                if load_instrs == 0 or load_instrs == retired:
-                    # Fast path for this block: use baseline cycles.
+                if key in fast_path_keys:
+                    # Fast path for this block: reuse baseline cycles.
                     res["cycles_n"].append(res["cycles"])
                 else:
                     res["cycles_n"].append(cache_by_key.get(key, res["cycles"]))
