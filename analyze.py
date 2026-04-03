@@ -756,16 +756,40 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase, cache_mode: _CacheMissMode)
 
 
 def _yield_mca_result(instrs, mca_args, arch: ArchBase,
-                      cache_mode: _CacheMissMode):
-    """Run llvm-mca on *instrs* and yield a ``(start, end, retired, cycles, load_instructions)`` tuple.
+                      cache_modes: list):
+    """Run llvm-mca on *instrs* for each cache mode and yield one tuple.
 
-    Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
+    Yields ``(start, end, retired, load_instructions, cycles_list)`` where
+    *cycles_list[i]* is the elapsed cycles under *cache_modes[i]*.  Nothing
+    is yielded when *instrs* is empty, *cache_modes* is empty, or any
+    llvm-mca invocation returns no result.
+
+    **Fast path:** when the block has no load instructions, cache-miss
+    simulation cannot change the result.  llvm-mca is run once with
+    :class:`_NoCacheMiss` and its cycles value is reused for every mode.
     """
-    if instrs:
-        result = _run_mca(instrs, mca_args, arch=arch, cache_mode=cache_mode)
+    if not instrs or not cache_modes:
+        return
+    load_count = _count_load_instructions(instrs, arch)
+    if load_count == 0:
+        # Fast path: no loads → all modes produce identical results.
+        result = _run_mca(instrs, mca_args, arch=arch, cache_mode=_NoCacheMiss())
         if result is not None:
             retired, cycles, load_instructions = result
-            yield instrs[0][0], instrs[-1][0], retired, cycles, load_instructions
+            yield instrs[0][0], instrs[-1][0], retired, load_instructions, [cycles] * len(cache_modes)
+        return
+    # Normal path: run MCA once per cache mode.
+    cycles_list: list = []
+    retired = load_instructions = None
+    for mode in cache_modes:
+        result = _run_mca(instrs, mca_args, arch=arch, cache_mode=mode)
+        if result is None:
+            return
+        r, cyc, li = result
+        if retired is None:
+            retired, load_instructions = r, li
+        cycles_list.append(cyc)
+    yield instrs[0][0], instrs[-1][0], retired, load_instructions, cycles_list
 
 
 # ---------------------------------------------------------------------------
@@ -773,26 +797,27 @@ def _yield_mca_result(instrs, mca_args, arch: ArchBase,
 # ---------------------------------------------------------------------------
 
 def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
-                      cache_mode: _CacheMissMode = None):
+                      cache_modes: list = None):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, retired, cycles, load_instructions, kind)`` tuples for
-    every loop and every basic block that is not part of a loop.  *kind* is
-    ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
+    Yields ``(start_addr, end_addr, retired, cycles_list, load_instructions, kind)``
+    tuples for every loop and every basic block that is not part of a loop.
+    *cycles_list[i]* is the elapsed cycles under *cache_modes[i]*.
+    *kind* is ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
     """
     if arch is None:
         arch = X86Arch()
-    if cache_mode is None:
-        cache_mode = _NoCacheMiss()
+    if cache_modes is None:
+        cache_modes = [_NoCacheMiss()]
 
     loops = _find_loops(instrs, arch)
 
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        for start, end, retired, cycles, load_instrs in _yield_mca_result(region, mca_args, arch,
-                                                                  cache_mode):
-            yield start, end, retired, cycles, load_instrs, "loop"
+        for start, end, retired, load_instrs, cycles_list in _yield_mca_result(
+                region, mca_args, arch, cache_modes):
+            yield start, end, retired, cycles_list, load_instrs, "loop"
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -801,18 +826,88 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
         addr, mnemonic, operands = instr
         bb.append(instr)
         if arch.ends_basic_block(mnemonic, operands):
-            for start, end, retired, cycles, load_instrs in _yield_mca_result(bb, mca_args, arch,
-                                                                      cache_mode):
-                yield start, end, retired, cycles, load_instrs, "block"
+            for start, end, retired, load_instrs, cycles_list in _yield_mca_result(
+                    bb, mca_args, arch, cache_modes):
+                yield start, end, retired, cycles_list, load_instrs, "block"
             bb = []
-    for start, end, retired, cycles, load_instrs in _yield_mca_result(bb, mca_args, arch,
-                                                              cache_mode):
-        yield start, end, retired, cycles, load_instrs, "block"
+    for start, end, retired, load_instrs, cycles_list in _yield_mca_result(
+            bb, mca_args, arch, cache_modes):
+        yield start, end, retired, cycles_list, load_instrs, "block"
 
 
 # ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
+
+def _spec_to_cache_mode(spec_type: str, spec_value: float,
+                        cache_latency: int, cache_miss_mode: str) -> _CacheMissMode:
+    """Convert a parsed cache specification to a :class:`_CacheMissMode`.
+
+    Parameters
+    ----------
+    spec_type:
+        ``"cm"`` — *spec_value* is a cache-miss rate (misses per load).
+        ``"ipcm"`` — *spec_value* is instructions per cache miss.
+        ``"lipcm"`` — *spec_value* is load instructions per cache miss.
+    spec_value:
+        Numeric value for the specification.
+    cache_latency:
+        Cache-miss penalty in cycles.
+    cache_miss_mode:
+        ``"stochastic"``, ``"average"``, or ``"early"``.
+    """
+    if spec_type == "cm":
+        return _build_cache_mode_from_rate(spec_value, cache_latency, cache_miss_mode)
+    if spec_type == "ipcm":
+        return _build_cache_mode(spec_value, cache_latency, cache_miss_mode)
+    if spec_type == "lipcm":
+        # lipcm = load_instructions / cache_misses → rate = 1 / lipcm
+        rate = 0.0 if math.isinf(spec_value) else 1.0 / spec_value
+        return _build_cache_mode_from_rate(rate, cache_latency, cache_miss_mode)
+    raise ValueError(f"Unknown cache spec type: {spec_type!r}")
+
+
+def analyze_multi(binary: str, mcpu: str = "",
+                  cache_modes: list = None,
+                  dump: bool = False):
+    """Analyse *binary* for every cache mode and yield result tuples.
+
+    Yields ``(start, end, retired, load_instructions, cycles_list)`` where
+    *cycles_list[i]* is the elapsed cycles under *cache_modes[i]*.
+
+    Parameters
+    ----------
+    binary:
+        Path to the ELF binary to analyse.
+    mcpu:
+        If non-empty, overrides the default ``-mcpu`` value chosen by
+        ``_detect_arch`` and is forwarded to llvm-mca.
+    cache_modes:
+        List of :class:`_CacheMissMode` instances.  When ``None`` or empty,
+        defaults to ``[_NoCacheMiss()]`` (no simulation).
+    dump:
+        When ``True``, the formatted assembly for each analysed region is
+        written to a file in a ``"dump"`` directory using the **first** cache
+        mode in *cache_modes* (typically :class:`_NoCacheMiss` when called
+        from :func:`main`).  Only the baseline mode's assembly is written;
+        subsequent modes are not dumped.  Filename format:
+        ``{start_address}_{end_address}.{arch}.txt``.
+    """
+    if not cache_modes:
+        cache_modes = [_NoCacheMiss()]
+    arch = _detect_arch(binary)
+    mca_args = arch.mca_args
+    if mcpu:
+        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
+        mca_args = mca_args + [f"-mcpu={mcpu}"]
+    if dump:
+        cache_modes = [Dumper(cache_modes[0])] + list(cache_modes[1:])
+
+    for _func_name, instrs in disassemble(binary, arch):
+        for start, end, retired, cycles_list, load_instrs, _kind in _analyze_function(
+                instrs, mca_args, arch, cache_modes):
+            yield start, end, retired, load_instrs, cycles_list
+
 
 def analyze(binary: str, mcpu: str = "",
             cache_miss: float = 0.0, cache_latency: int = 0,
@@ -859,23 +954,14 @@ def analyze(binary: str, mcpu: str = "",
         written to a file in a ``"dump"`` directory.  Filename format:
         ``{start_address}_{end_address}.{arch}.txt``.
     """
-    arch = _detect_arch(binary)
-    mca_args = arch.mca_args
-    if mcpu:
-        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
-        mca_args = mca_args + [f"-mcpu={mcpu}"]
     if cache_miss_rate > 0.0:
         cache_mode = _build_cache_mode_from_rate(cache_miss_rate, cache_latency,
                                                  cache_miss_mode)
     else:
         cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
-    if dump:
-        cache_mode = Dumper(cache_mode)
-
-    for _func_name, instrs in disassemble(binary, arch):
-        for start, end, retired, cycles, load_instrs, _kind in _analyze_function(
-                instrs, mca_args, arch, cache_mode):
-            yield start, end, retired, load_instrs, cycles
+    for start, end, retired, load_instrs, cycles_list in analyze_multi(
+            binary, mcpu, [cache_mode], dump):
+        yield start, end, retired, load_instrs, cycles_list[0]
 
 
 # ---------------------------------------------------------------------------
@@ -962,128 +1048,44 @@ def main():
         for spec in args.metrics[1:]:
             cache_specs.append(_parse_cache_spec(spec, parser))
 
-    # Run analysis for each cache specification
-    all_results = {}
-    
+    # Build cache modes: baseline (_NoCacheMiss) always first, one mode per spec.
     if len(cache_specs) == 0:
-        # No cache miss simulation
-        results = list(analyze(
-            binary=args.binary,
-            mcpu=args.mcpu,
-            cache_miss=float("inf"),
-            cache_latency=0,
-            cache_miss_mode=args.cache_miss_mode,
-            dump=args.dump,
-            cache_miss_rate=0.0,
-        ))
-        for start, end, retired, load_instrs, cycles in results:
-            key = (start, end)
-            if key not in all_results:
-                all_results[key] = {
-                    "start": start,
-                    "end": end,
-                    "retired": retired,
-                    "load_instructions": load_instrs,
-                    "cycles": cycles,
-                    "cycles_n": []
-                }
+        cache_modes = [_NoCacheMiss()]
     else:
-        # Run analysis without cache miss first (baseline).
-        base_results = list(analyze(
-            binary=args.binary,
-            mcpu=args.mcpu,
-            cache_miss=float("inf"),
-            cache_latency=0,
-            cache_miss_mode=args.cache_miss_mode,
-            dump=args.dump,
-            cache_miss_rate=0.0,
-        ))
-        for start, end, retired, load_instrs, cycles in base_results:
-            key = (start, end)
-            all_results[key] = {
-                "start": start,
-                "end": end,
-                "retired": retired,
-                "load_instructions": load_instrs,
-                "cycles": cycles,
-                "cycles_n": [],
-            }
+        cache_modes = [_NoCacheMiss()] + [
+            _spec_to_cache_mode(st, sv, cache_latency, args.cache_miss_mode)
+            for st, sv in cache_specs
+        ]
 
-        # Per-block fast-path eligibility: a basic block can skip cache-miss
-        # simulation when it has no load instructions (load_instructions == 0)
-        # or every retired instruction is a load
-        # (load_instructions == retired_instructions).
-        fast_path_keys = frozenset(
-            key
-            for key, v in all_results.items()
-            if v["load_instructions"] == 0 or v["load_instructions"] == v["retired"]
-        )
+    # Single analysis pass over the binary.
+    raw_results = list(analyze_multi(
+        binary=args.binary,
+        mcpu=args.mcpu,
+        cache_modes=cache_modes,
+        dump=args.dump,
+    ))
 
-        for spec_type, spec_value in cache_specs:
-            if len(fast_path_keys) == len(all_results):
-                # All blocks qualify: skip the cache-miss analyze() call entirely.
-                for res in all_results.values():
-                    res["cycles_n"].append(res["cycles"])
-                continue
+    # Deduplicate by (start, end), keeping the first occurrence.
+    all_results: dict = {}
+    for start, end, retired, load_instrs, cycles_list in raw_results:
+        key = (start, end)
+        if key not in all_results:
+            all_results[key] = (start, end, retired, load_instrs, cycles_list)
 
-            if spec_type == "cm":
-                # Cache miss rate
-                cache_miss_rate = spec_value
-                cache_miss = float("inf")
-            elif spec_type == "ipcm":
-                # Instructions per cache miss
-                cache_miss = spec_value
-                cache_miss_rate = 0.0
-            elif spec_type == "lipcm":
-                # Load instructions per cache miss - convert to cache miss rate
-                # lipcm = load_instructions / cache_misses
-                # cache_miss_rate = cache_misses / load_instructions = 1 / lipcm
-                if spec_value == 0:
-                    parser.error(f"lipcm value cannot be 0")
-                if math.isinf(spec_value):
-                    # No cache misses
-                    cache_miss_rate = 0.0
-                    cache_miss = float("inf")
-                else:
-                    cache_miss_rate = 1.0 / spec_value
-                    cache_miss = float("inf")
+    # Sort and print results.
+    sorted_results = sorted(all_results.values(), key=lambda x: (x[1], -x[0]))
 
-            cache_results = list(analyze(
-                binary=args.binary,
-                mcpu=args.mcpu,
-                cache_miss=cache_miss,
-                cache_latency=cache_latency,
-                cache_miss_mode=args.cache_miss_mode,
-                dump=False,
-                cache_miss_rate=cache_miss_rate,
-            ))
-            cache_by_key = {(s, e): cyc for s, e, _r, _li, cyc in cache_results}
-
-            for key, res in all_results.items():
-                if key in fast_path_keys:
-                    # Fast path for this block: reuse baseline cycles.
-                    res["cycles_n"].append(res["cycles"])
-                else:
-                    res["cycles_n"].append(cache_by_key.get(key, res["cycles"]))
-
-    # Sort and print results
-    sorted_results = sorted(all_results.values(), key=lambda x: (x["end"], -x["start"]))
-    
-    # Build header
     if len(cache_specs) == 0:
-        header = "start_address,end_address,retired_instructions,load_instructions,cycles"
+        print("start_address,end_address,retired_instructions,load_instructions,cycles")
+        for start, end, retired, load_instrs, cycles_list in sorted_results:
+            print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles_list[0]}")
     else:
         cycles_headers = ",".join([f"cycles_{i}" for i in range(len(cache_specs))])
-        header = f"start_address,end_address,retired_instructions,load_instructions,cycles,{cycles_headers}"
-    
-    print(header)
-    
-    for res in sorted_results:
-        cycles_str = ",".join([str(c) for c in res["cycles_n"]])
-        if len(res["cycles_n"]) > 0:
-            print(f"0x{res['start']:x},0x{res['end']:x},{res['retired']},{res['load_instructions']},{res['cycles']},{cycles_str}")
-        else:
-            print(f"0x{res['start']:x},0x{res['end']:x},{res['retired']},{res['load_instructions']},{res['cycles']}")
+        print(f"start_address,end_address,retired_instructions,load_instructions,cycles,{cycles_headers}")
+        for start, end, retired, load_instrs, cycles_list in sorted_results:
+            # cycles_list[0] = baseline; cycles_list[1:] = per-spec values.
+            cycles_str = ",".join([str(c) for c in cycles_list[1:]])
+            print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles_list[0]},{cycles_str}")
 
 
 def _parse_cache_spec(spec: str, parser):
