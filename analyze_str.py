@@ -23,7 +23,10 @@ import sys
 from analyze import (
     _build_cache_mode,
     _build_cache_mode_from_rate,
+    _NoCacheMiss,
     _run_mca,
+    _count_load_instructions,
+    _spec_to_cache_mode,
 )
 from arch import X86Arch, AArch64Arch, ARMArch, RISCVArch, ArchBase
 
@@ -174,6 +177,63 @@ def load_str_file(path: str):
 
     return instrs, arch, start, end
 
+def analyze_str_multi(instrs, arch: ArchBase, mcpu: str = "",
+                      cache_modes: list = None):
+    """Run llvm-mca on pre-loaded instruction tuples for each cache mode.
+
+    Parameters
+    ----------
+    instrs:
+        List of ``(addr, mnemonic, operands)`` triples, as returned by
+        :func:`load_str_file`.
+    arch:
+        Architecture object, as returned by :func:`load_str_file`.
+    mcpu:
+        If non-empty, overrides the default ``-mcpu`` value chosen by the
+        architecture and is forwarded to llvm-mca.
+    cache_modes:
+        List of :class:`~analyze._CacheMissMode` instances.  When ``None``
+        or empty, defaults to ``[_NoCacheMiss()]`` (no simulation).
+
+    Returns
+    -------
+    ``(retired_instructions, load_instructions, cycles_list)`` where
+    *cycles_list[i]* is the elapsed cycles under *cache_modes[i]*, or
+    ``None`` when any llvm-mca invocation produces no result.
+
+    **Fast path:** when the block has no load instructions, llvm-mca is run
+    once with :class:`~analyze._NoCacheMiss` and its cycles value is reused
+    for every mode.
+    """
+    if not cache_modes:
+        cache_modes = [_NoCacheMiss()]
+
+    mca_args = arch.mca_args
+    if mcpu:
+        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
+        mca_args = mca_args + [f"-mcpu={mcpu}"]
+
+    load_count = _count_load_instructions(instrs, arch)
+    if load_count == 0:
+        result = _run_mca(instrs, mca_args, arch=arch, cache_mode=_NoCacheMiss())
+        if result is None:
+            return None
+        retired, cycles, load_instructions = result
+        return retired, load_instructions, [cycles] * len(cache_modes)
+
+    cycles_list: list = []
+    retired = load_instructions = None
+    for mode in cache_modes:
+        result = _run_mca(instrs, mca_args, arch=arch, cache_mode=mode)
+        if result is None:
+            return None
+        r, cyc, li = result
+        if retired is None:
+            retired, load_instructions = r, li
+        cycles_list.append(cyc)
+    return retired, load_instructions, cycles_list
+
+
 def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
                 cache_miss: float = 0.0,
                 cache_latency: int = 0,
@@ -217,14 +277,11 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "",
                                                  cache_miss_mode)
     else:
         cache_mode = _build_cache_mode(cache_miss, cache_latency, cache_miss_mode)
-
-    # Build llvm-mca argument list, optionally overriding -mcpu.
-    mca_args = arch.mca_args
-    if mcpu:
-        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
-        mca_args = mca_args + [f"-mcpu={mcpu}"]
-
-    return _run_mca(instrs, mca_args, arch=arch, cache_mode=cache_mode)
+    result = analyze_str_multi(instrs, arch, mcpu, [cache_mode])
+    if result is None:
+        return None
+    retired, load_instructions, cycles_list = result
+    return retired, cycles_list[0], load_instructions
 
 def main():
     parser = argparse.ArgumentParser(
@@ -308,81 +365,30 @@ def main():
 
     instrs, arch, start, end = load_str_file(args.textfile)
 
-    # Run analysis for each cache specification
-    cycles_list = []
-    
+    # Build cache modes: baseline (_NoCacheMiss) always first, one mode per spec.
     if len(cache_specs) == 0:
-        # No cache miss simulation
-        result = analyze_str(instrs, arch, args.mcpu,
-                           cache_miss=float("inf"),
-                           cache_latency=0,
-                           cache_miss_mode=args.cache_miss_mode,
-                           cache_miss_rate=0.0)
-        if result is None:
-            return
-        retired, cycles, load_instrs = result
-        
-        print(f"start_address,end_address,retired_instructions,load_instructions,cycles")
-        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles}")
+        cache_modes = [_NoCacheMiss()]
     else:
-        # Run analysis for each cache specification
-        retired = None
-        load_instrs = None
-        base_cycles = None
-        
-        for i, (spec_type, spec_value) in enumerate(cache_specs):
-            if spec_type == "cm":
-                # Cache miss rate
-                cache_miss_rate = spec_value
-                cache_miss = float("inf")
-            elif spec_type == "ipcm":
-                # Instructions per cache miss
-                cache_miss = spec_value
-                cache_miss_rate = 0.0
-            elif spec_type == "lipcm":
-                # Load instructions per cache miss - convert to cache miss rate
-                if spec_value == 0:
-                    parser.error(f"lipcm value cannot be 0")
-                if math.isinf(spec_value):
-                    # No cache misses
-                    cache_miss_rate = 0.0
-                    cache_miss = float("inf")
-                else:
-                    cache_miss_rate = 1.0 / spec_value
-                    cache_miss = float("inf")
-            
-            result = analyze_str(instrs, arch, args.mcpu,
-                               cache_miss=cache_miss,
-                               cache_latency=cache_latency,
-                               cache_miss_mode=args.cache_miss_mode,
-                               cache_miss_rate=cache_miss_rate)
-            
-            if result is None:
-                return
-            
-            ret, cyc, load_i = result
-            
-            if i == 0:
-                retired = ret
-                load_instrs = load_i
-                # Base cycles (no cache miss)
-                base_result = analyze_str(instrs, arch, args.mcpu,
-                                         cache_miss=float("inf"),
-                                         cache_latency=0,
-                                         cache_miss_mode=args.cache_miss_mode,
-                                         cache_miss_rate=0.0)
-                if base_result is None:
-                    return
-                _, base_cycles, _ = base_result
-            
-            cycles_list.append(cyc)
-        
-        # Print results
+        cache_modes = [_NoCacheMiss()] + [
+            _spec_to_cache_mode(st, sv, cache_latency, args.cache_miss_mode)
+            for st, sv in cache_specs
+        ]
+
+    # Single analysis pass.
+    result = analyze_str_multi(instrs, arch, args.mcpu, cache_modes)
+    if result is None:
+        return
+    retired, load_instrs, cycles_list = result
+
+    if len(cache_specs) == 0:
+        print("start_address,end_address,retired_instructions,load_instructions,cycles")
+        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles_list[0]}")
+    else:
         cycles_headers = ",".join([f"cycles_{i}" for i in range(len(cache_specs))])
         print(f"start_address,end_address,retired_instructions,load_instructions,cycles,{cycles_headers}")
-        
-        cycles_str = ",".join([str(c) for c in cycles_list])
-        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{base_cycles},{cycles_str}")
+        # cycles_list[0] = baseline; cycles_list[1:] = per-spec values.
+        cycles_str = ",".join([str(c) for c in cycles_list[1:]])
+        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles_list[0]},{cycles_str}")
 
 
 def _parse_cache_spec_str(spec: str, parser):

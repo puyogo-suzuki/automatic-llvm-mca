@@ -426,31 +426,40 @@ class TestMainCli:
     """Unit tests for analyze_str.main() CLI argument plumbing."""
 
     def test_cache_miss_mode_early_passed_to_analyze_str(self, monkeypatch):
-        """main() passes --cache-miss-mode early to analyze_str()."""
-        captured_mode = []
+        """main() passes --cache-miss-mode early to analyze_str_multi() as _EarlyCacheMiss."""
+        captured_modes = []
 
         class _DummyArch:
-            pass
+            mca_args = []
 
         def fake_load(path):
             return [(0x0, "nop", "")], _DummyArch(), 0x0, 0x0
 
-        def fake_analyze_str(instrs, arch, mcpu="", cache_miss=float("inf"),
-                             cache_latency=0, cache_miss_mode="stochastic"):
-            captured_mode.append(cache_miss_mode)
-            return (100, 103, 0.0)
+        def fake_multi(instrs, arch, mcpu="", cache_modes=None):
+            captured_modes.extend(cache_modes or [])
+            # Return (retired, load_instrs, [baseline_cycles, spec_cycles]).
+            return (100, 0, [103, 110])
 
         monkeypatch.setattr(sys, "argv", [
             "analyze_str.py",
             "dummy.txt",
+            "200",        # cache-latency
+            "ipcm_10",    # one cache spec → triggers the per-spec path
             "--cache-miss-mode",
             "early",
         ])
         monkeypatch.setattr(os.path, "isfile", lambda p: True)
         monkeypatch.setattr(analyze_str, "load_str_file", fake_load)
-        monkeypatch.setattr(analyze_str, "analyze_str", fake_analyze_str)
+        monkeypatch.setattr(analyze_str, "analyze_str_multi", fake_multi)
 
-        with contextlib.redirect_stdout(io.StringIO()):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
             analyze_str.main()
+        output = buf.getvalue()
 
-        assert captured_mode == ["early"]
+        # Two modes: [_NoCacheMiss, _EarlyCacheMiss(10, 200)]
+        assert len(captured_modes) == 2
+        assert type(captured_modes[1]).__name__ == "_EarlyCacheMiss"
+        # CSV output: baseline=103 in 'cycles' column, spec=110 in 'cycles_0' column.
+        assert "cycles,cycles_0" in output
+        assert "103,110" in output
