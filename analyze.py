@@ -689,6 +689,18 @@ def _find_llvm_mca() -> str:
 _LLVM_MCA = None  # resolved lazily
 
 
+def _count_load_instructions(instrs, arch: ArchBase) -> int:
+    """Return the count of load instructions in *instrs*.
+
+    Uses :meth:`ArchBase.is_load_instruction` to identify loads, so the result
+    is based on the disassembled instruction text rather than llvm-mca metadata.
+    Returns 0 when *instrs* is empty.
+    """
+    if not instrs:
+        return 0
+    return sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops))
+
+
 def _count_load_proportion(instrs, arch: ArchBase) -> float:
     """Return the proportion of *instrs* that are load instructions.
 
@@ -698,12 +710,12 @@ def _count_load_proportion(instrs, arch: ArchBase) -> float:
     """
     if not instrs:
         return 0.0
-    loads = sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops))
+    loads = _count_load_instructions(instrs, arch)
     return loads / len(instrs)
 
 
 def _run_mca(instrs, mca_args=(), *, arch: ArchBase, cache_mode: _CacheMissMode):
-    """Run llvm-mca on *instrs* and return ``(retired, cycles, load_proportion)``, or None.
+    """Run llvm-mca on *instrs* and return ``(retired, cycles, load_instructions)``, or None.
 
     Parameters
     ----------
@@ -739,21 +751,21 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase, cache_mode: _CacheMissMode)
         return None
     retired = int(m_retired.group(1))
     cycles = int(m_cycles.group(1))
-    load_proportion = _count_load_proportion(instrs, arch)
-    return retired, cycles, load_proportion
+    load_instructions = _count_load_instructions(instrs, arch)
+    return retired, cycles, load_instructions
 
 
 def _yield_mca_result(instrs, mca_args, arch: ArchBase,
                       cache_mode: _CacheMissMode):
-    """Run llvm-mca on *instrs* and yield a ``(start, end, retired, cycles, load_proportion)`` tuple.
+    """Run llvm-mca on *instrs* and yield a ``(start, end, retired, cycles, load_instructions)`` tuple.
 
     Nothing is yielded when *instrs* is empty or llvm-mca returns no result.
     """
     if instrs:
         result = _run_mca(instrs, mca_args, arch=arch, cache_mode=cache_mode)
         if result is not None:
-            retired, cycles, load_proportion = result
-            yield instrs[0][0], instrs[-1][0], retired, cycles, load_proportion
+            retired, cycles, load_instructions = result
+            yield instrs[0][0], instrs[-1][0], retired, cycles, load_instructions
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +776,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
                       cache_mode: _CacheMissMode = None):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, retired, cycles, load_proportion, kind)`` tuples for
+    Yields ``(start_addr, end_addr, retired, cycles, load_instructions, kind)`` tuples for
     every loop and every basic block that is not part of a loop.  *kind* is
     ``"loop"`` for a loop region and ``"block"`` for a basic-block region.
     """
@@ -778,9 +790,9 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        for start, end, retired, cycles, lp in _yield_mca_result(region, mca_args, arch,
+        for start, end, retired, cycles, load_instrs in _yield_mca_result(region, mca_args, arch,
                                                                   cache_mode):
-            yield start, end, retired, cycles, lp, "loop"
+            yield start, end, retired, cycles, load_instrs, "loop"
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -789,13 +801,13 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None,
         addr, mnemonic, operands = instr
         bb.append(instr)
         if arch.ends_basic_block(mnemonic, operands):
-            for start, end, retired, cycles, lp in _yield_mca_result(bb, mca_args, arch,
+            for start, end, retired, cycles, load_instrs in _yield_mca_result(bb, mca_args, arch,
                                                                       cache_mode):
-                yield start, end, retired, cycles, lp, "block"
+                yield start, end, retired, cycles, load_instrs, "block"
             bb = []
-    for start, end, retired, cycles, lp in _yield_mca_result(bb, mca_args, arch,
+    for start, end, retired, cycles, load_instrs in _yield_mca_result(bb, mca_args, arch,
                                                               cache_mode):
-        yield start, end, retired, cycles, lp, "block"
+        yield start, end, retired, cycles, load_instrs, "block"
 
 
 # ---------------------------------------------------------------------------
@@ -807,7 +819,7 @@ def analyze(binary: str, mcpu: str = "",
             cache_miss_mode: str = "stochastic",
             cache_miss_rate: float = 0.0,
             dump: bool = False):
-    """Analyse *binary* and yield ``(start, end, retired, cycles, load_proportion)`` tuples.
+    """Analyse *binary* and yield ``(start, end, retired, load_instructions, cycles)`` tuples.
 
     Parameters
     ----------
@@ -861,9 +873,9 @@ def analyze(binary: str, mcpu: str = "",
         cache_mode = Dumper(cache_mode)
 
     for _func_name, instrs in disassemble(binary, arch):
-        for start, end, retired, cycles, lp, _kind in _analyze_function(
+        for start, end, retired, cycles, load_instrs, _kind in _analyze_function(
                 instrs, mca_args, arch, cache_mode):
-            yield start, end, retired, cycles, lp
+            yield start, end, retired, load_instrs, cycles
 
 
 # ---------------------------------------------------------------------------
@@ -872,9 +884,21 @@ def analyze(binary: str, mcpu: str = "",
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Estimate throughput for an ELF binary using llvm-mca."
+        description="Estimate throughput for an ELF binary using llvm-mca.",
+        usage="%(prog)s [--mcpu CPU] [--dump] <elf-binary> [<cache-latency> <cycles_spec>...]"
     )
     parser.add_argument("binary", help="Path to the ELF binary to analyse")
+    parser.add_argument(
+        "metrics",
+        nargs="*",
+        metavar="ARGS",
+        help=(
+            "Optional: <cache-latency> <cycles_0> [<cycles_1> ...] where "
+            "<cycles_n> is one of: cm_N (cache-miss rate N), ipcm_N "
+            "(instructions per cache miss N), or lipcm_N (load instructions "
+            "per cache miss N). Example: 200 cm_0.1 ipcm_50 lipcm_10"
+        ),
+    )
     parser.add_argument(
         "--mcpu",
         default="",
@@ -886,26 +910,13 @@ def main():
         ),
     )
     parser.add_argument(
-        "--instructions-per-cache-miss",
-        type=float,
-        default=float("inf"),
-        metavar="N",
-        dest="cache_miss",
+        "--dump",
+        action="store_true",
+        default=False,
         help=(
-            "Number of retired instructions per cache miss (>0, default inf "
-            "meaning no cache-miss simulation). "
-            "Interpretation depends on --cache-miss-mode."
-        ),
-    )
-    parser.add_argument(
-        "--cache-latency",
-        type=int,
-        default=0,
-        metavar="CYCLES",
-        help=(
-            "Cache-miss latency in cycles (≥0, default 0). "
-            "Used as the latency value in the # LLVM-MCA-LATENCY directive "
-            "when --instructions-per-cache-miss or --cache-miss-rate is finite."
+            "Write the formatted assembly for each analysed region to a text "
+            "file inside a 'dump' directory.  Each file is named "
+            "{start_address}_{end_address}.{arch}.txt."
         ),
     )
     parser.add_argument(
@@ -927,61 +938,163 @@ def main():
             "miss hit miss hit miss)."
         ),
     )
-    parser.add_argument(
-        "--cache-miss-rate",
-        type=float,
-        default=0.0,
-        metavar="R",
-        dest="cache_miss_rate",
-        help=(
-            "Cache misses per retired load instruction (>0, default 0.0 "
-            "meaning no cache-miss simulation). "
-            "May be greater than 1 (e.g. 1.5 means each load causes an "
-            "average of 1.5 misses). "
-            "Cannot be combined with --instructions-per-cache-miss. "
-            "Interpretation depends on --cache-miss-mode."
-        ),
-    )
-    parser.add_argument(
-        "--dump",
-        action="store_true",
-        default=False,
-        help=(
-            "Write the formatted assembly for each analysed region to a text "
-            "file inside a 'dump' directory.  Each file is named "
-            "{start_address}_{end_address}.{arch}.txt."
-        ),
-    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
 
-    if args.cache_miss <= 0:
-        parser.error("--instructions-per-cache-miss must be > 0")
-    if args.cache_latency < 0:
-        parser.error("--cache-latency must be >= 0")
-    if args.cache_miss_rate < 0:
-        parser.error("--cache-miss-rate must be >= 0")
-    if not math.isinf(args.cache_miss) and args.cache_miss_rate > 0:
-        parser.error(
-            "--instructions-per-cache-miss and --cache-miss-rate are mutually exclusive"
-        )
+    # Parse metrics arguments
+    if len(args.metrics) == 0:
+        # No cache metrics specified - run without cache miss simulation
+        cache_specs = []
+        cache_latency = 0
+    elif len(args.metrics) == 1:
+        parser.error("cache-latency requires at least one cycles_N specification")
+    else:
+        try:
+            cache_latency = int(args.metrics[0])
+            if cache_latency < 0:
+                parser.error("cache-latency must be >= 0")
+        except ValueError:
+            parser.error(f"cache-latency must be an integer, got: {args.metrics[0]}")
+        
+        cache_specs = []
+        for spec in args.metrics[1:]:
+            cache_specs.append(_parse_cache_spec(spec, parser))
 
-    results = sorted(
-        analyze(
+    # Run analysis for each cache specification
+    all_results = {}
+    
+    if len(cache_specs) == 0:
+        # No cache miss simulation
+        results = list(analyze(
             binary=args.binary,
             mcpu=args.mcpu,
-            cache_miss=args.cache_miss,
-            cache_latency=args.cache_latency,
+            cache_miss=float("inf"),
+            cache_latency=0,
             cache_miss_mode=args.cache_miss_mode,
             dump=args.dump,
-            cache_miss_rate=args.cache_miss_rate,
-        ),
-        key=lambda x: (x[1], -x[0]))
-    print("start_address,end_address,retired_instructions,elapsed_cycles,load_proportion")
-    for start, end, retired, elapsed_cycles, load_proportion in results:
-        print(f"0x{start:x},0x{end:x},{retired},{elapsed_cycles},{load_proportion:.4f}")
+            cache_miss_rate=0.0,
+        ))
+        for start, end, retired, load_instrs, cycles in results:
+            key = (start, end)
+            if key not in all_results:
+                all_results[key] = {
+                    "start": start,
+                    "end": end,
+                    "retired": retired,
+                    "load_instructions": load_instrs,
+                    "cycles": cycles,
+                    "cycles_n": []
+                }
+    else:
+        # Run analysis for each cache specification
+        for i, (spec_type, spec_value) in enumerate(cache_specs):
+            if spec_type == "cm":
+                # Cache miss rate
+                cache_miss_rate = spec_value
+                cache_miss = float("inf")
+            elif spec_type == "ipcm":
+                # Instructions per cache miss
+                cache_miss = spec_value
+                cache_miss_rate = 0.0
+            elif spec_type == "lipcm":
+                # Load instructions per cache miss - convert to cache miss rate
+                # lipcm = load_instructions / cache_misses
+                # cache_miss_rate = cache_misses / load_instructions = 1 / lipcm
+                if spec_value == 0:
+                    parser.error(f"lipcm value cannot be 0")
+                if math.isinf(spec_value):
+                    # No cache misses
+                    cache_miss_rate = 0.0
+                    cache_miss = float("inf")
+                else:
+                    cache_miss_rate = 1.0 / spec_value
+                    cache_miss = float("inf")
+            
+            results = list(analyze(
+                binary=args.binary,
+                mcpu=args.mcpu,
+                cache_miss=cache_miss,
+                cache_latency=cache_latency,
+                cache_miss_mode=args.cache_miss_mode,
+                dump=args.dump if i == 0 else False,  # Only dump on first iteration
+                cache_miss_rate=cache_miss_rate,
+            ))
+            
+            for start, end, retired, load_instrs, cycles in results:
+                key = (start, end)
+                if key not in all_results:
+                    # First iteration - initialize
+                    all_results[key] = {
+                        "start": start,
+                        "end": end,
+                        "retired": retired,
+                        "load_instructions": load_instrs,
+                        "cycles": cycles,
+                        "cycles_n": [cycles]
+                    }
+                else:
+                    # Subsequent iterations - append cycles
+                    all_results[key]["cycles_n"].append(cycles)
+
+    # Sort and print results
+    sorted_results = sorted(all_results.values(), key=lambda x: (x["end"], -x["start"]))
+    
+    # Build header
+    if len(cache_specs) == 0:
+        header = "start_address,end_address,retired_instructions,load_instructions,cycles"
+    else:
+        cycles_headers = ",".join([f"cycles_{i}" for i in range(len(cache_specs))])
+        header = f"start_address,end_address,retired_instructions,load_instructions,cycles,{cycles_headers}"
+    
+    print(header)
+    
+    for res in sorted_results:
+        cycles_str = ",".join([str(c) for c in res["cycles_n"]])
+        if len(res["cycles_n"]) > 0:
+            print(f"0x{res['start']:x},0x{res['end']:x},{res['retired']},{res['load_instructions']},{res['cycles']},{cycles_str}")
+        else:
+            print(f"0x{res['start']:x},0x{res['end']:x},{res['retired']},{res['load_instructions']},{res['cycles']}")
+
+
+def _parse_cache_spec(spec: str, parser):
+    """Parse a cache specification like cm_0.1, ipcm_50, or lipcm_10.
+    
+    Returns (spec_type, value) where spec_type is "cm", "ipcm", or "lipcm".
+    """
+    if spec.startswith("cm_"):
+        try:
+            value = float(spec[3:])
+            if value < 0:
+                parser.error(f"cache-miss rate must be >= 0, got: {spec}")
+            return ("cm", value)
+        except ValueError:
+            parser.error(f"invalid cache-miss rate specification: {spec}")
+    elif spec.startswith("ipcm_"):
+        value_str = spec[5:]
+        if value_str.lower() == "inf":
+            return ("ipcm", float("inf"))
+        try:
+            value = float(value_str)
+            if value <= 0:
+                parser.error(f"instructions-per-cache-miss must be > 0, got: {spec}")
+            return ("ipcm", value)
+        except ValueError:
+            parser.error(f"invalid instructions-per-cache-miss specification: {spec}")
+    elif spec.startswith("lipcm_"):
+        value_str = spec[6:]
+        if value_str.lower() == "inf":
+            return ("lipcm", float("inf"))
+        try:
+            value = float(value_str)
+            if value <= 0:
+                parser.error(f"load-instructions-per-cache-miss must be > 0, got: {spec}")
+            return ("lipcm", value)
+        except ValueError:
+            parser.error(f"invalid load-instructions-per-cache-miss specification: {spec}")
+    else:
+        parser.error(f"invalid cycles specification: {spec} (expected cm_N, ipcm_N, or lipcm_N)")
 
 
 if __name__ == "__main__":
