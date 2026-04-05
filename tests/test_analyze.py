@@ -56,7 +56,7 @@ def _llvm_mca_available() -> bool:
     """Return True if any version of llvm-mca is available on PATH."""
     if shutil.which("llvm-mca"):
         return True
-    for ver in range(20, 10, -1):
+    for ver in range(30, 10, -1):
         if shutil.which(f"llvm-mca-{ver}"):
             return True
     return False
@@ -371,7 +371,7 @@ class TestAMD64:
         """Retired instructions and elapsed cycles for x86-64 are strictly positive."""
         results = list(analyze.analyze(x86_obj))
         assert results
-        for start, end, retired, cycles, _lp in results:
+        for start, end, retired, load_instrs, cycles in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
 
@@ -416,7 +416,7 @@ class TestAArch64:
         """Retired instructions and elapsed cycles for AArch64 are strictly positive."""
         results = list(analyze.analyze(aarch64_obj))
         assert results
-        for start, end, retired, cycles, _lp in results:
+        for start, end, retired, load_instrs, cycles in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
 

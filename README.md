@@ -6,7 +6,17 @@ This automatically reports the estimated throughput for the given binary.
 * **Python 3.8+**
 * **llvm-mca 21 or later** — versions prior to 21 do not support the
   `--call-latency` flag, which is required for accurate cycle estimates on code
-  regions that contain CALL instructions.
+  regions that contain CALL instructions.  On Ubuntu 24.04 (Noble), llvm-21 is
+  not in the default apt repositories; install it from the LLVM project's own
+  apt repository:
+  ```sh
+  wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+      | sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm-org.gpg
+  echo "deb [signed-by=/usr/share/keyrings/apt-llvm-org.gpg] \
+      https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
+      | sudo tee /etc/apt/sources.list.d/llvm-21.list
+  sudo apt-get update && sudo apt-get install -y llvm-21
+  ```
 * **objdump** (binutils) — used to disassemble the target ELF binary.
 
 ## Usage
