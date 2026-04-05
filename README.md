@@ -1,6 +1,14 @@
 # automatic-llvm-mca
 This automatically reports the estimated throughput for the given binary.
 
+## Requirements
+
+* **Python 3.8+**
+* **llvm-mca 21 or later** — versions prior to 21 do not support the
+  `--call-latency` flag, which is required for accurate cycle estimates on code
+  regions that contain CALL instructions.
+* **objdump** (binutils) — used to disassemble the target ELF binary.
+
 ## Usage
 
 ```
