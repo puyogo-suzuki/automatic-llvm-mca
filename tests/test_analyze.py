@@ -56,7 +56,7 @@ def _llvm_mca_available() -> bool:
     """Return True if any version of llvm-mca is available on PATH."""
     if shutil.which("llvm-mca"):
         return True
-    for ver in range(20, 10, -1):
+    for ver in range(30, 10, -1):
         if shutil.which(f"llvm-mca-{ver}"):
             return True
     return False
@@ -371,7 +371,7 @@ class TestAMD64:
         """Retired instructions and elapsed cycles for x86-64 are strictly positive."""
         results = list(analyze.analyze(x86_obj))
         assert results
-        for start, end, retired, cycles, _lp in results:
+        for start, end, retired, load_instrs, cycles in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
 
@@ -416,7 +416,7 @@ class TestAArch64:
         """Retired instructions and elapsed cycles for AArch64 are strictly positive."""
         results = list(analyze.analyze(aarch64_obj))
         assert results
-        for start, end, retired, cycles, _lp in results:
+        for start, end, retired, load_instrs, cycles in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
 
@@ -732,11 +732,12 @@ class TestRunMcaCacheMissPlumbing:
             "Expected -iterations=1 in llvm-mca command for stochastic mode"
         )
 
-    def test_call_latency_flag_is_not_passed(self, monkeypatch):
-        """_run_mca must NOT pass the unsupported --call-latency=0 flag.
+    def test_call_latency_flag_is_passed(self, monkeypatch):
+        """_run_mca must pass ``--call-latency=0`` to llvm-mca.
 
-        llvm-mca 16-18 rejects ``--call-latency=0`` with an 'Unknown command
-        line argument' error, causing every analysis to silently return None.
+        This flag suppresses artificially inflated cycle counts that llvm-mca
+        would otherwise attribute to CALL instructions.  It is required for
+        accurate IPC estimates on any block that contains calls.
         """
         captured_cmd = {}
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
@@ -754,8 +755,8 @@ class TestRunMcaCacheMissPlumbing:
 
         analyze._run_mca([(0x0, "nop", "")], arch=analyze.X86Arch(),
                          cache_mode=analyze._NoCacheMiss())
-        assert "--call-latency=0" not in captured_cmd.get("cmd", []), (
-            "--call-latency=0 must not be passed; it is unsupported by llvm-mca 16-18"
+        assert "--call-latency=0" in captured_cmd.get("cmd", []), (
+            "--call-latency=0 must be passed to llvm-mca"
         )
 
 

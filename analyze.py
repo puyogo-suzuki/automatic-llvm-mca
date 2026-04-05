@@ -730,7 +730,7 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase, cache_mode: _CacheMissMode)
     asm, extra = cache_mode.format_asm(instrs, arch)
 
     # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
-    cmd = [_LLVM_MCA, *mca_args, *extra, "-"]
+    cmd = [_LLVM_MCA, "--call-latency=0", *mca_args, *extra, "-"]
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None

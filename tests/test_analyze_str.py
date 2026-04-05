@@ -32,7 +32,7 @@ import analyze_str  # noqa: E402
 def _llvm_mca_available() -> bool:
     if shutil.which("llvm-mca"):
         return True
-    for ver in range(20, 10, -1):
+    for ver in range(30, 10, -1):
         if shutil.which(f"llvm-mca-{ver}"):
             return True
     return False
