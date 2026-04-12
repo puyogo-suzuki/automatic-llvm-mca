@@ -1140,7 +1140,7 @@ def _parse_cache_spec(spec: str, parser):
         try:
             value = int(spec[3:])
             if value <= 0:
-                parser.error(f"constant-always latency must be > 0, got: {spec}")
+                parser.error(f"constant-always latency must be a positive integer, got: {spec}")
             return ("ca", value)
         except ValueError:
             parser.error(f"invalid constant-always specification: {spec}")
