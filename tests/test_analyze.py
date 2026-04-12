@@ -761,11 +761,11 @@ class TestRunMcaCacheMissPlumbing:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests — _format_asm_with_average_load_latency
+# Unit tests — _format_asm_with_constant_load_latency
 # ---------------------------------------------------------------------------
 
-class TestFormatAsmWithAverageLoadLatency:
-    """Unit tests for analyze._format_asm_with_average_load_latency."""
+class TestFormatAsmWithConstantLoadLatency:
+    """Unit tests for analyze._format_asm_with_constant_load_latency."""
 
     _LOAD_INSTRS = [
         (0x0, "mov", "(%edi),%eax"),
@@ -776,20 +776,20 @@ class TestFormatAsmWithAverageLoadLatency:
 
     def test_all_loads_get_latency_directive(self):
         """Every load must be wrapped with opening and closing latency directives."""
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=50)
         assert "# LLVM-MCA-LATENCY 50" in asm
         assert "# LLVM-MCA-LATENCY\n" in asm or asm.endswith("# LLVM-MCA-LATENCY")
 
     def test_zero_latency_still_wraps_loads(self):
         """A latency of 0 still inserts directives (latency=0 is valid)."""
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=0)
         assert "# LLVM-MCA-LATENCY 0" in asm
 
     def test_non_load_not_wrapped(self):
         """Non-load instructions must not be preceded by a latency directive."""
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=75)
         lines = asm.splitlines()
         open_re = re.compile(r"#\s+LLVM-MCA-LATENCY\s+\d+")
@@ -804,28 +804,28 @@ class TestFormatAsmWithAverageLoadLatency:
     def test_no_repetition(self):
         """The instruction block must appear exactly once (no repetition)."""
         instrs = [(0x0, "mov", "(%edi),%eax"), (0x2, "ret", "")]
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             instrs, self._ARCH, latency=10)
         # Load appears once; not repeated 100 times like stochastic mode.
         assert asm.count("mov (%edi),%eax") == 1
 
     def test_lmca_end_label_present(self):
         """The closing .Lmca_end: label must be present."""
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             self._LOAD_INSTRS, self._ARCH, latency=0)
         assert ".Lmca_end:" in asm
 
     def test_no_loads_no_latency_directives(self):
         """A block with no loads must produce no LLVM-MCA-LATENCY directives."""
         instrs = [(0x0, "add", "%eax,%edx"), (0x2, "ret", "")]
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             instrs, self._ARCH, latency=100)
         assert "LLVM-MCA-LATENCY" not in asm
 
     def test_multiple_loads_all_wrapped(self):
         """All load instructions in a block must each be wrapped."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(5)]
-        asm, _ = analyze._format_asm_with_average_load_latency(
+        asm, _ = analyze._format_asm_with_constant_load_latency(
             instrs, self._ARCH, latency=30)
         # There should be exactly 5 opening latency directives.
         assert asm.count("# LLVM-MCA-LATENCY 30") == 5
@@ -833,9 +833,9 @@ class TestFormatAsmWithAverageLoadLatency:
     def test_deterministic(self):
         """Two calls with the same arguments produce identical output."""
         instrs = [(i * 2, "mov", f"({i})(%edi),%eax") for i in range(3)]
-        asm1, _ = analyze._format_asm_with_average_load_latency(
+        asm1, _ = analyze._format_asm_with_constant_load_latency(
             instrs, self._ARCH, latency=20)
-        asm2, _ = analyze._format_asm_with_average_load_latency(
+        asm2, _ = analyze._format_asm_with_constant_load_latency(
             instrs, self._ARCH, latency=20)
         assert asm1 == asm2
 
@@ -847,17 +847,17 @@ class TestFormatAsmWithAverageLoadLatency:
 class TestRunMcaAverageModePlumbing:
     """Verify that _run_mca uses the average-mode formatter when requested."""
 
-    def test_average_mode_uses_average_load_latency_formatter(
+    def test_average_mode_uses_constant_load_latency_formatter(
             self, monkeypatch):
         """With _AverageCacheMiss and load instructions,
-        _format_asm_with_average_load_latency is called with the uniform latency."""
+        _format_asm_with_constant_load_latency is called with the uniform latency."""
         called = {}
 
         def fake_avg_load(instrs, arch, latency):
             called["latency"] = latency
             return "\tnop\n.Lmca_end:\n", []
 
-        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+        monkeypatch.setattr(analyze, "_format_asm_with_constant_load_latency",
                             fake_avg_load)
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
 
@@ -879,7 +879,7 @@ class TestRunMcaAverageModePlumbing:
             cache_mode=analyze._AverageCacheMiss(10, 100),
         )
         assert "latency" in called, (
-            "Expected _format_asm_with_average_load_latency to be called"
+            "Expected _format_asm_with_constant_load_latency to be called"
         )
         assert called["latency"] == 100, (
             f"Expected latency=100 for 1 miss * 100 cycles, got {called['latency']}"
@@ -890,7 +890,7 @@ class TestRunMcaAverageModePlumbing:
         captured_cmd = {}
 
         monkeypatch.setattr(
-            analyze, "_format_asm_with_average_load_latency",
+            analyze, "_format_asm_with_constant_load_latency",
             lambda *a, **kw: ("\tnop\n.Lmca_end:\n", []),
         )
         monkeypatch.setattr(analyze, "_LLVM_MCA", "llvm-mca")
@@ -957,7 +957,7 @@ class TestRunMcaAverageModePlumbing:
             called["latency"] = latency
             return "\tnop\n.Lmca_end:\n", []
 
-        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+        monkeypatch.setattr(analyze, "_format_asm_with_constant_load_latency",
                             fake_avg_load)
 
         # 8 instrs total, 3 loads: expected_misses = 8/1 = 8.0
@@ -1146,9 +1146,9 @@ class TestCacheMissIpcmLogic:
             f"got {extra!r}"
         )
 
-    def test_average_multiple_misses_per_load_uses_average_load_latency(
+    def test_average_multiple_misses_per_load_uses_constant_load_latency(
             self, monkeypatch):
-        """_AverageCacheMiss calls _format_asm_with_average_load_latency with
+        """_AverageCacheMiss calls _format_asm_with_constant_load_latency with
         the uniform average latency.
 
         Region: 10 instrs, 2 loads, ipcm=1 → expected_misses=10.
@@ -1160,7 +1160,7 @@ class TestCacheMissIpcmLogic:
             called["latency"] = latency
             return "\tnop\n.Lmca_end:\n", []
 
-        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency",
+        monkeypatch.setattr(analyze, "_format_asm_with_constant_load_latency",
                             fake_avg_load)
 
         mode = analyze._AverageCacheMiss(instructions_per_cache_miss=1,
@@ -1405,7 +1405,7 @@ class TestCacheMissRateClasses:
 
     def test_average_rate_uses_rate_times_latency(self, monkeypatch):
         """_AverageCacheMissRate passes round(rate * latency) to
-        _format_asm_with_average_load_latency.
+        _format_asm_with_constant_load_latency.
 
         rate=1.5, latency=100 → avg_latency=round(150)=150.
         """
@@ -1415,7 +1415,7 @@ class TestCacheMissRateClasses:
             called["latency"] = latency
             return "\tnop\n.Lmca_end:\n", []
 
-        monkeypatch.setattr(analyze, "_format_asm_with_average_load_latency", fake_avg)
+        monkeypatch.setattr(analyze, "_format_asm_with_constant_load_latency", fake_avg)
 
         mode = analyze._AverageCacheMissRate(cache_miss_rate=1.5, cache_latency=100)
         mode.format_asm(self._INSTRS, self._ARCH)

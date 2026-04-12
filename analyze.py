@@ -242,7 +242,7 @@ def _format_asm(instrs, arch: ArchBase) -> tuple[str, list]:
     return "\n".join(lines) + "\n", []
 
 
-def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
+def _format_asm_with_constant_load_latency(instrs, arch: ArchBase,
                                           latency: int = 0) -> tuple[str, list]:
     """Format *instrs* as assembly where every load gets a fixed latency override.
 
@@ -515,7 +515,7 @@ class _AverageCacheMiss(_CacheMissMode):
             return _format_asm(instrs, arch)
         expected_misses = num_instrs / self.instructions_per_cache_miss
         avg_latency = round(expected_misses / num_loads * self.cache_latency)
-        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
+        return _format_asm_with_constant_load_latency(instrs, arch, avg_latency)
 
 
 def _build_cache_mode(instructions_per_cache_miss: float, cache_latency: int,
@@ -602,7 +602,7 @@ class _AverageCacheMissRate(_CacheMissMode):
         if num_loads == 0:
             return _format_asm(instrs, arch)
         avg_latency = round(self.cache_miss_rate * self.cache_latency)
-        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
+        return _format_asm_with_constant_load_latency(instrs, arch, avg_latency)
 
 
 class _ConstantAlwaysCacheMiss(_CacheMissMode):
@@ -622,7 +622,7 @@ class _ConstantAlwaysCacheMiss(_CacheMissMode):
         self.constant_latency = constant_latency
 
     def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
-        return _format_asm_with_average_load_latency(instrs, arch,
+        return _format_asm_with_constant_load_latency(instrs, arch,
                                                      self.constant_latency)
 
 
