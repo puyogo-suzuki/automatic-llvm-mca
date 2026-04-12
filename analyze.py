@@ -242,7 +242,7 @@ def _format_asm(instrs, arch: ArchBase) -> tuple[str, list]:
     return "\n".join(lines) + "\n", []
 
 
-def _format_asm_with_average_load_latency(instrs, arch: ArchBase,
+def _format_asm_with_constant_load_latency(instrs, arch: ArchBase,
                                           latency: int = 0) -> tuple[str, list]:
     """Format *instrs* as assembly where every load gets a fixed latency override.
 
@@ -515,7 +515,7 @@ class _AverageCacheMiss(_CacheMissMode):
             return _format_asm(instrs, arch)
         expected_misses = num_instrs / self.instructions_per_cache_miss
         avg_latency = round(expected_misses / num_loads * self.cache_latency)
-        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
+        return _format_asm_with_constant_load_latency(instrs, arch, avg_latency)
 
 
 def _build_cache_mode(instructions_per_cache_miss: float, cache_latency: int,
@@ -602,7 +602,28 @@ class _AverageCacheMissRate(_CacheMissMode):
         if num_loads == 0:
             return _format_asm(instrs, arch)
         avg_latency = round(self.cache_miss_rate * self.cache_latency)
-        return _format_asm_with_average_load_latency(instrs, arch, avg_latency)
+        return _format_asm_with_constant_load_latency(instrs, arch, avg_latency)
+
+
+class _ConstantAlwaysCacheMiss(_CacheMissMode):
+    """Constant-always cache-miss simulation.
+
+    Every load instruction receives a fixed latency of *constant_latency*
+    cycles via an ``# LLVM-MCA-LATENCY`` directive.  Unlike the other
+    simulation modes this class does **not** repeat the block and does **not**
+    add ``-iterations=1`` to the llvm-mca command line — the tool runs its own
+    default 100-iteration loop over the unchanged code.
+
+    The ``cache_latency`` argument used by other modes is ignored here; the
+    caller-supplied *constant_latency* is applied directly to every load.
+    """
+
+    def __init__(self, constant_latency: int):
+        self.constant_latency = constant_latency
+
+    def format_asm(self, instrs, arch: ArchBase) -> tuple[str, list]:
+        return _format_asm_with_constant_load_latency(instrs, arch,
+                                                     self.constant_latency)
 
 
 def _build_cache_mode_from_rate(cache_miss_rate: float, cache_latency: int,
@@ -853,6 +874,8 @@ def _spec_to_cache_mode(spec_type: str, spec_value: float,
         # lipcm = load_instructions / cache_misses → rate = 1 / lipcm
         rate = 0.0 if math.isinf(spec_value) else 1.0 / spec_value
         return _build_cache_mode_from_rate(rate, cache_latency, cache_miss_mode)
+    if spec_type == "ca":
+        return _ConstantAlwaysCacheMiss(int(spec_value))
     raise ValueError(f"Unknown cache spec type: {spec_type!r}")
 
 
@@ -970,8 +993,9 @@ def main():
         help=(
             "Optional: <cache-latency> <cycles_0> [<cycles_1> ...] where "
             "<cycles_n> is one of: cm_N (cache-miss rate N), ipcm_N "
-            "(instructions per cache miss N), or lipcm_N (load instructions "
-            "per cache miss N). Example: 200 cm_0.1 ipcm_50 lipcm_10"
+            "(instructions per cache miss N), lipcm_N (load instructions "
+            "per cache miss N), or ca_N (constant latency N for all loads, "
+            "ignores cache-latency). Example: 200 cm_0.1 ipcm_50 lipcm_10 ca_50"
         ),
     )
     parser.add_argument(
@@ -1078,9 +1102,9 @@ def main():
 
 
 def _parse_cache_spec(spec: str, parser):
-    """Parse a cache specification like cm_0.1, ipcm_50, or lipcm_10.
+    """Parse a cache specification like cm_0.1, ipcm_50, lipcm_10, or ca_50.
     
-    Returns (spec_type, value) where spec_type is "cm", "ipcm", or "lipcm".
+    Returns (spec_type, value) where spec_type is "cm", "ipcm", "lipcm", or "ca".
     """
     if spec.startswith("cm_"):
         try:
@@ -1112,8 +1136,16 @@ def _parse_cache_spec(spec: str, parser):
             return ("lipcm", value)
         except ValueError:
             parser.error(f"invalid load-instructions-per-cache-miss specification: {spec}")
+    elif spec.startswith("ca_"):
+        try:
+            value = int(spec[3:])
+            if value <= 0:
+                parser.error(f"constant-always latency must be a positive integer, got: {spec}")
+            return ("ca", value)
+        except ValueError:
+            parser.error(f"invalid constant-always specification: {spec}")
     else:
-        parser.error(f"invalid cycles specification: {spec} (expected cm_N, ipcm_N, or lipcm_N)")
+        parser.error(f"invalid cycles specification: {spec} (expected cm_N, ipcm_N, lipcm_N, or ca_N)")
 
 
 if __name__ == "__main__":
