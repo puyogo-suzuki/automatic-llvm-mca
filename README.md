@@ -76,6 +76,12 @@ Each `<cycles_N>` argument specifies a cache-miss configuration and must be one 
   cache-miss simulation.  For example, `lipcm_10` means one cache miss occurs
   for every 10 load instructions.  This is the reciprocal of `cm_<rate>`.
 
+* `ca_<c>` — **Constant always** latency.  Every load instruction receives a
+  fixed latency of `<c>` cycles (a positive integer), regardless of the
+  `<cache-latency>` argument (which is ignored for this spec).  The block is
+  **not** duplicated and llvm-mca runs its own default iterations.  For
+  example, `ca_50` makes every load take exactly 50 cycles.
+
 Example:
 
 ```
