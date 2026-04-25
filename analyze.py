@@ -299,6 +299,25 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
     return sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)) * 100
 
 
+def _compute_mlp(instrs, decode_width: int, arch: ArchBase) -> float:
+    """Compute the Memory Level Parallelism (MLP) for a block of instructions."""
+    if not instrs:
+        return 0.0
+    n = len(instrs)
+    is_load = [1 if arch.is_load_instruction(mn, ops) else 0 for _, mn, ops in instrs]
+    
+    total_mlp = 0.0
+    load_available = 0
+    for i in range(n + 1):
+        mlp_i = max(1, sum(is_load[j] for j in range(i, min(i + decode_width, n))))
+        if mlp_i > 0:
+            total_mlp += mlp_i
+            load_available += 1
+    if load_available == 0:
+        return 1.0
+    return total_mlp / load_available
+
+
 def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
     """Run llvm-mca on *instrs* and return ``(retired, cycles, load_instructions)``, or None.
 
@@ -342,10 +361,10 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
 # Per-function analysis
 # ---------------------------------------------------------------------------
 
-def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper = None):
+def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper = None, decode_width: int = 4):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, retired, cycles, load_instructions, kind)``
+    Yields ``(start_addr, end_addr, retired, cycles, load_instructions, mlp, kind)``
     tuples for every loop and every basic block that is not part of a loop.
     """
     if arch is None:
@@ -359,9 +378,10 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper
         result = _run_mca(region, mca_args, arch=arch)
         if result is not None:
             retired, cycles, load_instrs = result
+            mlp = _compute_mlp(region, decode_width, arch)
             if dumper:
                 dumper.dump(region, _format_asm(region, arch), arch)
-            yield region[0][0], region[-1][0], retired, cycles, load_instrs, "loop"
+            yield region[0][0], region[-1][0], retired, cycles, load_instrs, mlp, "loop"
 
     # --- Basic blocks outside loops ---
     non_loop = [(a, m, o) for a, m, o in instrs if not _in_any_loop(a, loops)]
@@ -373,25 +393,27 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper
             result = _run_mca(bb, mca_args, arch=arch)
             if result is not None:
                 retired, cycles, load_instrs = result
+                mlp = _compute_mlp(bb, decode_width, arch)
                 if dumper:
                     dumper.dump(bb, _format_asm(bb, arch), arch)
-                yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, "block"
+                yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, mlp, "block"
             bb = []
     if bb:
         result = _run_mca(bb, mca_args, arch=arch)
         if result is not None:
             retired, cycles, load_instrs = result
+            mlp = _compute_mlp(bb, decode_width, arch)
             if dumper:
                 dumper.dump(bb, _format_asm(bb, arch), arch)
-            yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, "block"
+            yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, mlp, "block"
 
 
 # ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
-def analyze(binary: str, mcpu: str = "", dump: bool = False):
-    """Analyse *binary* and yield ``(start, end, retired, load_instructions, cycles)`` tuples.
+def analyze(binary: str, mcpu: str = "", dump: bool = False, decode_width: int = 4):
+    """Analyse *binary* and yield ``(start, end, retired, load_instructions, cycles, mlp)`` tuples.
 
     Parameters
     ----------
@@ -403,6 +425,8 @@ def analyze(binary: str, mcpu: str = "", dump: bool = False):
     dump:
         When ``True``, the formatted assembly for each analysed region is
         written to a file in a ``"dump"`` directory.
+    decode_width:
+        The decode width used to compute Memory Level Parallelism.
     """
     arch = _detect_arch(binary)
     mca_args = arch.mca_args
@@ -413,9 +437,9 @@ def analyze(binary: str, mcpu: str = "", dump: bool = False):
     dumper = Dumper() if dump else None
 
     for _func_name, instrs in disassemble(binary, arch):
-        for start, end, retired, cycles, load_instrs, _kind in _analyze_function(
-                instrs, mca_args, arch, dumper):
-            yield start, end, retired, load_instrs, cycles
+        for start, end, retired, cycles, load_instrs, mlp, _kind in _analyze_function(
+                instrs, mca_args, arch, dumper, decode_width):
+            yield start, end, retired, load_instrs, cycles, mlp
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +449,7 @@ def analyze(binary: str, mcpu: str = "", dump: bool = False):
 def main():
     parser = argparse.ArgumentParser(
         description="Estimate throughput for an ELF binary using llvm-mca.",
-        usage="%(prog)s [--mcpu CPU] [--dump] <elf-binary>"
+        usage="%(prog)s [--mcpu CPU] [--dump] [--decode-width W] <elf-binary>"
     )
     parser.add_argument("binary", help="Path to the ELF binary to analyse")
     parser.add_argument(
@@ -448,7 +472,17 @@ def main():
             "{start_address}_{end_address}.{arch}.txt."
         ),
     )
+    parser.add_argument(
+        "--decode-width",
+        type=int,
+        default=4,
+        metavar="W",
+        help="The decode width used to compute Memory Level Parallelism (default: 4)."
+    )
     args = parser.parse_args()
+
+    if args.decode_width < 1:
+        parser.error("--decode-width must be >= 1")
 
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
@@ -458,21 +492,22 @@ def main():
         binary=args.binary,
         mcpu=args.mcpu,
         dump=args.dump,
+        decode_width=args.decode_width,
     ))
 
     # Deduplicate by (start, end), keeping the first occurrence.
     all_results: dict = {}
-    for start, end, retired, load_instrs, cycles in raw_results:
+    for start, end, retired, load_instrs, cycles, mlp in raw_results:
         key = (start, end)
         if key not in all_results:
-            all_results[key] = (start, end, retired, load_instrs, cycles)
+            all_results[key] = (start, end, retired, load_instrs, cycles, mlp)
 
     # Sort and print results.
     sorted_results = sorted(all_results.values(), key=lambda x: (x[1], -x[0]))
 
-    print("start_address,end_address,retired_instructions,load_instructions,cycles")
-    for start, end, retired, load_instrs, cycles in sorted_results:
-        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles}")
+    print("start_address,end_address,retired_instructions,load_instructions,cycles,mlp")
+    for start, end, retired, load_instrs, cycles, mlp in sorted_results:
+        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles},{mlp}")
 
 
 if __name__ == "__main__":

@@ -371,16 +371,17 @@ class TestAMD64:
         """Retired instructions and elapsed cycles for x86-64 are strictly positive."""
         results = list(analyze.analyze(x86_obj))
         assert results
-        for start, end, retired, load_instrs, cycles in results:
+        for start, end, retired, load_instrs, cycles, mlp in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
+            assert mlp >= 0, f"mlp should be non-negative, got {mlp} for region 0x{start:x}–0x{end:x}"
 
     @_NEED_MCA
     @_NEED_X86_GCC
     def test_loop_detected(self, x86_obj):
         """The backward branch in sum() is detected as a loop (start < end)."""
         results = list(analyze.analyze(x86_obj))
-        loops = [(s, e, retired, cycles) for s, e, retired, _li, cycles in results if s < e]
+        loops = [(s, e, retired, cycles) for s, e, retired, _li, cycles, _mlp in results if s < e]
         assert loops, (
             "Expected at least one loop region (start < end). "
             f"All results: {results}"
@@ -391,7 +392,7 @@ class TestAMD64:
     def test_addresses_are_nonneg_ints(self, x86_obj):
         """Start and end addresses are non-negative integers."""
         results = list(analyze.analyze(x86_obj))
-        for start, end, _retired, _li, _cycles in results:
+        for start, end, _retired, _li, _cycles, _mlp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
 
@@ -416,16 +417,17 @@ class TestAArch64:
         """Retired instructions and elapsed cycles for AArch64 are strictly positive."""
         results = list(analyze.analyze(aarch64_obj))
         assert results
-        for start, end, retired, load_instrs, cycles in results:
+        for start, end, retired, load_instrs, cycles, mlp in results:
             assert retired > 0, f"retired should be positive, got {retired} for region 0x{start:x}–0x{end:x}"
             assert cycles > 0, f"cycles should be positive, got {cycles} for region 0x{start:x}–0x{end:x}"
+            assert mlp >= 0, f"mlp should be non-negative, got {mlp} for region 0x{start:x}–0x{end:x}"
 
     @_NEED_MCA
     @_NEED_AARCH64
     def test_loop_detected(self, aarch64_obj):
         """The backward branch in sum() is detected as a loop (start < end)."""
         results = list(analyze.analyze(aarch64_obj))
-        loops = [(s, e, retired, cycles) for s, e, retired, _li, cycles in results if s < e]
+        loops = [(s, e, retired, cycles) for s, e, retired, _li, cycles, _mlp in results if s < e]
         assert loops, (
             "Expected at least one loop region (start < end). "
             f"All results: {results}"
@@ -436,7 +438,7 @@ class TestAArch64:
     def test_addresses_are_nonneg_ints(self, aarch64_obj):
         """Start and end addresses are non-negative integers."""
         results = list(analyze.analyze(aarch64_obj))
-        for start, end, _retired, _li, _cycles in results:
+        for start, end, _retired, _li, _cycles, _mlp in results:
             assert isinstance(start, int) and start >= 0
             assert isinstance(end, int) and end >= 0
 

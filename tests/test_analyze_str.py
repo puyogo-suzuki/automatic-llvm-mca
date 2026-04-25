@@ -280,9 +280,10 @@ class TestAnalyzeStrIntegration:
         instrs, arch, start, end = analyze_str.load_str_file(path)
         result = analyze_str.analyze_str(instrs, arch)
         assert result is not None
-        retired, cycles, _ = result
+        retired, cycles, _, mlp = result
         assert retired > 0, f"Expected positive retired instructions, got {retired}"
         assert cycles > 0, f"Expected positive elapsed cycles, got {cycles}"
+        assert mlp >= 0, f"Expected non-negative mlp, got {mlp}"
 
     @_NEED_MCA
     def test_load_instructions_nonzero(self, tmp_path):
@@ -291,7 +292,7 @@ class TestAnalyzeStrIntegration:
         instrs, arch, start, end = analyze_str.load_str_file(path)
         result = analyze_str.analyze_str(instrs, arch)
         assert result is not None
-        _, _, load_instrs = result
+        _, _, load_instrs, _ = result
         assert load_instrs > 0, (
             f"Expected load_instrs > 0 (block has a load), got {load_instrs}"
         )
@@ -313,7 +314,7 @@ class TestAnalyzeStrIntegration:
         instrs, arch, start, end = analyze_str.load_str_file(path)
         result = analyze_str.analyze_str(instrs, arch)
         assert result is not None, "Expected a result for loop dump"
-        retired, cycles, _ = result
+        retired, cycles, _, _ = result
         assert retired > 0
         assert cycles > 0
 
@@ -360,6 +361,7 @@ class TestRoundTrip:
         if original is None:
             pytest.skip("llvm-mca returned None for the original run")
         orig_retired, orig_cycles, orig_li = original
+        orig_mlp = _analyze._compute_mlp(instrs, decode_width=4, arch=arch)
 
         # Dump to a temp file using Dumper.
         dump_dir = str(tmp_path / "dump")
@@ -376,7 +378,7 @@ class TestRoundTrip:
         new_instrs, new_arch, new_start, new_end = analyze_str.load_str_file(dump_path)
         result = analyze_str.analyze_str(new_instrs, new_arch)
         assert result is not None, "analyze_str returned None"
-        new_retired, new_cycles, new_li = result
+        new_retired, new_cycles, new_li, new_mlp = result
 
         assert new_start == start
         assert new_end == end
@@ -388,4 +390,7 @@ class TestRoundTrip:
         )
         assert new_li == orig_li, (
             f"load_instructions mismatch: original={orig_li}, re-analysed={new_li}"
+        )
+        assert new_mlp == orig_mlp, (
+            f"mlp mismatch: original={orig_mlp}, re-analysed={new_mlp}"
         )

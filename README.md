@@ -9,7 +9,7 @@ Estimate throughput for ELF binaries using `llvm-mca`.
 3.  Run `llvm-mca` on each region to obtain retired instructions and elapsed
     cycles.
 4.  Print a CSV with start address, end address, retired instructions, load
-    instructions, and elapsed cycles for every region.
+    instructions, elapsed cycles, and Memory Level Parallelism (MLP) for every region.
 
 For nested loops the outer loop (including the inner loop body) and the inner
 loop are reported separately.
@@ -24,13 +24,15 @@ loop are reported separately.
 ## Usage
 
 ```bash
-python3 analyze.py [--mcpu <cpu>] <elf-binary>
+python3 analyze.py [--mcpu <cpu>] [--decode-width <W>] <elf-binary>
 ```
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
 *   `--mcpu <cpu>` — (Optional) Specify a target CPU for `llvm-mca` (e.g.,
     `cortex-a72`, `skylake`, `sifive-u74`). If omitted, the tool attempts to
     auto-detect the host CPU (for x86) or uses a generic model.
+*   `--decode-width <W>` — (Optional) Specify the decode width for MLP estimation
+    (default is 4).
 
 ### Output format
 
@@ -43,6 +45,7 @@ The output is a CSV with the following columns:
 *   `load_instructions` — Total number of load instructions retired in the
     region.
 *   `cycles` — Total simulated cycles for the region.
+*   `mlp` — Memory Level Parallelism for the region.
 
 ## Debugging / Dumping Assembly (`--dump`)
 
@@ -62,7 +65,7 @@ assembly passed to `llvm-mca`, including labels and `LLVM-MCA-BEGIN` /
 You can run `llvm-mca` on a previously dumped assembly file:
 
 ```bash
-python3 analyze_str.py [--mcpu <cpu>] <textfile>
+python3 analyze_str.py [--mcpu <cpu>] [--decode-width <W>] <textfile>
 ```
 
 This is useful for manually inspecting the assembly or for re-running the
