@@ -285,15 +285,15 @@ class TestAnalyzeStrIntegration:
         assert cycles > 0, f"Expected positive elapsed cycles, got {cycles}"
 
     @_NEED_MCA
-    def test_load_proportion_nonzero(self, tmp_path):
-        """The basic block has one load, so load_proportion must be > 0."""
+    def test_load_instructions_nonzero(self, tmp_path):
+        """The basic block has one load, so load_instructions must be > 0."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
         instrs, arch, start, end = analyze_str.load_str_file(path)
         result = analyze_str.analyze_str(instrs, arch)
         assert result is not None
-        _, _, load_proportion = result
-        assert load_proportion > 0, (
-            f"Expected load_proportion > 0 (block has a load), got {load_proportion}"
+        _, _, load_instrs = result
+        assert load_instrs > 0, (
+            f"Expected load_instrs > 0 (block has a load), got {load_instrs}"
         )
 
     @_NEED_MCA
@@ -316,36 +316,6 @@ class TestAnalyzeStrIntegration:
         retired, cycles, _ = result
         assert retired > 0
         assert cycles > 0
-
-    @_NEED_MCA
-    def test_cache_miss_average_mode(self, tmp_path):
-        """analyze_str with average cache miss mode returns a valid result."""
-        path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        instrs, arch, start, end = analyze_str.load_str_file(path)
-        result = analyze_str.analyze_str(
-            instrs, arch,
-            cache_miss=10.0,
-            cache_latency=100,
-            cache_miss_mode="average",
-        )
-        assert result is not None
-        retired, cycles, _ = result
-        assert retired > 0
-
-    @_NEED_MCA
-    def test_cache_miss_stochastic_mode(self, tmp_path):
-        """analyze_str with stochastic cache miss mode returns a valid result."""
-        path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
-        instrs, arch, start, end = analyze_str.load_str_file(path)
-        result = analyze_str.analyze_str(
-            instrs, arch,
-            cache_miss=10.0,
-            cache_latency=100,
-            cache_miss_mode="stochastic",
-        )
-        assert result is not None
-        retired, cycles, _ = result
-        assert retired > 0
 
     @_NEED_MCA
     def test_unknown_arch_in_filename_raises(self, tmp_path):
@@ -386,16 +356,15 @@ class TestRoundTrip:
         mca_args = arch.mca_args
 
         # Run llvm-mca directly.
-        original = _analyze._run_mca(instrs, mca_args, arch=arch,
-                                     cache_mode=_analyze._NoCacheMiss())
+        original = _analyze._run_mca(instrs, mca_args, arch=arch)
         if original is None:
             pytest.skip("llvm-mca returned None for the original run")
-        orig_retired, orig_cycles, orig_lp = original
+        orig_retired, orig_cycles, orig_li = original
 
         # Dump to a temp file using Dumper.
         dump_dir = str(tmp_path / "dump")
-        dumper = _analyze.Dumper(_analyze._NoCacheMiss(), dump_dir=dump_dir)
-        dumper.format_asm(instrs, arch)
+        dumper = _analyze.Dumper(dump_dir=dump_dir)
+        dumper.dump(instrs, _analyze._format_asm(instrs, arch), arch)
 
         # Locate the written file.
         start = instrs[0][0]
@@ -407,7 +376,7 @@ class TestRoundTrip:
         new_instrs, new_arch, new_start, new_end = analyze_str.load_str_file(dump_path)
         result = analyze_str.analyze_str(new_instrs, new_arch)
         assert result is not None, "analyze_str returned None"
-        new_retired, new_cycles, new_lp = result
+        new_retired, new_cycles, new_li = result
 
         assert new_start == start
         assert new_end == end
@@ -417,49 +386,6 @@ class TestRoundTrip:
         assert new_cycles == orig_cycles, (
             f"cycles mismatch: original={orig_cycles}, re-analysed={new_cycles}"
         )
-        assert abs(new_lp - orig_lp) < 1e-6, (
-            f"load_proportion mismatch: original={orig_lp}, re-analysed={new_lp}"
+        assert new_li == orig_li, (
+            f"load_instructions mismatch: original={orig_li}, re-analysed={new_li}"
         )
-
-
-class TestMainCli:
-    """Unit tests for analyze_str.main() CLI argument plumbing."""
-
-    def test_cache_miss_mode_early_passed_to_analyze_str(self, monkeypatch):
-        """main() passes --cache-miss-mode early to analyze_str_multi() as _EarlyCacheMiss."""
-        captured_modes = []
-
-        class _DummyArch:
-            mca_args = []
-
-        def fake_load(path):
-            return [(0x0, "nop", "")], _DummyArch(), 0x0, 0x0
-
-        def fake_multi(instrs, arch, mcpu="", cache_modes=None):
-            captured_modes.extend(cache_modes or [])
-            # Return (retired, load_instrs, [baseline_cycles, spec_cycles]).
-            return (100, 0, [103, 110])
-
-        monkeypatch.setattr(sys, "argv", [
-            "analyze_str.py",
-            "dummy.txt",
-            "200",        # cache-latency
-            "ipcm_10",    # one cache spec → triggers the per-spec path
-            "--cache-miss-mode",
-            "early",
-        ])
-        monkeypatch.setattr(os.path, "isfile", lambda p: True)
-        monkeypatch.setattr(analyze_str, "load_str_file", fake_load)
-        monkeypatch.setattr(analyze_str, "analyze_str_multi", fake_multi)
-
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            analyze_str.main()
-        output = buf.getvalue()
-
-        # Two modes: [_NoCacheMiss, _EarlyCacheMiss(10, 200)]
-        assert len(captured_modes) == 2
-        assert type(captured_modes[1]).__name__ == "_EarlyCacheMiss"
-        # CSV output: baseline=103 in 'cycles' column, spec=110 in 'cycles_0' column.
-        assert "cycles,cycles_0" in output
-        assert "103,110" in output

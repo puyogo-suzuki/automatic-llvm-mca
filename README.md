@@ -1,166 +1,70 @@
 # automatic-llvm-mca
-This automatically reports the estimated throughput for the given binary.
 
-## Requirements
+Estimate throughput for ELF binaries using `llvm-mca`.
 
-* **Python 3.8+**
-* **llvm-mca 21 or later** — versions prior to 21 do not support the
-  `--call-latency` flag, which is required for accurate cycle estimates on code
-  regions that contain CALL instructions.  On Ubuntu 24.04 (Noble), llvm-21 is
-  not in the default apt repositories; install it from the LLVM project's own
-  apt repository:
-  ```sh
-  wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-      | sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm-org.gpg
-  echo "deb [signed-by=/usr/share/keyrings/apt-llvm-org.gpg] \
-      https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
-      | sudo tee /etc/apt/sources.list.d/llvm-21.list
-  sudo apt-get update && sudo apt-get install -y llvm-21
-  ```
-* **objdump** (binutils) — used to disassemble the target ELF binary.
+## Procedure
+
+1.  Disassemble the ELF binary with `objdump`.
+2.  Decompose each function into loops and (for non-loop code) basic blocks.
+3.  Run `llvm-mca` on each region to obtain retired instructions and elapsed
+    cycles.
+4.  Print a CSV with start address, end address, retired instructions, load
+    instructions, and elapsed cycles for every region.
+
+For nested loops the outer loop (including the inner loop body) and the inner
+loop are reported separately.
+
+## Supported Architectures
+
+*   **x86 / x86-64**
+*   **AArch64** (64-bit ARM)
+*   **32-bit ARM**
+*   **RISC-V** (RV32IC, RV64IC)
 
 ## Usage
 
-```
-python3 analyze.py [--mcpu <cpu>] [--dump] <elf-binary> [<cache-latency> <cycles_0> <cycles_1> ...]
-```
-
-The program disassembles the ELF binary with `objdump`, splits each function
-into loops and basic blocks, runs `llvm-mca` on each region, and prints a CSV
-with the retired instructions, load instructions count, and cycles for every region:
-
-```
-start_address,end_address,retired_instructions,load_instructions,cycles[,cycles_0,cycles_1,...]
-0xSTART,0xEND,RETIRED,LOAD_INSTRUCTIONS,CYCLES[,CYCLES_0,CYCLES_1,...]
+```bash
+python3 analyze.py [--mcpu <cpu>] <elf-binary>
 ```
 
-`retired_instructions` is the total number of instructions retired across all
-llvm-mca iterations for the region.  `load_instructions` is the number of load
-instructions in the region (those that carry the `MayLoad` attribute).
-`cycles` is the base cycle count without cache-miss simulation.  Dividing
-`retired_instructions` by `cycles` gives the IPC estimate for the region.
+*   `<elf-binary>` — Path to the ELF binary to analyze.
+*   `--mcpu <cpu>` — (Optional) Specify a target CPU for `llvm-mca` (e.g.,
+    `cortex-a72`, `skylake`, `sifive-u74`). If omitted, the tool attempts to
+    auto-detect the host CPU (for x86) or uses a generic model.
 
-When cache metrics are specified, additional `cycles_N` columns are added,
-showing the cycle count with different cache-miss configurations.
+### Output format
 
-For nested loops the outer loop (including the inner body) and the inner loop
-are reported separately.
+The output is a CSV with the following columns:
 
-Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
+*   `start_address` — Hex address of the first instruction in the region.
+*   `end_address` — Hex address of the last instruction in the region.
+*   `retired_instructions` — Total number of instructions retired in the region
+    (simulated over 100 iterations by default).
+*   `load_instructions` — Total number of load instructions retired in the
+    region.
+*   `cycles` — Total simulated cycles for the region.
 
-### Cache-miss simulation (`analyze.py`)
+## Debugging / Dumping Assembly (`--dump`)
 
-Cache-miss simulation can be enabled by specifying positional arguments after
-the ELF binary path:
+The `--dump` flag writes the formatted assembly for every analyzed region to a
+`dump/` directory:
 
-```
-python3 analyze.py <elf-binary> <cache-latency> <cycles_0> [<cycles_1> ...]
-```
-
-The `<cache-latency>` argument (required when specifying any cycles metrics)
-sets the simulated cache-miss penalty in cycles.
-
-Each `<cycles_N>` argument specifies a cache-miss configuration and must be one of:
-
-* `cm_<rate>` — Cache-miss **rate** per retired **load** instruction.  Values
-  between 0 and 1 represent a miss probability (e.g. `cm_0.1` means 10 % of
-  loads miss); values greater than 1 are also valid (e.g. `cm_1.5` means each
-  load causes an average of 1.5 misses, as can happen in a multi-level cache
-  hierarchy).
-
-* `ipcm_<n>` — **Instructions** (all instructions) **per cache miss**.  Use
-  `ipcm_inf` for no cache-miss simulation.  For example, `ipcm_50` means one
-  cache miss occurs for every 50 retired instructions.
-
-* `lipcm_<n>` — **Load instructions per cache miss**.  Use `lipcm_inf` for no
-  cache-miss simulation.  For example, `lipcm_10` means one cache miss occurs
-  for every 10 load instructions.  This is the reciprocal of `cm_<rate>`.
-
-* `ca_<c>` — **Constant always** latency.  Every load instruction receives a
-  fixed latency of `<c>` cycles (a positive integer), regardless of the
-  `<cache-latency>` argument (which is ignored for this spec).  The block is
-  **not** duplicated and llvm-mca runs its own default iterations.  For
-  example, `ca_50` makes every load take exactly 50 cycles.
-
-Example:
-
-```
-python3 analyze.py mybinary 200 cm_0.1 ipcm_50 lipcm_10
+```bash
+python3 analyze.py --dump <elf-binary>
 ```
 
-This will output:
+Files are named `{start}_{end}.{arch}.txt`. These files contain the exact
+assembly passed to `llvm-mca`, including labels and `LLVM-MCA-BEGIN` /
+`LLVM-MCA-END` markers (simulated by our runner).
 
-* `cycles` — base cycles with no cache misses
-* `cycles_0` — cycles with cache-miss rate 0.1 (10 % of loads miss) at 200 cycles per miss
-* `cycles_1` — cycles with one cache miss per 50 instructions at 200 cycles per miss
-* `cycles_2` — cycles with one cache miss per 10 load instructions at 200 cycles per miss
+## Analysis from dump files (`analyze_str.py`)
 
-The `--cache-miss-mode` flag (default: `stochastic`) selects the simulation mode
-(`stochastic`, `average`, or `early`):
+You can run `llvm-mca` on a previously dumped assembly file:
 
-* `stochastic`: the code block is repeated 100 times and load instructions
-  receive the full `<cache-latency>` penalty according to the effective miss
-  fraction; llvm-mca is run with `-iterations=1`.
-* `average`: all load instructions receive a fixed latency derived from the
-  miss fraction multiplied by `<cache-latency>` cycles.
-* `early`: like `stochastic` but all cache misses are placed on the first
-  loads in the repeated block rather than distributed uniformly.
-
-### Dump mode
-
-`analyze.py --dump` writes the formatted assembly for each analysed region to a
-text file in a `dump/` directory.  Each file is named
-`{start_address}_{end_address}.{arch}.txt`:
-
-```
-python3 analyze.py --dump [--mcpu <cpu>] <elf-binary> [<cache-latency> <cycles_spec>...]
+```bash
+python3 analyze_str.py [--mcpu <cpu>] <textfile>
 ```
 
-### Re-analysing a dump file (`analyze_str.py`)
-
-`analyze_str.py` reads a single dump file produced by `analyze.py --dump` and
-runs `llvm-mca` on it, printing the same CSV format as `analyze.py`:
-
-```
-python3 analyze_str.py [--mcpu <cpu>] <textfile> [<cache-latency> <cycles_spec>...]
-```
-
-The textfile must follow the `{start}_{end}.{arch}.txt` naming convention (e.g.
-`dump/1000_1080.x86.txt`).  The architecture and the start/end addresses are
-inferred from the filename.
-
-Optional cache-miss simulation can be applied to the dump on the fly:
-
-```
-python3 analyze_str.py dump/1000_1080.x86.txt 200 cm_0.1 ipcm_50 lipcm_10
-```
-
-* `--mcpu` overrides the default CPU inferred from the filename.
-* Cache-miss specifications (`cm_`, `ipcm_`, `lipcm_`) work the same as in
-  `analyze.py`.
-* `--cache-miss-mode` (default: `stochastic`) selects the simulation mode
-  (`stochastic`, `average`, or `early`); see the cache-miss simulation section
-  above for a full description.
-
-## How llvm-mca handles jump instructions
-
-`llvm-mca` models throughput by simulating a **fixed instruction stream**
-(the given code region) that repeats for a configurable number of iterations
-(default: 100).  It does **not** simulate actual branch prediction or
-speculative execution.
-
-* **All instructions in the region are always executed** on every iteration,
-  regardless of whether a conditional branch would be taken or not in real
-  execution.
-* A branch instruction (e.g. `jl`, `b.ne`, `bne`) contributes to throughput
-  estimation only through its **resource consumption** — the execution unit(s)
-  it occupies and the cycles it takes.  The branch outcome itself is ignored.
-* Consequently, llvm-mca does **not** model branch misprediction penalties.
-* For a loop body `analyze.py` includes the loop's back-edge branch in the
-  region fed to llvm-mca, so its resource cost is counted once per iteration.
-* For a basic block that ends with a conditional branch (but is not a loop),
-  the branch is included in the region as well.
-
-This means the reported IPC is a **best-case throughput** figure: it reflects
-how fast the CPU can issue instructions assuming perfect branch prediction and
-no misprediction bubbles.
+This is useful for manually inspecting the assembly or for re-running the
+simulation with a different CPU model without needing the original ELF binary.
+The output format is the same as `analyze.py`.
