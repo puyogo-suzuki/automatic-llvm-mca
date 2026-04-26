@@ -309,33 +309,46 @@ def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "n
     
     total_mlp = 0.0
     nonzero_count = 0
-    for i in range(n):
-        mlp_i = is_load[i]
-        
-        if dependency == "none":
-            for j in range(i + 1, min(i + decode_width, n)):
-                mlp_i += is_load[j]
-        else:
-            deps = [1] * n
-            for j in range(i + 1, min(i + decode_width, n)):
-                nj_in, _ = io_regs[j]
-                has_dep = False
-                for m in range(i, j):
-                    _, mm_out = io_regs[m]
-                    if nj_in & mm_out:
-                        has_dep = True
-                        break
-                        
-                if has_dep:
-                    deps[j] = 0
-                    if dependency == "io":
-                        break # Cannot execute futrher instructions.
-                mlp_i += deps[j] * is_load[j]
-                
+    if dependency == "io":
+      for i in range(n):
+        if not is_load[i]:
+          continue
+        _, outputs_i = io_regs[i]
+        # distance to the first instruction that reads the destination register
+        dist = n - 1 - i
+        for j in range(i + 1, n):
+          inputs_j, _ = io_regs[j]
+          if outputs_i & inputs_j:
+            dist = j - i
+            break
+        mlp_i = min(decode_width, dist)
         if mlp_i > 0:
-            total_mlp += mlp_i
-            nonzero_count += 1
-            
+          total_mlp += mlp_i
+          nonzero_count += 1
+    elif dependency == "none":
+      for i in range(n):
+        mlp_i = is_load[i]
+        for j in range(i + 1, min(i + decode_width, n)):
+          mlp_i += is_load[j]
+        if mlp_i > 0:
+          total_mlp += mlp_i
+          nonzero_count += 1
+    else:
+      for i in range(n):
+        mlp_i = is_load[i]
+        for j in range(i + 1, min(i + decode_width, n)):
+          nj_in, _ = io_regs[j]
+          has_dep = False
+          for m in range(i, j):
+            _, mm_out = io_regs[m]
+            if nj_in & mm_out:
+              has_dep = True
+              break # i.e., leave out fomr the outer loop
+          if not has_dep:
+            mlp_i += is_load[j]
+        if mlp_i > 0:
+          total_mlp += mlp_i
+          nonzero_count += 1
     if nonzero_count == 0:
         return 1.0
     return total_mlp / nonzero_count
@@ -506,7 +519,12 @@ def main():
         "--dependency",
         choices=["none", "io", "ooo"],
         default="none",
-        help="Dependency tracking mode for MLP estimation (default: none)."
+        help=(
+            "Dependency tracking mode for MLP estimation (default: none). "
+            "none: no dependency tracking; "
+            "io: in-order (distance to first use); "
+            "ooo: out-of-order (independent loads in window)."
+        )
     )
     args = parser.parse_args()
 

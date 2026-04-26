@@ -33,7 +33,10 @@ python3 analyze.py [--mcpu <cpu>] [--decode-width <W>] [--dependency <mode>] <el
     auto-detect the host CPU (for x86) or uses a generic model.
 *   `--decode-width <W>` — (Optional) Specify the decode width for MLP estimation
     (default is 4).
-*   `--dependency <mode>` — (Optional) Specify the dependency tracking mode for MLP estimation: `none` (default), `io` (In-Order), or `ooo` (Out-of-Order).
+*   `--dependency <mode>` — (Optional) Specify the dependency tracking mode for MLP estimation:
+    *   `none` (default): No dependency tracking.
+    *   `io`: In-Order model. For each load, MLP is $min(W, distance)$ where $distance$ is instructions to first use.
+    *   `ooo`: Out-of-Order model. Considers independent loads in the instruction window.
 
 ### Output format
 

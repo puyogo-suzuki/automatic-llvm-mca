@@ -242,7 +242,12 @@ def main():
         "--dependency",
         choices=["none", "io", "ooo"],
         default="none",
-        help="Dependency tracking mode for MLP estimation (default: none)."
+        help=(
+            "Dependency tracking mode for MLP estimation (default: none). "
+            "none: no dependency tracking; "
+            "io: in-order (distance to first use); "
+            "ooo: out-of-order (independent loads in window)."
+        )
     )
     args = parser.parse_args()
 
