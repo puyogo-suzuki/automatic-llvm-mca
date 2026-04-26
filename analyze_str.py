@@ -169,7 +169,7 @@ def load_str_file(path: str):
     return instrs, arch, start, end
 
 
-def analyze_str(instrs, arch: ArchBase, mcpu: str = "", decode_width: int = 4):
+def analyze_str(instrs, arch: ArchBase, mcpu: str = "", decode_width: int = 4, dependency: str = "none"):
     """Run llvm-mca on pre-loaded instruction tuples.
 
     Parameters
@@ -184,6 +184,8 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "", decode_width: int = 4):
         architecture and is forwarded to llvm-mca.
     decode_width:
         The decode width used to compute Memory Level Parallelism.
+    dependency:
+        Dependency tracking mode for MLP estimation.
 
     Returns
     -------
@@ -200,7 +202,7 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "", decode_width: int = 4):
         return None
         
     retired, cycles, load_instrs = result
-    mlp = _compute_mlp(instrs, decode_width, arch)
+    mlp = _compute_mlp(instrs, decode_width, arch, dependency)
     return retired, cycles, load_instrs, mlp
 
 def main():
@@ -236,6 +238,12 @@ def main():
         metavar="W",
         help="The decode width used to compute Memory Level Parallelism (default: 4)."
     )
+    parser.add_argument(
+        "--dependency",
+        choices=["none", "io", "ooo"],
+        default="none",
+        help="Dependency tracking mode for MLP estimation (default: none)."
+    )
     args = parser.parse_args()
 
     if args.decode_width < 1:
@@ -247,7 +255,7 @@ def main():
     instrs, arch, start, end = load_str_file(args.textfile)
 
     # Single analysis pass.
-    result = analyze_str(instrs, arch, args.mcpu, args.decode_width)
+    result = analyze_str(instrs, arch, args.mcpu, args.decode_width, args.dependency)
     if result is None:
         return
     retired, cycles, load_instrs, mlp = result

@@ -367,6 +367,17 @@ class TestAMD64:
 
     @_NEED_MCA
     @_NEED_X86_GCC
+    def test_dependency_modes(self, x86_obj):
+        """Analyze runs successfully with different dependency modes."""
+        res_none = list(analyze.analyze(x86_obj, dependency="none"))
+        res_io = list(analyze.analyze(x86_obj, dependency="io"))
+        res_ooo = list(analyze.analyze(x86_obj, dependency="ooo"))
+        assert res_none
+        assert res_io
+        assert res_ooo
+
+    @_NEED_MCA
+    @_NEED_X86_GCC
     def test_ipc_positive(self, x86_obj):
         """Retired instructions and elapsed cycles for x86-64 are strictly positive."""
         results = list(analyze.analyze(x86_obj))

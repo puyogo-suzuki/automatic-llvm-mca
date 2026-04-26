@@ -299,23 +299,46 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
     return sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)) * 100
 
 
-def _compute_mlp(instrs, decode_width: int, arch: ArchBase) -> float:
+def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "none") -> float:
     """Compute the Memory Level Parallelism (MLP) for a block of instructions."""
     if not instrs:
-        return 0.0
+        return 1.0
     n = len(instrs)
     is_load = [1 if arch.is_load_instruction(mn, ops) else 0 for _, mn, ops in instrs]
+    io_regs = [arch.get_io_registers(mn, ops) for _, mn, ops in instrs]
     
     total_mlp = 0.0
-    load_available = 0
-    for i in range(n + 1):
-        mlp_i = max(1, sum(is_load[j] for j in range(i, min(i + decode_width, n))))
+    nonzero_count = 0
+    for i in range(n):
+        mlp_i = is_load[i]
+        
+        if dependency == "none":
+            for j in range(i + 1, min(i + decode_width, n)):
+                mlp_i += is_load[j]
+        else:
+            deps = [1] * n
+            for j in range(i + 1, min(i + decode_width, n)):
+                nj_in, _ = io_regs[j]
+                has_dep = False
+                for m in range(i, j):
+                    _, mm_out = io_regs[m]
+                    if nj_in & mm_out:
+                        has_dep = True
+                        break
+                        
+                if has_dep:
+                    deps[j] = 0
+                    if dependency == "io":
+                        break # Cannot execute futrher instructions.
+                mlp_i += deps[j] * is_load[j]
+                
         if mlp_i > 0:
             total_mlp += mlp_i
-            load_available += 1
-    if load_available == 0:
+            nonzero_count += 1
+            
+    if nonzero_count == 0:
         return 1.0
-    return total_mlp / load_available
+    return total_mlp / nonzero_count
 
 
 def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
@@ -361,7 +384,7 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
 # Per-function analysis
 # ---------------------------------------------------------------------------
 
-def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper = None, decode_width: int = 4):
+def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper = None, decode_width: int = 4, dependency: str = "none"):
     """Analyse one function's instructions.
 
     Yields ``(start_addr, end_addr, retired, cycles, load_instructions, mlp, kind)``
@@ -378,7 +401,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper
         result = _run_mca(region, mca_args, arch=arch)
         if result is not None:
             retired, cycles, load_instrs = result
-            mlp = _compute_mlp(region, decode_width, arch)
+            mlp = _compute_mlp(region, decode_width, arch, dependency)
             if dumper:
                 dumper.dump(region, _format_asm(region, arch), arch)
             yield region[0][0], region[-1][0], retired, cycles, load_instrs, mlp, "loop"
@@ -393,7 +416,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper
             result = _run_mca(bb, mca_args, arch=arch)
             if result is not None:
                 retired, cycles, load_instrs = result
-                mlp = _compute_mlp(bb, decode_width, arch)
+                mlp = _compute_mlp(bb, decode_width, arch, dependency)
                 if dumper:
                     dumper.dump(bb, _format_asm(bb, arch), arch)
                 yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, mlp, "block"
@@ -402,7 +425,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper
         result = _run_mca(bb, mca_args, arch=arch)
         if result is not None:
             retired, cycles, load_instrs = result
-            mlp = _compute_mlp(bb, decode_width, arch)
+            mlp = _compute_mlp(bb, decode_width, arch, dependency)
             if dumper:
                 dumper.dump(bb, _format_asm(bb, arch), arch)
             yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, mlp, "block"
@@ -412,7 +435,7 @@ def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
-def analyze(binary: str, mcpu: str = "", dump: bool = False, decode_width: int = 4):
+def analyze(binary: str, mcpu: str = "", dump: bool = False, decode_width: int = 4, dependency: str = "none"):
     """Analyse *binary* and yield ``(start, end, retired, load_instructions, cycles, mlp)`` tuples.
 
     Parameters
@@ -438,7 +461,7 @@ def analyze(binary: str, mcpu: str = "", dump: bool = False, decode_width: int =
 
     for _func_name, instrs in disassemble(binary, arch):
         for start, end, retired, cycles, load_instrs, mlp, _kind in _analyze_function(
-                instrs, mca_args, arch, dumper, decode_width):
+                instrs, mca_args, arch, dumper, decode_width, dependency):
             yield start, end, retired, load_instrs, cycles, mlp
 
 
@@ -479,6 +502,12 @@ def main():
         metavar="W",
         help="The decode width used to compute Memory Level Parallelism (default: 4)."
     )
+    parser.add_argument(
+        "--dependency",
+        choices=["none", "io", "ooo"],
+        default="none",
+        help="Dependency tracking mode for MLP estimation (default: none)."
+    )
     args = parser.parse_args()
 
     if args.decode_width < 1:
@@ -493,6 +522,7 @@ def main():
         mcpu=args.mcpu,
         dump=args.dump,
         decode_width=args.decode_width,
+        dependency=args.dependency,
     ))
 
     # Deduplicate by (start, end), keeping the first occurrence.

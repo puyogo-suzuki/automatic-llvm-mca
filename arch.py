@@ -175,6 +175,10 @@ class ArchBase:
         """
         return _parse_branch_target_candidates(operands.strip())
 
+    def get_io_registers(self, mnemonic: str, operands: str) -> tuple[set[str], set[str]]:
+        """Return (inputs, outputs) set of registers for dependency analysis."""
+        return set(), set()
+
     def strip_asm_comment(self, text: str) -> str:
         """Strip an inline assembly comment from a disassembly text line.
 
@@ -238,6 +242,30 @@ class X86Arch(ArchBase):
             return None
         return _parse_branch_target_candidates(op)
 
+    def get_io_registers(self, mnemonic: str, operands: str) -> tuple[set[str], set[str]]:
+        tokens = re.findall(r'%[a-z0-9]+', operands.lower())
+        if not tokens:
+            return set(), set()
+        
+        inputs = set(tokens)
+        outputs = set()
+        m = mnemonic.lower()
+        
+        if m.startswith('j') or m.startswith('loop') or m == 'ret' or m.startswith('cmp') or m.startswith('test') or m.startswith('push'):
+            pass
+        elif m.startswith('pop'):
+            outputs.add(tokens[0])
+            inputs.clear()
+        else:
+            m_out = re.search(r'(%[a-z0-9]+)\s*$', operands.lower())
+            if m_out:
+                out_reg = m_out.group(1)
+                outputs.add(out_reg)
+                if m.startswith('mov') or m.startswith('lea'):
+                    if tokens.count(out_reg) == 1:
+                        inputs.remove(out_reg)
+        return inputs, outputs
+
 
 class AArch64Arch(ArchBase):
     """AArch64 (64-bit ARM) architecture."""
@@ -261,6 +289,26 @@ class AArch64Arch(ArchBase):
 
     def is_load_instruction(self, mnemonic: str, operands: str) -> bool:
         return mnemonic.lower().startswith("ld")
+
+    def get_io_registers(self, mnemonic: str, operands: str) -> tuple[set[str], set[str]]:
+        tokens = re.findall(r'\b[a-z0-9]+\b', operands.lower())
+        reg_tokens = [r for r in tokens if re.match(r'^[wxvqd][0-9]+$|^sp$|^lr$|^fp$|^xzr$|^wzr$', r)]
+        
+        if not reg_tokens:
+            return set(), set()
+            
+        inputs = set(reg_tokens)
+        outputs = set()
+        m = mnemonic.lower()
+        
+        if m.startswith('b') or m.startswith('cbnz') or m.startswith('cbz') or m.startswith('tbz') or m.startswith('tbnz') or m.startswith('st') or m.startswith('cmp') or m == 'ret':
+            pass
+        else:
+            outputs.add(reg_tokens[0])
+            if reg_tokens.count(reg_tokens[0]) == 1:
+                inputs.remove(reg_tokens[0])
+                
+        return inputs, outputs
 
     def strip_asm_comment(self, text: str) -> str:
         # AArch64 uses # for immediate operands (e.g. #0x1), so only
@@ -320,6 +368,29 @@ class ARMArch(ArchBase):
         m = mnemonic.lower()
         return m.startswith("ld") or m == "pop"
 
+    def get_io_registers(self, mnemonic: str, operands: str) -> tuple[set[str], set[str]]:
+        tokens = re.findall(r'\b[a-z0-9]+\b', operands.lower())
+        reg_tokens = [r for r in tokens if re.match(r'^r[0-9]+$|^sp$|^lr$|^pc$', r)]
+        
+        if not reg_tokens:
+            return set(), set()
+            
+        inputs = set(reg_tokens)
+        outputs = set()
+        m = mnemonic.lower()
+        
+        if m.startswith('b') or m.startswith('cmp') or m.startswith('tst') or m.startswith('st') or m.startswith('push'):
+            pass
+        elif m.startswith('pop'):
+            outputs = set(reg_tokens)
+            inputs.clear()
+        else:
+            outputs.add(reg_tokens[0])
+            if reg_tokens.count(reg_tokens[0]) == 1:
+                inputs.remove(reg_tokens[0])
+                
+        return inputs, outputs
+
 
 class RISCVArch(ArchBase):
     """RISC-V architecture (RV32 and RV64)."""
@@ -356,6 +427,26 @@ class RISCVArch(ArchBase):
         if m in ("jr", "jalr") and "," not in op:
             return None
         return _parse_branch_target_candidates(op)
+
+    def get_io_registers(self, mnemonic: str, operands: str) -> tuple[set[str], set[str]]:
+        tokens = re.findall(r'\b[a-z0-9]+\b', operands.lower())
+        reg_tokens = [r for r in tokens if re.match(r'^[xafts][0-9]+$|^zero$|^ra$|^sp$|^gp$|^tp$|^fp$', r)]
+        
+        if not reg_tokens:
+            return set(), set()
+            
+        inputs = set(reg_tokens)
+        outputs = set()
+        m = mnemonic.lower()
+        
+        if m in ('sb', 'sh', 'sw', 'sd', 'j', 'jr', 'jal', 'jalr', 'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu', 'beqz', 'bnez', 'blez', 'bgez', 'bltz', 'bgtz', 'bgt', 'ble', 'bgtu', 'bleu', 'call', 'tail', 'ret'):
+            pass
+        else:
+            outputs.add(reg_tokens[0])
+            if reg_tokens.count(reg_tokens[0]) == 1:
+                inputs.remove(reg_tokens[0])
+                
+        return inputs, outputs
 
 
 # ---------------------------------------------------------------------------

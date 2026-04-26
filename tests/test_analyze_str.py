@@ -274,6 +274,18 @@ class TestAnalyzeStrIntegration:
         assert result is not None, "Expected a result"
 
     @_NEED_MCA
+    def test_dependency_modes(self, tmp_path):
+        """analyze_str() runs successfully with different dependency modes."""
+        path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)
+        instrs, arch, start, end = analyze_str.load_str_file(path)
+        res_none = analyze_str.analyze_str(instrs, arch, dependency="none")
+        res_io = analyze_str.analyze_str(instrs, arch, dependency="io")
+        res_ooo = analyze_str.analyze_str(instrs, arch, dependency="ooo")
+        assert res_none is not None
+        assert res_io is not None
+        assert res_ooo is not None
+
+    @_NEED_MCA
     def test_ipc_positive(self, tmp_path):
         """Retired instructions and elapsed cycles from the basic block dump are strictly positive."""
         path = _write_dump_file(tmp_path, "0_8.x86.txt", _X86_BASIC_BLOCK_DUMP)

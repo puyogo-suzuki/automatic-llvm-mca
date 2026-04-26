@@ -24,7 +24,7 @@ loop are reported separately.
 ## Usage
 
 ```bash
-python3 analyze.py [--mcpu <cpu>] [--decode-width <W>] <elf-binary>
+python3 analyze.py [--mcpu <cpu>] [--decode-width <W>] [--dependency <mode>] <elf-binary>
 ```
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
@@ -33,6 +33,7 @@ python3 analyze.py [--mcpu <cpu>] [--decode-width <W>] <elf-binary>
     auto-detect the host CPU (for x86) or uses a generic model.
 *   `--decode-width <W>` — (Optional) Specify the decode width for MLP estimation
     (default is 4).
+*   `--dependency <mode>` — (Optional) Specify the dependency tracking mode for MLP estimation: `none` (default), `io` (In-Order), or `ooo` (Out-of-Order).
 
 ### Output format
 
