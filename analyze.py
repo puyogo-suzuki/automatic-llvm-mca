@@ -315,16 +315,14 @@ def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "n
           continue
         _, outputs_i = io_regs[i]
         # distance to the first instruction that reads the destination register
-        dist = n - 1 - i
+        mlp_i = decode_width
         for j in range(i + 1, n):
           inputs_j, _ = io_regs[j]
           if outputs_i & inputs_j:
-            dist = j - i
+            mlp_i = j - i
             break
-        mlp_i = min(decode_width, dist)
-        if mlp_i > 0:
-          total_mlp += mlp_i
-          nonzero_count += 1
+        total_mlp += mlp_i
+        nonzero_count += 1
     elif dependency == "none":
       for i in range(n):
         mlp_i = is_load[i]
