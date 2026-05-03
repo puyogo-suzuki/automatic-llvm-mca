@@ -300,55 +300,84 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
 
 
 def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "none") -> float:
-    """Compute the Memory Level Parallelism (MLP) for a block of instructions."""
+    """Compute the Memory Level Parallelism (MLP) and independent load ratio for a block of instructions."""
     if not instrs:
         return 1.0
+
     n = len(instrs)
     is_load = [1 if arch.is_load_instruction(mn, ops) else 0 for _, mn, ops in instrs]
     io_regs = [arch.get_io_registers(mn, ops) for _, mn, ops in instrs]
-    
-    total_mlp = 0.0
-    nonzero_count = 0
-    if dependency == "io":
-      for i in range(n):
-        if not is_load[i]:
-          continue
-        _, outputs_i = io_regs[i]
-        # distance to the first instruction that reads the destination register
-        mlp_i = decode_width
-        for j in range(i + 1, n):
-          inputs_j, _ = io_regs[j]
-          if outputs_i & inputs_j:
-            mlp_i = j - i
-            break
-        total_mlp += mlp_i
-        nonzero_count += 1
-    elif dependency == "none":
-      for i in range(n):
-        mlp_i = is_load[i]
-        for j in range(i + 1, min(i + decode_width, n)):
-          mlp_i += is_load[j]
-        if mlp_i > 0:
-          total_mlp += mlp_i
-          nonzero_count += 1
-    else:
-      for i in range(n):
-        mlp_i = is_load[i]
-        for j in range(i + 1, min(i + decode_width, n)):
-          nj_in, _ = io_regs[j]
-          has_dep = False
-          for m in range(i, j):
-            _, mm_out = io_regs[m]
-            if nj_in & mm_out:
-              has_dep = True
-              break # i.e., leave out fomr the outer loop
-          if not has_dep:
-            mlp_i += is_load[j]
-        if mlp_i > 0:
-          total_mlp += mlp_i
-          nonzero_count += 1
-    if nonzero_count == 0:
+
+    load_indices = [i for i, load in enumerate(is_load) if load]
+    if not load_indices:
         return 1.0
+
+    def _window_end(i: int, width: int) -> int:
+        return min(n, i + max(1, width))
+
+    def _window_loads(i: int, end: int) -> int:
+        return sum(is_load[i:end])
+
+    def _depends_on_prior(j: int, prior_start: int) -> bool:
+        inputs_j, _ = io_regs[j]
+        for m in range(prior_start, j):
+            _, outputs_m = io_regs[m]
+            if inputs_j & outputs_m:
+                return True
+        return False
+
+
+    def _io_distance(i: int) -> int:
+        _, outputs_i = io_regs[i]
+        distance = decode_width
+        for j in range(i + 1, n):
+            inputs_j, _ = io_regs[j]
+            if outputs_i & inputs_j:
+                distance = j - i
+                break
+        return distance
+
+    def _io_independent_loads(i: int, end: int) -> int:
+        indep_loads = 0
+        has_stall = False
+        for j in range(i, end):
+            if j == i:
+                indep_loads += is_load[j]
+                continue
+            if not has_stall and _depends_on_prior(j, i):
+                has_stall = True
+            if not has_stall and is_load[j]:
+                indep_loads += 1
+        return indep_loads
+
+    def _ooo_independent_loads(i: int, end: int) -> int:
+        indep_loads = 0
+        for j in range(i, end):
+            if is_load[j] and (j == i or not _depends_on_prior(j, i)):
+                indep_loads += 1
+        return indep_loads
+
+    total_mlp = 0.0
+
+    if dependency == "io":
+        for i in load_indices:
+            distance = _io_distance(i)
+            total_mlp += distance
+            end = _window_end(i, distance)
+            window_loads = _window_loads(i, end)
+            indep_loads = _io_independent_loads(i, end)
+    elif dependency == "none":
+        for i in load_indices:
+            end = _window_end(i, decode_width)
+            total_mlp += _window_loads(i, end)
+    else:  # ooo
+        for i in load_indices:
+            end = _window_end(i, decode_width)
+            window_loads = _window_loads(i, end)
+            indep_loads = _ooo_independent_loads(i, end)
+            total_mlp += indep_loads
+
+    nonzero_count = len(load_indices)
     return total_mlp / nonzero_count
 
 
@@ -398,8 +427,9 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
 def _analyze_function(instrs, mca_args=(), arch: ArchBase = None, dumper: Dumper = None, decode_width: int = 4, dependency: str = "none"):
     """Analyse one function's instructions.
 
-    Yields ``(start_addr, end_addr, retired, cycles, load_instructions, mlp, kind)``
-    tuples for every loop and every basic block that is not part of a loop.
+    Yields ``(start_addr, end_addr, retired, cycles, load_instructions, mlp,
+    kind)`` tuples for every loop and every basic block that is not
+    part of a loop.
     """
     if arch is None:
         arch = X86Arch()

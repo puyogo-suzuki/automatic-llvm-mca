@@ -7,7 +7,7 @@ same CSV output as ``analyze.py``.
 
 Usage::
 
-    python3 analyze_str.py [--mcpu <cpu>] <textfile>
+    python3 analyze_str.py [--mcpu <cpu>] [--decode-width <W>] [--dependency <mode>] <textfile>
 """
 
 import argparse
