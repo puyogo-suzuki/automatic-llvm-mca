@@ -351,6 +351,82 @@ class TestFormatAsm:
         )
 
 
+class TestComputeMLP:
+    """Unit tests for loop-aware MLP computation."""
+
+    def test_enable_loop_wraps_load_window(self):
+        """With enable_loop=True, the window wraps from tail to head."""
+        arch = analyze.X86Arch()
+        instrs = [
+            (0x0, "movq", "(%rdi), %rax"),   # load
+            (0x4, "addq", "%rax, %rcx"),
+            (0x8, "movq", "(%rsi), %rbx"),   # load (tail)
+        ]
+
+        no_loop = analyze._compute_mlp(
+            instrs, decode_width=2, arch=arch, dependency="none", enable_loop=False
+        )
+        looped = analyze._compute_mlp(
+            instrs, decode_width=2, arch=arch, dependency="none", enable_loop=True
+        )
+
+        assert no_loop == 1.0
+        assert looped == 1.5
+
+    def test_enable_loop_wraps_io_dependency_distance(self):
+        """With enable_loop=True, io dependency search wraps to block head."""
+        arch = analyze.X86Arch()
+        instrs = [
+            (0x0, "addq", "%rbx, %rax"),      # consumes %rbx at loop head
+            (0x4, "addq", "%rax, %rcx"),
+            (0x8, "movq", "(%rsi), %rbx"),    # load produces %rbx at tail
+        ]
+
+        no_loop = analyze._compute_mlp(
+            instrs, decode_width=4, arch=arch, dependency="io", enable_loop=False
+        )
+        looped = analyze._compute_mlp(
+            instrs, decode_width=4, arch=arch, dependency="io", enable_loop=True
+        )
+
+        assert no_loop == 1.0
+        assert looped == 1.0
+
+    def test_io_allows_loads_until_first_use_barrier(self):
+        """io mode counts loads issued before the first use of anchor-load output."""
+        arch = analyze.X86Arch()
+        instrs = [
+            (0x0, "movq", "(%rdi), %rax"),  # anchor load
+            (0x4, "movq", "(%rsi), %rbx"),  # independent load before first use
+            (0x8, "addq", "$1, %rcx"),
+            (0xc, "addq", "%rax, %rdx"),    # first use of anchor output -> barrier
+            (0x10, "movq", "(%r8), %r9"),   # after barrier, not counted for anchor
+        ]
+
+        mlp = analyze._compute_mlp(
+            instrs, decode_width=5, arch=arch, dependency="io", enable_loop=False
+        )
+
+        assert mlp == 5.0 / 3.0
+
+    def test_io_stops_on_use_of_any_prior_issued_load(self):
+        """io mode stops when an instruction uses any issued load output."""
+        arch = analyze.X86Arch()
+        instrs = [
+            (0x0, "movq", "(%rdi), %rax"),  # load L1
+            (0x4, "movq", "(%rsi), %rbx"),  # load L2
+            (0x8, "addq", "%rbx, %rcx"),    # uses L2 output -> barrier
+            (0xc, "movq", "(%r8), %r9"),    # should not be counted for L1
+            (0x10, "addq", "%rax, %rdx"),   # later use of L1 output
+        ]
+
+        mlp = analyze._compute_mlp(
+            instrs, decode_width=5, arch=arch, dependency="io", enable_loop=False
+        )
+
+        assert mlp == 4.0 / 3.0
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — AMD64 (x86-64)
 # ---------------------------------------------------------------------------
