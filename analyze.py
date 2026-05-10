@@ -366,9 +366,10 @@ def _compute_mlp(
             return []
         first_load_idx = seq[first_load_pos]
         return [
-            j
-            for j in seq
-            if is_load[j] and not _depends_on_first_load(seq, first_load_idx, first_load_pos, j)
+            instr_idx
+            for instr_idx in seq
+            if is_load[instr_idx]
+            and not _depends_on_first_load(seq, first_load_idx, first_load_pos, instr_idx)
         ]
 
     def _window_loads(i: int, width: int) -> tuple[int, list[int]]:
@@ -421,8 +422,8 @@ def _compute_mlp(
         mlp_vals = {i: 1.0 for i in load_indices}
         for i in load_indices:
             mlp, related_loads = mlp_func(i, window_width)
-            for j in related_loads:
-                mlp_vals[j] = max(mlp_vals[j], mlp)
+            for load_idx in related_loads:
+                mlp_vals[load_idx] = max(mlp_vals[load_idx], mlp)
         total_mlp = sum(mlp_vals[i] for i in load_indices)
 
     nonzero_count = len(load_indices)
