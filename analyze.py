@@ -345,31 +345,36 @@ def _compute_mlp(
     def _depends_on_first_load(
         seq: list[int],
         first_load_idx: int,
-        first_load_pos: int,
-        target_idx: int,
+        first_load_window_pos: int,
+        target_window_pos: int,
     ) -> bool:
-        if first_load_idx == target_idx:
+        if first_load_window_pos == target_window_pos:
             return False
         _, tainted = io_regs[first_load_idx]
-        for idx in seq[first_load_pos + 1:]:
+        for window_pos, idx in enumerate(seq[first_load_window_pos + 1:], first_load_window_pos + 1):
             inputs_i, outputs_i = io_regs[idx]
             reads_tainted = bool(inputs_i & tainted)
-            if idx == target_idx:
+            if window_pos == target_window_pos:
                 return reads_tainted
             if reads_tainted:
                 tainted |= outputs_i
         return False
 
     def _related_loads_in_window(seq: list[int]) -> list[int]:
-        first_load_pos = next((pos for pos, idx in enumerate(seq) if is_load[idx]), None)
-        if first_load_pos is None:
+        first_load_window_pos = next((pos for pos, idx in enumerate(seq) if is_load[idx]), None)
+        if first_load_window_pos is None:
             return []
-        first_load_idx = seq[first_load_pos]
+        first_load_idx = seq[first_load_window_pos]
         return [
             instr_idx
-            for instr_idx in seq
+            for target_window_pos, instr_idx in enumerate(seq)
             if is_load[instr_idx]
-            and not _depends_on_first_load(seq, first_load_idx, first_load_pos, instr_idx)
+            and not _depends_on_first_load(
+                seq,
+                first_load_idx,
+                first_load_window_pos,
+                target_window_pos,
+            )
         ]
 
     def _window_loads(i: int, width: int) -> tuple[int, list[int]]:
