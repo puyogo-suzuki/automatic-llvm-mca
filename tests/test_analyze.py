@@ -438,7 +438,7 @@ class TestComputeMLP:
 
     def test_max_containing_boosts_tail_load_for_two_independent_loads(self):
         """max-containing removes end-of-block underestimation for independent loads."""
-        arch = self._MockArch({
+        arch = self._MockArch(io_map={
             ("load", "l1"): (0, 0b0001),
             ("load", "l2"): (0, 0b0010),
         })
@@ -467,7 +467,7 @@ class TestComputeMLP:
 
     def test_max_containing_excludes_transitive_dependency_from_first_load(self):
         """max-containing excludes windows where the target depends on the first load."""
-        arch = self._MockArch({
+        arch = self._MockArch(io_map={
             ("load", "l1"): (0, 0b0001),
             ("alu", "bridge"): (0b0001, 0b0010),
             ("load", "l2"): (0b0010, 0b0100),

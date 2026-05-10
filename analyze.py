@@ -325,10 +325,10 @@ def _compute_mlp(
     """
     if window_width is None:
         window_width = decode_width
-    elif decode_width is not None and decode_width != window_width:
-        raise ValueError("window_width and decode_width must match when both are provided")
     if window_width is None:
         raise ValueError("window_width (or decode_width) must be provided")
+    if decode_width is not None and decode_width != window_width:
+        raise ValueError("window_width and decode_width must match when both are provided")
     if mlp_window_assignment not in {"forward", "max-containing"}:
         raise ValueError(
             "mlp_window_assignment must be either 'forward' or 'max-containing'"
