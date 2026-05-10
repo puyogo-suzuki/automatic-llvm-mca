@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import warnings
 
 from arch import (  # noqa: F401  (re-exported for backward compatibility)
     _RISCV_BRANCHES,
@@ -329,6 +330,12 @@ def _compute_mlp(
         raise ValueError("window_width (or decode_width) must be provided")
     if decode_width is not None and decode_width != window_width:
         raise ValueError("window_width and decode_width must match when both are provided")
+    if decode_width is not None:
+        warnings.warn(
+            "decode_width is deprecated; use window_width instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if mlp_window_assignment not in {"forward", "max-containing"}:
         raise ValueError(
             "mlp_window_assignment must be either 'forward' or 'max-containing'"
@@ -404,16 +411,19 @@ def _compute_mlp(
             if not seq:
                 return False
 
-            first_load_pos = next((pos for pos, idx in enumerate(seq) if is_load[idx]), None)
-            if first_load_pos is None:
+            first_load_in_window_pos = next(
+                (pos for pos, idx in enumerate(seq) if is_load[idx]),
+                None,
+            )
+            if first_load_in_window_pos is None:
                 return False
 
-            first_load_idx = seq[first_load_pos]
+            first_load_idx = seq[first_load_in_window_pos]
             if first_load_idx == target_idx:
                 return False
 
             _, tainted = io_regs[first_load_idx]
-            for idx in seq[first_load_pos + 1:]:
+            for idx in seq[first_load_in_window_pos + 1:]:
                 inputs_i, outputs_i = io_regs[idx]
                 reads_tainted = bool(inputs_i & tainted)
                 if idx == target_idx:

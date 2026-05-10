@@ -498,7 +498,7 @@ class TestComputeMLP:
 
 
 class TestAnalyzeMlpAssignmentPlumbing:
-    def test_analyze_passes_mlp_window_assignment_to_analyze_function(self, monkeypatch):
+    def test_passes_mlp_window_assignment_to_analyze_function(self, monkeypatch):
         class _FakeArch:
             mca_args = ()
 
