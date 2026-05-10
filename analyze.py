@@ -361,8 +361,7 @@ def _compute_mlp(
                 tainted |= outputs_i
         return False
 
-    def _related_loads_in_window(i: int, width: int) -> list[int]:
-        seq = _window_indices(i, width)
+    def _related_loads_in_window(seq: list[int]) -> list[int]:
         return [
             j
             for j in seq
@@ -371,7 +370,7 @@ def _compute_mlp(
 
     def _window_loads(i: int, width: int) -> tuple[int, list[int]]:
         seq = _window_indices(i, width)
-        return sum(is_load[idx] for idx in seq), _related_loads_in_window(i, width)
+        return sum(is_load[idx] for idx in seq), _related_loads_in_window(seq)
 
     def _depends_on_prior(seq, pos: int) -> bool:
         inputs_j, _ = io_regs[seq[pos]]
@@ -396,7 +395,7 @@ def _compute_mlp(
                 indep_loads += 1
                 _, outputs_j = io_regs[j]
                 pending_load_outputs |= outputs_j
-        return indep_loads, _related_loads_in_window(i, width)
+        return indep_loads, _related_loads_in_window(seq)
 
     def _ooo_independent_loads(i: int, width: int) -> tuple[int, list[int]]:
         seq = _window_indices(i, width)
@@ -404,7 +403,7 @@ def _compute_mlp(
         for pos, j in enumerate(seq):
             if is_load[j] and (pos == 0 or not _depends_on_prior(seq, pos)):
                 indep_loads += 1
-        return indep_loads, _related_loads_in_window(i, width)
+        return indep_loads, _related_loads_in_window(seq)
 
     if dependency == "io":
         mlp_func = _io_independent_loads
