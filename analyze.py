@@ -393,11 +393,14 @@ def _compute_mlp(
         def _depends_on_first_load(seq: list[int], target_idx: int) -> bool:
             if not seq:
                 return False
-            first_load_idx = seq[0]
+            first_load_idx = next((idx for idx in seq if is_load[idx]), None)
+            if first_load_idx is None:
+                return False
             if first_load_idx == target_idx:
                 return False
             _, tainted = io_regs[first_load_idx]
-            for idx in seq[1:]:
+            first_load_pos = seq.index(first_load_idx)
+            for idx in seq[first_load_pos + 1:]:
                 inputs_i, outputs_i = io_regs[idx]
                 reads_tainted = bool(inputs_i & tainted)
                 if idx == target_idx:
