@@ -303,7 +303,8 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
 def _compute_mlp(
     instrs,
     window_width: int = None,
-    arch: ArchBase = None,
+    *,
+    arch: ArchBase,
     dependency: str = "none",
     enable_loop: bool = False,
     mlp_window_assignment: str = "forward",
@@ -328,8 +329,6 @@ def _compute_mlp(
         raise ValueError("window_width and decode_width must match when both are provided")
     if window_width is None:
         raise ValueError("window_width (or decode_width) must be provided")
-    if arch is None:
-        raise ValueError("arch must be provided")
     if mlp_window_assignment not in {"forward", "max-containing"}:
         raise ValueError(
             "mlp_window_assignment must be either 'forward' or 'max-containing'"
@@ -512,10 +511,10 @@ def _analyze_function(
         if result is not None:
             retired, cycles, load_instrs = result
             mlp = _compute_mlp(
-                region,
-                decode_width,
-                arch,
-                dependency,
+                instrs=region,
+                window_width=decode_width,
+                arch=arch,
+                dependency=dependency,
                 mlp_window_assignment=mlp_window_assignment,
             )
             if dumper:
@@ -533,10 +532,10 @@ def _analyze_function(
             if result is not None:
                 retired, cycles, load_instrs = result
                 mlp = _compute_mlp(
-                    bb,
-                    decode_width,
-                    arch,
-                    dependency,
+                    instrs=bb,
+                    window_width=decode_width,
+                    arch=arch,
+                    dependency=dependency,
                     mlp_window_assignment=mlp_window_assignment,
                 )
                 if dumper:
@@ -548,10 +547,10 @@ def _analyze_function(
         if result is not None:
             retired, cycles, load_instrs = result
             mlp = _compute_mlp(
-                bb,
-                decode_width,
-                arch,
-                dependency,
+                instrs=bb,
+                window_width=decode_width,
+                arch=arch,
+                dependency=dependency,
                 mlp_window_assignment=mlp_window_assignment,
             )
             if dumper:

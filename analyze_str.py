@@ -202,7 +202,12 @@ def analyze_str(instrs, arch: ArchBase, mcpu: str = "", decode_width: int = 4, d
         return None
         
     retired, cycles, load_instrs = result
-    mlp = _compute_mlp(instrs, decode_width, arch, dependency)
+    mlp = _compute_mlp(
+        instrs=instrs,
+        window_width=decode_width,
+        arch=arch,
+        dependency=dependency,
+    )
     return retired, cycles, load_instrs, mlp
 
 def main():
