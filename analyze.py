@@ -299,7 +299,7 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
     return sum(1 for _, mn, ops in instrs if arch.is_load_instruction(mn, ops)) * 100
 
 
-def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "none", enable_loop: bool = False) -> float:
+def _compute_mlp(instrs, window_width: int, arch: ArchBase, dependency: str = "none", enable_loop: bool = False) -> float:
     """Compute the Memory Level Parallelism (MLP) and independent load ratio for a block of instructions."""
     if not instrs:
         return 1.0
@@ -334,8 +334,6 @@ def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "n
         if not seq or not is_load[seq[0]]:
             return 0
 
-        # In-order model: keep issuing instructions until the first use of any
-        # previously issued load result appears in the decode window.
         _, pending_load_outputs = io_regs[seq[0]]
         indep_loads = 1
         for j in seq[1:]:
@@ -356,18 +354,14 @@ def _compute_mlp(instrs, decode_width: int, arch: ArchBase, dependency: str = "n
                 indep_loads += 1
         return indep_loads
 
-    total_mlp = 0.0
-
     if dependency == "io":
-        for i in load_indices:
-            total_mlp += _io_independent_loads(i, decode_width)
+        mlp_func = _io_independent_loads
     elif dependency == "none":
-        for i in load_indices:
-            total_mlp += _window_loads(i, decode_width)
-    else:  # ooo
-        for i in load_indices:
-            total_mlp += _ooo_independent_loads(i, decode_width)
+        mlp_func = _window_loads
+    else: # ooo
+        mlp_func = _ooo_independent_loads
 
+    total_mlp = sum(mlp_func(i, window_width) for i in load_indices)
     nonzero_count = len(load_indices)
     return total_mlp / nonzero_count
 
