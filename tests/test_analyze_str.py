@@ -347,6 +347,36 @@ class TestAnalyzeStrIntegration:
             analyze_str.load_str_file(path)
 
 
+class TestAnalyzeStrPlumbing:
+    def test_passes_mlp_window_assignment_to_compute_mlp(self, monkeypatch):
+        class _FakeArch:
+            mca_args = ()
+
+        captured = {}
+        monkeypatch.setattr(analyze_str, "_run_mca", lambda instrs, mca_args, arch: (1, 1, 1))
+
+        def _fake_compute_mlp(instrs, window_width, arch, dependency="none", enable_loop=False, mlp_window_assignment="forward"):
+            captured["window_width"] = window_width
+            captured["dependency"] = dependency
+            captured["mlp_window_assignment"] = mlp_window_assignment
+            return 2.0
+
+        monkeypatch.setattr(analyze_str, "_compute_mlp", _fake_compute_mlp)
+
+        result = analyze_str.analyze_str(
+            instrs=[(0, "nop", "")],
+            arch=_FakeArch(),
+            window_width=6,
+            dependency="ooo",
+            mlp_window_assignment="max-containing",
+        )
+
+        assert result == (1, 1, 1, 2.0)
+        assert captured["window_width"] == 6
+        assert captured["dependency"] == "ooo"
+        assert captured["mlp_window_assignment"] == "max-containing"
+
+
 # ---------------------------------------------------------------------------
 # Integration test — round-trip via Dumper + analyze_str
 # ---------------------------------------------------------------------------
@@ -373,7 +403,7 @@ class TestRoundTrip:
         if original is None:
             pytest.skip("llvm-mca returned None for the original run")
         orig_retired, orig_cycles, orig_li = original
-        orig_mlp = _analyze._compute_mlp(instrs, decode_width=4, arch=arch)
+        orig_mlp = _analyze._compute_mlp(instrs, window_width=4, arch=arch)
 
         # Dump to a temp file using Dumper.
         dump_dir = str(tmp_path / "dump")

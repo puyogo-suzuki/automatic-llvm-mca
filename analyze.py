@@ -18,7 +18,7 @@ loop are reported separately:
 Supported architectures: x86/x86-64, AArch64, 32-bit ARM, RISC-V (RV32IC, RV64IC).
 
 Usage:
-  python3 analyze.py [--mcpu <cpu>] [--decode-width <w>] [--dependency <mode>]
+  python3 analyze.py [--mcpu <cpu>] [--window-width <w>] [--dependency <mode>]
                      [--mlp-window-assignment <mode>] <elf-binary>
 """
 
@@ -28,7 +28,6 @@ import re
 import shutil
 import subprocess
 import sys
-import warnings
 
 from arch import (  # noqa: F401  (re-exported for backward compatibility)
     _RISCV_BRANCHES,
@@ -303,39 +302,24 @@ def _count_load_instructions(instrs, arch: ArchBase) -> int:
 
 def _compute_mlp(
     instrs,
-    window_width: int = None,
-    *,
+    window_width: int,
     arch: ArchBase,
     dependency: str = "none",
     enable_loop: bool = False,
     mlp_window_assignment: str = "forward",
-    decode_width: int = None,
 ) -> float:
     """Compute Memory Level Parallelism (MLP) for a block of instructions.
 
     Parameters
     ----------
     window_width:
-        Window width used by the MLP model. ``decode_width`` is accepted as a
-        backward-compatible alias.
+        Window width used by the MLP model.
     mlp_window_assignment:
         Strategy for assigning a per-load window score:
         ``"forward"`` keeps the current behavior (window starts at the load),
         while ``"max-containing"`` assigns each load the maximum score among
         non-wrapping windows that contain the load.
     """
-    if window_width is None:
-        window_width = decode_width
-    if window_width is None:
-        raise ValueError("window_width (or decode_width) must be provided")
-    if decode_width is not None and decode_width != window_width:
-        raise ValueError("window_width and decode_width must match when both are provided")
-    if decode_width is not None:
-        warnings.warn(
-            "decode_width is deprecated; use window_width instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
     if mlp_window_assignment not in {"forward", "max-containing"}:
         raise ValueError(
             "mlp_window_assignment must be either 'forward' or 'max-containing'"
@@ -406,24 +390,14 @@ def _compute_mlp(
     else:  # max-containing
         span = max(1, window_width)
 
-        def _depends_on_first_load_in_window(window_start: int, target_idx: int) -> bool:
-            seq = list(range(window_start, min(n, window_start + span)))
+        def _depends_on_first_load(seq, target_idx: int) -> bool:
             if not seq:
                 return False
-
-            first_load_in_window_pos = next(
-                (pos for pos, idx in enumerate(seq) if is_load[idx]),
-                None,
-            )
-            if first_load_in_window_pos is None:
-                return False
-
-            first_load_idx = seq[first_load_in_window_pos]
+            first_load_idx = seq[0]
             if first_load_idx == target_idx:
                 return False
-
             _, tainted = io_regs[first_load_idx]
-            for idx in seq[first_load_in_window_pos + 1:]:
+            for idx in seq[1:]:
                 inputs_i, outputs_i = io_regs[idx]
                 reads_tainted = bool(inputs_i & tainted)
                 if idx == target_idx:
@@ -432,20 +406,23 @@ def _compute_mlp(
                     tainted |= outputs_i
             return False
 
-        total_mlp = 0.0
-        for i in load_indices:
-            start_min = max(0, i - span + 1)
-            start_max = i
-            candidates = []
-            for start in range(start_min, start_max + 1):
-                if _depends_on_first_load_in_window(start, i):
+        def _mlp_with_related_loads(i: int, width: int):
+            seq = _window_indices(i, width)
+            related_loads = []
+            for j in seq:
+                if not is_load[j]:
                     continue
-                candidates.append(mlp_func(start, window_width))
+                if _depends_on_first_load(seq, j):
+                    continue
+                related_loads.append(j)
+            return mlp_func(i, width), related_loads
 
-            if candidates:
-                total_mlp += max(candidates)
-            else:
-                total_mlp += mlp_func(i, window_width)
+        mlp_vals = {i: 1.0 for i in load_indices}
+        for i in load_indices:
+            mlp, related_loads = _mlp_with_related_loads(i, span)
+            for j in related_loads:
+                mlp_vals[j] = max(mlp_vals[j], mlp)
+        total_mlp = sum(mlp_vals[i] for i in load_indices)
 
     nonzero_count = len(load_indices)
     return total_mlp / nonzero_count
@@ -499,7 +476,7 @@ def _analyze_function(
     mca_args=(),
     arch: ArchBase = None,
     dumper: Dumper = None,
-    decode_width: int = 4,
+    window_width: int = 4,
     dependency: str = "none",
     mlp_window_assignment: str = "forward",
 ):
@@ -521,11 +498,12 @@ def _analyze_function(
         if result is not None:
             retired, cycles, load_instrs = result
             mlp = _compute_mlp(
-                instrs=region,
-                window_width=decode_width,
-                arch=arch,
-                dependency=dependency,
-                mlp_window_assignment=mlp_window_assignment,
+                region,
+                window_width,
+                arch,
+                dependency,
+                False,
+                mlp_window_assignment,
             )
             if dumper:
                 dumper.dump(region, _format_asm(region, arch), arch)
@@ -542,11 +520,12 @@ def _analyze_function(
             if result is not None:
                 retired, cycles, load_instrs = result
                 mlp = _compute_mlp(
-                    instrs=bb,
-                    window_width=decode_width,
-                    arch=arch,
-                    dependency=dependency,
-                    mlp_window_assignment=mlp_window_assignment,
+                    bb,
+                    window_width,
+                    arch,
+                    dependency,
+                    False,
+                    mlp_window_assignment,
                 )
                 if dumper:
                     dumper.dump(bb, _format_asm(bb, arch), arch)
@@ -557,11 +536,12 @@ def _analyze_function(
         if result is not None:
             retired, cycles, load_instrs = result
             mlp = _compute_mlp(
-                instrs=bb,
-                window_width=decode_width,
-                arch=arch,
-                dependency=dependency,
-                mlp_window_assignment=mlp_window_assignment,
+                bb,
+                window_width,
+                arch,
+                dependency,
+                False,
+                mlp_window_assignment,
             )
             if dumper:
                 dumper.dump(bb, _format_asm(bb, arch), arch)
@@ -576,7 +556,7 @@ def analyze(
     binary: str,
     mcpu: str = "",
     dump: bool = False,
-    decode_width: int = 4,
+    window_width: int = 4,
     dependency: str = "none",
     mlp_window_assignment: str = "forward",
 ):
@@ -592,8 +572,8 @@ def analyze(
     dump:
         When ``True``, the formatted assembly for each analysed region is
         written to a file in a ``"dump"`` directory.
-    decode_width:
-        The decode width used to compute Memory Level Parallelism.
+    window_width:
+        The window width used to compute Memory Level Parallelism.
     mlp_window_assignment:
         Per-load assignment mode used by MLP computation.
     """
@@ -611,7 +591,7 @@ def analyze(
                 mca_args,
                 arch,
                 dumper,
-                decode_width,
+                window_width,
                 dependency,
                 mlp_window_assignment):
             yield start, end, retired, load_instrs, cycles, mlp
@@ -625,7 +605,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Estimate throughput for an ELF binary using llvm-mca.",
         usage=(
-            "%(prog)s [--mcpu CPU] [--dump] [--decode-width W] "
+            "%(prog)s [--mcpu CPU] [--dump] [--window-width W] "
             "[--dependency {none,io,ooo}] "
             "[--mlp-window-assignment {forward,max-containing}] <elf-binary>"
         ),
@@ -652,11 +632,11 @@ def main():
         ),
     )
     parser.add_argument(
-        "--decode-width",
+        "--window-width",
         type=int,
         default=4,
         metavar="W",
-        help="The decode width used to compute Memory Level Parallelism (default: 4)."
+        help="The window width used to compute Memory Level Parallelism (default: 4)."
     )
     parser.add_argument(
         "--dependency",
@@ -683,8 +663,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.decode_width < 1:
-        parser.error("--decode-width must be >= 1")
+    if args.window_width < 1:
+        parser.error("--window-width must be >= 1")
 
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
@@ -694,7 +674,7 @@ def main():
         binary=args.binary,
         mcpu=args.mcpu,
         dump=args.dump,
-        decode_width=args.decode_width,
+        window_width=args.window_width,
         dependency=args.dependency,
         mlp_window_assignment=args.mlp_window_assignment,
     ))

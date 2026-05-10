@@ -374,10 +374,10 @@ class TestComputeMLP:
         ]
 
         no_loop = analyze._compute_mlp(
-            instrs, decode_width=2, arch=arch, dependency="none", enable_loop=False
+            instrs, window_width=2, arch=arch, dependency="none", enable_loop=False
         )
         looped = analyze._compute_mlp(
-            instrs, decode_width=2, arch=arch, dependency="none", enable_loop=True
+            instrs, window_width=2, arch=arch, dependency="none", enable_loop=True
         )
 
         assert no_loop == 1.0
@@ -393,10 +393,10 @@ class TestComputeMLP:
         ]
 
         no_loop = analyze._compute_mlp(
-            instrs, decode_width=4, arch=arch, dependency="io", enable_loop=False
+            instrs, window_width=4, arch=arch, dependency="io", enable_loop=False
         )
         looped = analyze._compute_mlp(
-            instrs, decode_width=4, arch=arch, dependency="io", enable_loop=True
+            instrs, window_width=4, arch=arch, dependency="io", enable_loop=True
         )
 
         assert no_loop == 1.0
@@ -414,7 +414,7 @@ class TestComputeMLP:
         ]
 
         mlp = analyze._compute_mlp(
-            instrs, decode_width=5, arch=arch, dependency="io", enable_loop=False
+            instrs, window_width=5, arch=arch, dependency="io", enable_loop=False
         )
 
         assert mlp == 5.0 / 3.0
@@ -431,7 +431,7 @@ class TestComputeMLP:
         ]
 
         mlp = analyze._compute_mlp(
-            instrs, decode_width=5, arch=arch, dependency="io", enable_loop=False
+            instrs, window_width=5, arch=arch, dependency="io", enable_loop=False
         )
 
         assert mlp == 4.0 / 3.0
@@ -512,7 +512,7 @@ class TestAnalyzeMlpAssignmentPlumbing:
             mca_args=(),
             arch=None,
             dumper=None,
-            decode_width=4,
+            window_width=4,
             dependency="none",
             mlp_window_assignment="forward",
         ):

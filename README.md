@@ -24,19 +24,22 @@ loop are reported separately.
 ## Usage
 
 ```bash
-python3 analyze.py [--mcpu <cpu>] [--decode-width <W>] [--dependency <mode>] <elf-binary>
+python3 analyze.py [--mcpu <cpu>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] <elf-binary>
 ```
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
 *   `--mcpu <cpu>` — (Optional) Specify a target CPU for `llvm-mca` (e.g.,
     `cortex-a72`, `skylake`, `sifive-u74`). If omitted, the tool attempts to
     auto-detect the host CPU (for x86) or uses a generic model.
-*   `--decode-width <W>` — (Optional) Specify the decode width for MLP estimation
+*   `--window-width <W>` — (Optional) Specify the window width for MLP estimation
     (default is 4).
 *   `--dependency <mode>` — (Optional) Specify the dependency tracking mode for MLP estimation:
     *   `none` (default): No dependency tracking.
     *   `io`: In-Order model. For each load, MLP is $min(W, distance)$ where $distance$ is instructions to first use.
     *   `ooo`: Out-of-Order model. Considers independent loads in the instruction window.
+*   `--mlp-window-assignment <mode>` — (Optional) Per-load MLP assignment mode:
+    *   `forward` (default): Uses the forward window starting at each load.
+    *   `max-containing`: Propagates each forward window MLP value to related loads in that window.
 
 ### Output format
 
@@ -69,7 +72,7 @@ assembly passed to `llvm-mca`, including labels and `LLVM-MCA-BEGIN` /
 You can run `llvm-mca` on a previously dumped assembly file:
 
 ```bash
-python3 analyze_str.py [--mcpu <cpu>] [--decode-width <W>] <textfile>
+python3 analyze_str.py [--mcpu <cpu>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] <textfile>
 ```
 
 This is useful for manually inspecting the assembly or for re-running the
