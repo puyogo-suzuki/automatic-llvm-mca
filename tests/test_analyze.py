@@ -465,8 +465,8 @@ class TestComputeMLP:
         assert mlp_forward == 1.5
         assert mlp_max_containing == 2.0
 
-    def test_max_containing_excludes_transitive_dependency_from_first_load(self):
-        """max-containing excludes windows where the target depends on the first load."""
+    def test_max_containing_follows_dependency_mode_load_list(self):
+        """max-containing uses the same per-window load list produced by the dependency mode."""
         arch = self._MockArch(io_map={
             ("load", "l1"): (0, 0b0001),
             ("alu", "bridge"): (0b0001, 0b0010),
@@ -494,7 +494,7 @@ class TestComputeMLP:
         )
 
         assert mlp_forward == 1.5
-        assert mlp_max_containing == 1.5
+        assert mlp_max_containing == 2.0
 
 
 class TestAnalyzeMlpAssignmentPlumbing:
