@@ -390,7 +390,7 @@ def _compute_mlp(
     else:  # max-containing
         span = max(1, window_width)
 
-        def _depends_on_first_load(seq, target_idx: int) -> bool:
+        def _depends_on_first_load(seq: list[int], target_idx: int) -> bool:
             if not seq:
                 return False
             first_load_idx = seq[0]
@@ -406,7 +406,7 @@ def _compute_mlp(
                     tainted |= outputs_i
             return False
 
-        def _mlp_with_related_loads(i: int, width: int):
+        def _mlp_with_related_loads(i: int, width: int) -> tuple[float, list[int]]:
             seq = _window_indices(i, width)
             related_loads = []
             for j in seq:
