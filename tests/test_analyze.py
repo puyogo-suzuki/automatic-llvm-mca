@@ -462,6 +462,68 @@ class TestComputeMLP:
 
         assert mlp == 4.0 / 3.0
 
+    def test_dependency_modes_track_indirect_load_dependency_chain(self):
+        """Indirect load-address chains are treated as dependent loads."""
+        arch = self._MockArch(io_map={
+            ("load", "l1"): ({"base"}, {"x2"}),
+            ("alu", "x2_to_x3"): ({"x2"}, {"x3"}),
+            ("load", "l2"): ({"x3"}, {"x4"}),
+        })
+        instrs = [
+            (0x0, "load", "l1"),
+            (0x4, "alu", "x2_to_x3"),
+            (0x8, "load", "l2"),
+        ]
+
+        mlp_io = analyze._compute_mlp(
+            instrs,
+            window_width=3,
+            arch=arch,
+            dependency="io",
+            mlp_window_assignment="forward",
+        )
+        mlp_ooo = analyze._compute_mlp(
+            instrs,
+            window_width=3,
+            arch=arch,
+            dependency="ooo",
+            mlp_window_assignment="forward",
+        )
+
+        assert mlp_io == 1.0
+        assert mlp_ooo == 1.0
+
+    def test_dependency_modes_ignore_false_dependency_after_overwrite(self):
+        """Overwrites clear load provenance, avoiding false load-load deps."""
+        arch = self._MockArch(io_map={
+            ("load", "l1"): ({"base"}, {"x2"}),
+            ("mov", "overwrite_x2"): (set(), {"x2"}),
+            ("load", "l2"): ({"x2"}, {"x4"}),
+        })
+        instrs = [
+            (0x0, "load", "l1"),
+            (0x4, "mov", "overwrite_x2"),
+            (0x8, "load", "l2"),
+        ]
+
+        mlp_io = analyze._compute_mlp(
+            instrs,
+            window_width=3,
+            arch=arch,
+            dependency="io",
+            mlp_window_assignment="forward",
+        )
+        mlp_ooo = analyze._compute_mlp(
+            instrs,
+            window_width=3,
+            arch=arch,
+            dependency="ooo",
+            mlp_window_assignment="forward",
+        )
+
+        assert mlp_io == 1.5
+        assert mlp_ooo == 1.5
+
     def test_max_containing_boosts_tail_load_for_two_independent_loads(self):
         """max-containing removes end-of-block underestimation for independent loads."""
         arch = self._MockArch(io_map={

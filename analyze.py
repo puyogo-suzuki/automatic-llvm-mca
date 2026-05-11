@@ -347,34 +347,56 @@ def _compute_mlp(
         seq = _window_indices(i, width)
         return [idx for idx in seq if is_load[idx]]
 
-    def _depends_on_prior(seq, pos: int) -> bool:
-        inputs_j, _ = io_regs[seq[pos]]
-        for prior_pos in range(pos):
-            _, outputs_m = io_regs[seq[prior_pos]]
-            if inputs_j & outputs_m:
-                return True
-        return False
-
     def _io_independent_loads(i: int, width: int) -> list[int]:
+        """Return loads co-issuable with load *i* under the in-order model.
+
+        Walks the window in program order.  Maintains ``load_dep_regs``: the
+        set of registers whose values are derived from any already-issued load
+        (directly, or propagated through non-load instructions).  Stops at the
+        first instruction whose inputs intersect ``load_dep_regs`` (barrier).
+        Overwrites by non-load-dependent instructions clear the affected
+        registers from ``load_dep_regs``, eliminating false dependencies.
+        """
         seq = _window_indices(i, width)
-        _, pending_load_outputs = io_regs[seq[0]]
+        _, outputs_0 = io_regs[seq[0]]
+        load_dep_regs: set = set(outputs_0)
         indep_loads = [seq[0]]
         for j in seq[1:]:
-            inputs_j, _ = io_regs[j]
-            if pending_load_outputs and (inputs_j & pending_load_outputs):
+            inputs_j, outputs_j = io_regs[j]
+            if inputs_j & load_dep_regs:
                 break
             if is_load[j]:
                 indep_loads.append(j)
-                _, outputs_j = io_regs[j]
-                pending_load_outputs |= outputs_j
+                load_dep_regs |= outputs_j
+            else:
+                load_dep_regs -= outputs_j
         return indep_loads
 
     def _ooo_independent_loads(i: int, width: int) -> list[int]:
+        """Return loads independent of every prior load under the OOO model.
+
+        Maintains ``load_dep_regs``: the set of registers whose values are
+        derived from any load seen so far (including dependent loads, and
+        propagated through non-load instructions).  A load is independent when
+        none of its address inputs are in ``load_dep_regs``.  Overwrites by
+        instructions with non-load-dependent inputs clear the affected
+        registers, eliminating false dependencies.
+        """
         seq = _window_indices(i, width)
+        load_dep_regs: set = set()
         indep_loads = []
-        for pos, j in enumerate(seq):
-            if is_load[j] and (pos == 0 or not _depends_on_prior(seq, pos)):
-                indep_loads.append(j)
+        for j in seq:
+            inputs_j, outputs_j = io_regs[j]
+            is_dep = bool(inputs_j & load_dep_regs)
+            if is_load[j]:
+                if not is_dep:
+                    indep_loads.append(j)
+                load_dep_regs |= outputs_j
+            elif outputs_j:
+                if is_dep:
+                    load_dep_regs |= outputs_j
+                else:
+                    load_dep_regs -= outputs_j
         return indep_loads
 
     if dependency == "io":
