@@ -348,7 +348,20 @@ def _compute_mlp(
         return [idx for idx in seq if is_load[idx]]
 
     def _consumed_load_sources(seq: list[int]) -> list[set[int]]:
-        """Return per-position load-source sets consumed by each instruction."""
+        """Return per-position consumed load indices for the instruction sequence.
+
+        Parameters
+        ----------
+        seq:
+            Instruction indices in window order.
+
+        Returns
+        -------
+        list[set[int]]
+            For each instruction position in ``seq``, the set of prior load
+            instruction indices whose values contribute to that instruction's
+            input operands.
+        """
         reg_sources: dict[str, set[int]] = {}
         consumed_by_pos: list[set[int]] = []
         for idx in seq:
@@ -359,11 +372,11 @@ def _compute_mlp(
             consumed_by_pos.append(consumed)
 
             if outputs_i:
-                produced = set(consumed)
+                output_sources = set(consumed)
                 if is_load[idx]:
-                    produced.add(idx)
+                    output_sources.add(idx)
                 for out in outputs_i:
-                    reg_sources[out] = set(produced)
+                    reg_sources[out] = set(output_sources)
         return consumed_by_pos
 
     def _io_independent_loads(i: int, width: int) -> list[int]:
