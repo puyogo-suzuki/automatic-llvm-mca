@@ -348,7 +348,7 @@ class TestAnalyzeStrIntegration:
 
 
 class TestAnalyzeStrPlumbing:
-    def test_passes_mlp_window_assignment_to_compute_mlp(self, monkeypatch):
+    def test_default_mlp_window_assignment_is_max_containing(self, monkeypatch):
         class _FakeArch:
             mca_args = ()
 
@@ -368,7 +368,6 @@ class TestAnalyzeStrPlumbing:
             arch=_FakeArch(),
             window_width=6,
             dependency="ooo",
-            mlp_window_assignment="max-containing",
         )
 
         assert result == (1, 1, 1, 2.0)

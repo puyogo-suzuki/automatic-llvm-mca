@@ -176,7 +176,7 @@ def analyze_str(
     mcpu: str = "",
     window_width: int = 4,
     dependency: str = "none",
-    mlp_window_assignment: str = "forward",
+    mlp_window_assignment: str = "max-containing",
 ):
     """Run llvm-mca on pre-loaded instruction tuples.
 
@@ -273,9 +273,9 @@ def main():
     parser.add_argument(
         "--mlp-window-assignment",
         choices=["forward", "max-containing"],
-        default="forward",
+        default="max-containing",
         help=(
-            "Per-load MLP window assignment strategy (default: forward). "
+            "Per-load MLP window assignment strategy (default: max-containing). "
             "forward: use only the forward window starting at each load; "
             "max-containing: propagate each window MLP value to related loads."
         ),

@@ -374,10 +374,20 @@ class TestComputeMLP:
         ]
 
         no_loop = analyze._compute_mlp(
-            instrs, window_width=2, arch=arch, dependency="none", enable_loop=False
+            instrs,
+            window_width=2,
+            arch=arch,
+            dependency="none",
+            enable_loop=False,
+            mlp_window_assignment="forward",
         )
         looped = analyze._compute_mlp(
-            instrs, window_width=2, arch=arch, dependency="none", enable_loop=True
+            instrs,
+            window_width=2,
+            arch=arch,
+            dependency="none",
+            enable_loop=True,
+            mlp_window_assignment="forward",
         )
 
         assert no_loop == 1.0
@@ -420,7 +430,12 @@ class TestComputeMLP:
         ]
 
         mlp = analyze._compute_mlp(
-            instrs, window_width=5, arch=arch, dependency="io", enable_loop=False
+            instrs,
+            window_width=5,
+            arch=arch,
+            dependency="io",
+            enable_loop=False,
+            mlp_window_assignment="forward",
         )
 
         assert mlp == 5.0 / 3.0
@@ -437,7 +452,12 @@ class TestComputeMLP:
         ]
 
         mlp = analyze._compute_mlp(
-            instrs, window_width=5, arch=arch, dependency="io", enable_loop=False
+            instrs,
+            window_width=5,
+            arch=arch,
+            dependency="io",
+            enable_loop=False,
+            mlp_window_assignment="forward",
         )
 
         assert mlp == 4.0 / 3.0
@@ -504,7 +524,7 @@ class TestComputeMLP:
 
 
 class TestAnalyzeMlpAssignmentPlumbing:
-    def test_passes_mlp_window_assignment_to_analyze_function(self, monkeypatch):
+    def test_default_mlp_window_assignment_is_max_containing(self, monkeypatch):
         class _FakeArch:
             mca_args = ()
 
@@ -527,7 +547,7 @@ class TestAnalyzeMlpAssignmentPlumbing:
 
         monkeypatch.setattr(analyze, "_analyze_function", _fake_analyze_function)
 
-        results = list(analyze.analyze("dummy", mlp_window_assignment="max-containing"))
+        results = list(analyze.analyze("dummy"))
 
         assert len(results) == 1
         assert captured["mlp_window_assignment"] == "max-containing"

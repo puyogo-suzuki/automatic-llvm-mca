@@ -306,7 +306,7 @@ def _compute_mlp(
     arch: ArchBase,
     dependency: str = "none",
     enable_loop: bool = False,
-    mlp_window_assignment: str = "forward",
+    mlp_window_assignment: str = "max-containing",
 ) -> float:
     """Compute Memory Level Parallelism (MLP) for a block of instructions.
 
@@ -339,10 +339,9 @@ def _compute_mlp(
         return 1.0
 
     def _window_indices(i: int, width: int):
-        span = width
         if enable_loop:
-            return [((i + off) % n) for off in range(span)]
-        return list(range(i, min(n, i + span)))
+            return [((i + off) % n) for off in range(width)]
+        return list(range(i, min(n, i + width)))
 
     def _window_loads(i: int, width: int) -> list[int]:
         seq = _window_indices(i, width)
@@ -450,7 +449,7 @@ def _analyze_function(
     dumper: Dumper = None,
     window_width: int = 4,
     dependency: str = "none",
-    mlp_window_assignment: str = "forward",
+    mlp_window_assignment: str = "max-containing",
 ):
     """Analyse one function's instructions.
 
@@ -530,7 +529,7 @@ def analyze(
     dump: bool = False,
     window_width: int = 4,
     dependency: str = "none",
-    mlp_window_assignment: str = "forward",
+    mlp_window_assignment: str = "max-containing",
 ):
     """Analyse *binary* and yield ``(start, end, retired, load_instructions, cycles, mlp)`` tuples.
 
@@ -624,9 +623,9 @@ def main():
     parser.add_argument(
         "--mlp-window-assignment",
         choices=["forward", "max-containing"],
-        default="forward",
+        default="max-containing",
         help=(
-            "Per-load MLP window assignment strategy (default: forward). "
+            "Per-load MLP window assignment strategy (default: max-containing). "
             "forward: use only the forward window starting at each load; "
             "max-containing: use the maximum score among windows containing "
             "the load, excluding windows where the load transitively depends "
