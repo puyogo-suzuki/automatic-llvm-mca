@@ -347,34 +347,47 @@ def _compute_mlp(
         seq = _window_indices(i, width)
         return [idx for idx in seq if is_load[idx]]
 
-    def _depends_on_prior(seq, pos: int) -> bool:
-        inputs_j, _ = io_regs[seq[pos]]
-        for prior_pos in range(pos):
-            _, outputs_m = io_regs[seq[prior_pos]]
-            if inputs_j & outputs_m:
-                return True
-        return False
+    def _consumed_load_sources(seq: list[int]) -> list[set[int]]:
+        """Return per-position load-source sets consumed by each instruction."""
+        reg_sources: dict[str, set[int]] = {}
+        consumed_by_pos: list[set[int]] = []
+        for idx in seq:
+            inputs_i, outputs_i = io_regs[idx]
+            consumed = set()
+            for reg in inputs_i:
+                consumed |= reg_sources.get(reg, set())
+            consumed_by_pos.append(consumed)
+
+            if outputs_i:
+                produced = set(consumed)
+                if is_load[idx]:
+                    produced.add(idx)
+                for out in outputs_i:
+                    reg_sources[out] = set(produced)
+        return consumed_by_pos
 
     def _io_independent_loads(i: int, width: int) -> list[int]:
         seq = _window_indices(i, width)
-        _, pending_load_outputs = io_regs[seq[0]]
+        consumed_by_pos = _consumed_load_sources(seq)
         indep_loads = [seq[0]]
-        for j in seq[1:]:
-            inputs_j, _ = io_regs[j]
-            if pending_load_outputs and (inputs_j & pending_load_outputs):
+        issued_loads = {seq[0]}
+        for pos, j in enumerate(seq[1:], start=1):
+            if consumed_by_pos[pos] & issued_loads:
                 break
             if is_load[j]:
                 indep_loads.append(j)
-                _, outputs_j = io_regs[j]
-                pending_load_outputs |= outputs_j
+                issued_loads.add(j)
         return indep_loads
 
     def _ooo_independent_loads(i: int, width: int) -> list[int]:
         seq = _window_indices(i, width)
+        consumed_by_pos = _consumed_load_sources(seq)
         indep_loads = []
+        seen_loads = set()
         for pos, j in enumerate(seq):
-            if is_load[j] and (pos == 0 or not _depends_on_prior(seq, pos)):
+            if is_load[j] and not (consumed_by_pos[pos] & seen_loads):
                 indep_loads.append(j)
+                seen_loads.add(j)
         return indep_loads
 
     if dependency == "io":
