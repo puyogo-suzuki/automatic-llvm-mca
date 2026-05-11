@@ -383,6 +383,12 @@ class TestComputeMLP:
         assert no_loop == 1.0
         assert looped == 1.5
 
+    def test_window_width_must_be_positive(self):
+        arch = analyze.X86Arch()
+        instrs = [(0x0, "movq", "(%rdi), %rax")]
+        with pytest.raises(ValueError, match="window_width must be >= 1"):
+            analyze._compute_mlp(instrs, window_width=0, arch=arch)
+
     def test_enable_loop_wraps_io_dependency_distance(self):
         """With enable_loop=True, io dependency search wraps to block head."""
         arch = analyze.X86Arch()

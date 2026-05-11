@@ -324,6 +324,8 @@ def _compute_mlp(
         raise ValueError(
             "mlp_window_assignment must be either 'forward' or 'max-containing'"
         )
+    if window_width < 1:
+        raise ValueError("window_width must be >= 1")
 
     if not instrs:
         return 1.0
@@ -337,7 +339,7 @@ def _compute_mlp(
         return 1.0
 
     def _window_indices(i: int, width: int):
-        span = max(1, width)
+        span = width
         if enable_loop:
             return [((i + off) % n) for off in range(span)]
         return list(range(i, min(n, i + span)))
@@ -356,9 +358,6 @@ def _compute_mlp(
 
     def _io_independent_loads(i: int, width: int) -> list[int]:
         seq = _window_indices(i, width)
-        if not seq or not is_load[seq[0]]:
-            return []
-
         _, pending_load_outputs = io_regs[seq[0]]
         indep_loads = [seq[0]]
         for j in seq[1:]:
