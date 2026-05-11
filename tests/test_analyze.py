@@ -354,6 +354,16 @@ class TestFormatAsm:
 class TestComputeMLP:
     """Unit tests for loop-aware MLP computation."""
 
+    class _MockArch:
+        def __init__(self, io_map):
+            self._io_map = io_map
+
+        def is_load_instruction(self, mnemonic, operands):
+            return mnemonic == "load"
+
+        def get_io_registers(self, mnemonic, operands):
+            return self._io_map[(mnemonic, operands)]
+
     def test_enable_loop_wraps_load_window(self):
         """With enable_loop=True, the window wraps from tail to head."""
         arch = analyze.X86Arch()
@@ -364,14 +374,30 @@ class TestComputeMLP:
         ]
 
         no_loop = analyze._compute_mlp(
-            instrs, decode_width=2, arch=arch, dependency="none", enable_loop=False
+            instrs,
+            window_width=2,
+            arch=arch,
+            dependency="none",
+            enable_loop=False,
+            mlp_window_assignment="forward",
         )
         looped = analyze._compute_mlp(
-            instrs, decode_width=2, arch=arch, dependency="none", enable_loop=True
+            instrs,
+            window_width=2,
+            arch=arch,
+            dependency="none",
+            enable_loop=True,
+            mlp_window_assignment="forward",
         )
 
         assert no_loop == 1.0
         assert looped == 1.5
+
+    def test_window_width_must_be_positive(self):
+        arch = analyze.X86Arch()
+        instrs = [(0x0, "movq", "(%rdi), %rax")]
+        with pytest.raises(ValueError, match="window_width must be >= 1"):
+            analyze._compute_mlp(instrs, window_width=0, arch=arch)
 
     def test_enable_loop_wraps_io_dependency_distance(self):
         """With enable_loop=True, io dependency search wraps to block head."""
@@ -383,10 +409,10 @@ class TestComputeMLP:
         ]
 
         no_loop = analyze._compute_mlp(
-            instrs, decode_width=4, arch=arch, dependency="io", enable_loop=False
+            instrs, window_width=4, arch=arch, dependency="io", enable_loop=False
         )
         looped = analyze._compute_mlp(
-            instrs, decode_width=4, arch=arch, dependency="io", enable_loop=True
+            instrs, window_width=4, arch=arch, dependency="io", enable_loop=True
         )
 
         assert no_loop == 1.0
@@ -404,7 +430,12 @@ class TestComputeMLP:
         ]
 
         mlp = analyze._compute_mlp(
-            instrs, decode_width=5, arch=arch, dependency="io", enable_loop=False
+            instrs,
+            window_width=5,
+            arch=arch,
+            dependency="io",
+            enable_loop=False,
+            mlp_window_assignment="forward",
         )
 
         assert mlp == 5.0 / 3.0
@@ -421,10 +452,105 @@ class TestComputeMLP:
         ]
 
         mlp = analyze._compute_mlp(
-            instrs, decode_width=5, arch=arch, dependency="io", enable_loop=False
+            instrs,
+            window_width=5,
+            arch=arch,
+            dependency="io",
+            enable_loop=False,
+            mlp_window_assignment="forward",
         )
 
         assert mlp == 4.0 / 3.0
+
+    def test_max_containing_boosts_tail_load_for_two_independent_loads(self):
+        """max-containing removes end-of-block underestimation for independent loads."""
+        arch = self._MockArch(io_map={
+            ("load", "l1"): (0, 0b0001),
+            ("load", "l2"): (0, 0b0010),
+        })
+        instrs = [
+            (0x0, "load", "l1"),
+            (0x4, "load", "l2"),
+        ]
+
+        mlp_forward = analyze._compute_mlp(
+            instrs,
+            window_width=2,
+            arch=arch,
+            dependency="none",
+            mlp_window_assignment="forward",
+        )
+        mlp_max_containing = analyze._compute_mlp(
+            instrs,
+            window_width=2,
+            arch=arch,
+            dependency="none",
+            mlp_window_assignment="max-containing",
+        )
+
+        assert mlp_forward == 1.5
+        assert mlp_max_containing == 2.0
+
+    def test_max_containing_follows_dependency_mode_load_list(self):
+        """max-containing uses the same per-window load list produced by the dependency mode."""
+        arch = self._MockArch(io_map={
+            ("load", "l1"): (0, 0b0001),
+            ("alu", "bridge"): (0b0001, 0b0010),
+            ("load", "l2"): (0b0010, 0b0100),
+        })
+        instrs = [
+            (0x0, "load", "l1"),
+            (0x4, "alu", "bridge"),
+            (0x8, "load", "l2"),
+        ]
+
+        mlp_forward = analyze._compute_mlp(
+            instrs,
+            window_width=3,
+            arch=arch,
+            dependency="none",
+            mlp_window_assignment="forward",
+        )
+        mlp_max_containing = analyze._compute_mlp(
+            instrs,
+            window_width=3,
+            arch=arch,
+            dependency="none",
+            mlp_window_assignment="max-containing",
+        )
+
+        assert mlp_forward == 1.5
+        assert mlp_max_containing == 2.0
+
+
+class TestAnalyzeMlpAssignmentPlumbing:
+    def test_default_mlp_window_assignment_is_max_containing(self, monkeypatch):
+        class _FakeArch:
+            mca_args = ()
+
+        monkeypatch.setattr(analyze, "_detect_arch", lambda _binary: _FakeArch())
+        monkeypatch.setattr(analyze, "disassemble", lambda _binary, _arch: [("f", [])])
+
+        captured = {}
+
+        def _fake_analyze_function(
+            instrs,
+            mca_args=(),
+            arch=None,
+            dumper=None,
+            window_width=4,
+            dependency="none",
+            mlp_window_assignment="forward",
+        ):
+            captured["mlp_window_assignment"] = mlp_window_assignment
+            yield 0, 0, 1, 1, 1, 1.0, "block"
+
+        monkeypatch.setattr(analyze, "_analyze_function", _fake_analyze_function)
+
+        results = list(analyze.analyze("dummy"))
+
+        assert len(results) == 1
+        assert captured["mlp_window_assignment"] == "max-containing"
 
 
 # ---------------------------------------------------------------------------
