@@ -376,7 +376,7 @@ def _compute_mlp(
                 if is_load[idx]:
                     output_sources.add(idx)
                 for out in outputs_i:
-                    reg_sources[out] = set(output_sources)
+                    reg_sources[out] = output_sources
         return consumed_by_pos
 
     def _io_independent_loads(i: int, width: int) -> list[int]:
