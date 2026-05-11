@@ -363,13 +363,19 @@ def _compute_mlp(
         indep_loads = [seq[0]]
         for j in seq[1:]:
             inputs_j, outputs_j = io_regs[j]
-            if inputs_j & load_dep_regs:
+            if outputs_0 & inputs_j: # The instruction will not be fetched.
                 break
             if is_load[j]:
+                if inputs_j & load_dep_regs: # The MEM stage will be blocked.
+                    break
                 indep_loads.append(j)
                 load_dep_regs |= outputs_j
             else:
-                load_dep_regs -= outputs_j
+                if inputs_j & load_dep_regs:
+                    load_dep_regs |= outputs_j
+                else:
+                    load_dep_regs -= outputs_j
+                    outputs_0 -= outputs_j
         return indep_loads
 
     def _ooo_independent_loads(i: int, width: int) -> list[int]:
