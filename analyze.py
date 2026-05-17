@@ -23,11 +23,39 @@ Usage:
 """
 
 import argparse
+import ctypes
 import os
 import re
 import shutil
 import subprocess
 import sys
+
+# Try to load the C++ MCA runner library
+_LIBMCA = None
+_MCA_RUNNERS = {}  # (triple, cpu, features) -> runner_ptr
+
+try:
+    # Look for the library in the same directory as the script or in the 'build' subdirectory
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _lib_paths = [
+        os.path.join(_script_dir, "libmca_runner.so"),
+        os.path.join(_script_dir, "build", "libmca_runner.so"),
+    ]
+    for _p in _lib_paths:
+        if os.path.exists(_p):
+            _LIBMCA = ctypes.CDLL(_p)
+            _LIBMCA.mca_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+            _LIBMCA.mca_create.restype = ctypes.c_void_p
+            _LIBMCA.mca_run.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
+            ]
+            _LIBMCA.mca_run.restype = ctypes.c_int
+            _LIBMCA.mca_free.argtypes = [ctypes.c_void_p]
+            _LIBMCA.mca_free.restype = None
+            break
+except Exception:
+    _LIBMCA = None
 
 from arch import (  # noqa: F401  (re-exported for backward compatibility)
     _RISCV_BRANCHES,
@@ -425,21 +453,50 @@ def _compute_mlp(
     return total_mlp / nonzero_count
 
 
-def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
-    """Run llvm-mca on *instrs* and return ``(retired, cycles, load_instructions)``, or None.
+def _run_mca(instrs, mcpu=None, march=None, *, arch: ArchBase):
+    """Run MCA on *instrs* and return ``(retired, cycles, load_instructions)``, or None.
 
     Parameters
     ----------
     instrs:
         List of ``(addr, mnemonic, operands)`` triples to analyse.
-    mca_args:
-        Extra arguments forwarded to llvm-mca (e.g. ``-march=``, ``-mcpu=``).
+    mcpu:
+        Target CPU name.
+    march:
+        Target architecture name.
     arch:
         Architecture object.
     """
-    global _LLVM_MCA
     if not instrs:
         return None
+
+    triple = arch.triple
+    cpu = mcpu or arch.cpu
+    features = ""
+    
+    # Try direct C++ library call
+    if _LIBMCA:
+        key = (triple, cpu, features)
+        if key not in _MCA_RUNNERS:
+            _MCA_RUNNERS[key] = _LIBMCA.mca_create(
+                triple.encode(), cpu.encode(), features.encode()
+            )
+        
+        runner = _MCA_RUNNERS[key]
+        if runner:
+            asm = _format_asm(instrs, arch)
+            retired_c = ctypes.c_int(0)
+            cycles_c = ctypes.c_int(0)
+            ret = _LIBMCA.mca_run(
+                runner, asm.encode(), 100,
+                ctypes.byref(retired_c), ctypes.byref(cycles_c)
+            )
+            if ret == 0:
+                load_instructions = _count_load_instructions(instrs, arch)
+                return retired_c.value, cycles_c.value, load_instructions
+
+    # Fallback to subprocess if library is missing or fails
+    global _LLVM_MCA
     if _LLVM_MCA is None:
         try:
             _LLVM_MCA = _find_llvm_mca()
@@ -449,8 +506,15 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
 
     asm = _format_asm(instrs, arch)
 
-    # Pass assembly via stdin (llvm-mca reads from stdin when given "-").
-    cmd = [_LLVM_MCA, "--call-latency=0", *mca_args, "-"]
+    mca_args = ["--call-latency=0"]
+    if cpu:
+        mca_args.append(f"-mcpu={cpu}")
+    if march:
+        mca_args.append(f"-march={march}")
+    if triple:
+        mca_args.append(f"-mtriple={triple}")
+
+    cmd = [_LLVM_MCA, *mca_args, "-"]
     proc = subprocess.run(cmd, input=asm, capture_output=True, text=True)
     if proc.returncode != 0:
         return None
@@ -470,7 +534,8 @@ def _run_mca(instrs, mca_args=(), *, arch: ArchBase):
 
 def _analyze_function(
     instrs,
-    mca_args=(),
+    mcpu=None,
+    march=None,
     arch: ArchBase = None,
     dumper: Dumper = None,
     window_width: int = 4,
@@ -491,7 +556,7 @@ def _analyze_function(
     # --- Loops (including nested loops as separate entries) ---
     for ls, le in loops:
         region = [(a, m, o) for a, m, o in instrs if ls <= a <= le]
-        result = _run_mca(region, mca_args, arch=arch)
+        result = _run_mca(region, mcpu=mcpu, march=march, arch=arch)
         if result is not None:
             retired, cycles, load_instrs = result
             mlp = _compute_mlp(
@@ -513,7 +578,7 @@ def _analyze_function(
         addr, mnemonic, operands = instr
         bb.append(instr)
         if arch.ends_basic_block(mnemonic, operands):
-            result = _run_mca(bb, mca_args, arch=arch)
+            result = _run_mca(bb, mcpu=mcpu, march=march, arch=arch)
             if result is not None:
                 retired, cycles, load_instrs = result
                 mlp = _compute_mlp(
@@ -529,7 +594,7 @@ def _analyze_function(
                 yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, mlp, "block"
             bb = []
     if bb:
-        result = _run_mca(bb, mca_args, arch=arch)
+        result = _run_mca(bb, mcpu=mcpu, march=march, arch=arch)
         if result is not None:
             retired, cycles, load_instrs = result
             mlp = _compute_mlp(
@@ -545,48 +610,52 @@ def _analyze_function(
             yield bb[0][0], bb[-1][0], retired, cycles, load_instrs, mlp, "block"
 
 
+
 # ---------------------------------------------------------------------------
 # Top-level analysis
 # ---------------------------------------------------------------------------
 
 def analyze(
     binary: str,
-    mcpu: str = "",
+    mcpu: str = None,
+    march: str = None,
     dump: bool = False,
     window_width: int = 4,
     dependency: str = "none",
     mlp_window_assignment: str = "max-containing",
 ):
-    """Analyse *binary* and yield ``(start, end, retired, load_instructions, cycles, mlp)`` tuples.
+    """Estimate throughput for regions in an ELF binary.
+
+    Yields list of ``[start_addr, end_addr, retired, load_instructions, cycles, mlp]``
+    for every loop and every basic block that is not part of a loop.
 
     Parameters
     ----------
     binary:
-        Path to the ELF binary to analyse.
+        Path to the binary to analyze.
     mcpu:
-        If non-empty, overrides the default ``-mcpu`` value chosen by
-        ``_detect_arch`` and is forwarded to llvm-mca.
+        LLVM target CPU name (e.g. ``cortex-a76``, ``haswell``).
+    march:
+        LLVM target architecture name (e.g. ``aarch64``, ``x86-64``).
     dump:
-        When ``True``, the formatted assembly for each analysed region is
-        written to a file in a ``"dump"`` directory.
+        Whether to dump the code for every region to a temporary directory.
+    dependency:
+        The dependency mode used to compute MLP.
     window_width:
         The window width used to compute Memory Level Parallelism.
     mlp_window_assignment:
         Per-load assignment mode used by MLP computation.
     """
     arch = _detect_arch(binary)
-    mca_args = arch.mca_args
-    if mcpu:
-        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
-        mca_args = mca_args + [f"-mcpu={mcpu}"]
-    
+
     dumper = Dumper() if dump else None
 
     for _func_name, instrs in disassemble(binary, arch):
         retval = []
         for start, end, retired, cycles, load_instrs, mlp, _kind in _analyze_function(
                 instrs,
-                mca_args,
+                mcpu,
+                march,
                 arch,
                 dumper,
                 window_width,
@@ -596,7 +665,6 @@ def analyze(
         # Inner loops first (smaller end address; for equal end, larger start = smaller span)
         retval.sort(key=lambda x: (x[1], -x[0]))
         yield from retval
-
 
 # ---------------------------------------------------------------------------
 # Entry point

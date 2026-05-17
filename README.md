@@ -1,18 +1,16 @@
 # automatic-llvm-mca
 
-Estimate throughput for ELF binaries using `llvm-mca`.
+Estimate throughput for ELF binaries using a direct C++ interface to LLVM MCA.
 
 ## Procedure
 
 1.  Disassemble the ELF binary with `objdump`.
 2.  Decompose each function into loops and (for non-loop code) basic blocks.
-3.  Run `llvm-mca` on each region to obtain retired instructions and elapsed
-    cycles.
+3.  Run the LLVM Machine Code Analyzer (MCA) on each region to obtain retired instructions and elapsed cycles.
 4.  Print a CSV with start address, end address, retired instructions, load
     instructions, elapsed cycles, and Memory Level Parallelism (MLP) for every region.
 
-For nested loops the outer loop (including the inner loop body) and the inner
-loop are reported separately.
+This tool now uses a custom C++ shared library to interface directly with the LLVM MCA API, significantly improving performance by avoiding process creation overhead for every code region.
 
 ## Supported Architectures
 
@@ -21,60 +19,45 @@ loop are reported separately.
 *   **32-bit ARM**
 *   **RISC-V** (RV32IC, RV64IC)
 
+## Build Instructions
+
+The C++ library must be built before using the tool.
+
+### Prerequisites
+
+*   LLVM 23 development headers (`llvm-23-dev`)
+*   CMake 3.10+
+*   C++17 compatible compiler
+
+### Build
+
+```bash
+mkdir -p build && cd build
+cmake ..
+make
+```
+
+This will produce `build/libmca_runner.so`, which is required by `analyze.py`.
+
 ## Usage
 
 ```bash
-python3 analyze.py [--mcpu <cpu>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] <elf-binary>
+python3 analyze.py [--mcpu <cpu>] [--march <arch>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] <elf-binary>
 ```
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
-*   `--mcpu <cpu>` — (Optional) Specify a target CPU for `llvm-mca` (e.g.,
-    `cortex-a72`, `skylake`, `sifive-u74`). If omitted, the tool attempts to
-    auto-detect the host CPU (for x86) or uses a generic model.
-*   `--window-width <W>` — (Optional) Specify the window width for MLP estimation
-    (default is 4).
-*   `--dependency <mode>` — (Optional) Specify the dependency tracking mode for MLP estimation:
-    *   `none` (default): No dependency tracking.
-    *   `io`: In-Order model. For each load, MLP is $min(W, distance)$ where $distance$ is instructions to first use.
-    *   `ooo`: Out-of-Order model. Considers independent loads in the instruction window.
-*   `--mlp-window-assignment <mode>` — (Optional) Per-load MLP assignment mode:
-    *   `forward` (default): Uses the forward window starting at each load.
-    *   `max-containing`: Propagates each forward window MLP value to related loads in that window.
+*   `--mcpu <cpu>` — (Optional) Specify a target CPU for MCA (e.g., `cortex-a72`, `haswell`, `sifive-u74`).
+*   `--march <arch>` — (Optional) Specify a target architecture (e.g., `x86-64`, `aarch64`).
+*   `--window-width <W>` — (Optional) Specify the window width for MLP estimation (default is 4).
+*   `--dependency <mode>` — (Optional) Specify the dependency tracking mode for MLP estimation (`none`, `io`, `ooo`).
+*   `--mlp-window-assignment <mode>` — (Optional) Per-load MLP assignment mode (`forward`, `max-containing`).
 
-### Output format
+Note: `call-latency` is fixed to 0 in this implementation.
 
-The output is a CSV with the following columns:
+## Tests
 
-*   `start_address` — Hex address of the first instruction in the region.
-*   `end_address` — Hex address of the last instruction in the region.
-*   `retired_instructions` — Total number of instructions retired in the region
-    (simulated over 100 iterations by default).
-*   `load_instructions` — Total number of load instructions retired in the
-    region.
-*   `cycles` — Total simulated cycles for the region.
-*   `mlp` — Memory Level Parallelism for the region.
-
-## Debugging / Dumping Assembly (`--dump`)
-
-The `--dump` flag writes the formatted assembly for every analyzed region to a
-`dump/` directory:
+Tests can be run using `pytest` within the provided virtual environment:
 
 ```bash
-python3 analyze.py --dump <elf-binary>
+./venv/bin/pytest tests/
 ```
-
-Files are named `{start}_{end}.{arch}.txt`. These files contain the exact
-assembly passed to `llvm-mca`, including labels and `LLVM-MCA-BEGIN` /
-`LLVM-MCA-END` markers (simulated by our runner).
-
-## Analysis from dump files (`analyze_str.py`)
-
-You can run `llvm-mca` on a previously dumped assembly file:
-
-```bash
-python3 analyze_str.py [--mcpu <cpu>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] <textfile>
-```
-
-This is useful for manually inspecting the assembly or for re-running the
-simulation with a different CPU model without needing the original ELF binary.
-The output format is the same as `analyze.py`.

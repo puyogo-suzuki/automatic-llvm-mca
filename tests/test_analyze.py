@@ -590,6 +590,8 @@ class TestAnalyzeMlpAssignmentPlumbing:
     def test_default_mlp_window_assignment_is_max_containing(self, monkeypatch):
         class _FakeArch:
             mca_args = ()
+            triple = "x86_64-unknown-linux-gnu"
+            cpu = "haswell"
 
         monkeypatch.setattr(analyze, "_detect_arch", lambda _binary: _FakeArch())
         monkeypatch.setattr(analyze, "disassemble", lambda _binary, _arch: [("f", [])])
@@ -598,7 +600,8 @@ class TestAnalyzeMlpAssignmentPlumbing:
 
         def _fake_analyze_function(
             instrs,
-            mca_args=(),
+            mcpu=None,
+            march=None,
             arch=None,
             dumper=None,
             window_width=4,

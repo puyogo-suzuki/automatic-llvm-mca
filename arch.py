@@ -152,6 +152,16 @@ class ArchBase:
         """Extra arguments to pass to llvm-mca for this architecture."""
         return list(self._mca_args)
 
+    @property
+    def triple(self) -> str:
+        """Target triple for this architecture."""
+        raise NotImplementedError
+
+    @property
+    def cpu(self) -> str:
+        """Default target CPU for this architecture."""
+        raise NotImplementedError
+
     def is_branch(self, mnemonic: str) -> bool:
         """Return True if *mnemonic* is a branch/jump/call instruction."""
         raise NotImplementedError
@@ -208,6 +218,14 @@ class X86Arch(ArchBase):
 
     def __init__(self):
         super().__init__("objdump", [])
+
+    @property
+    def triple(self) -> str:
+        return "x86_64-unknown-linux-gnu"
+
+    @property
+    def cpu(self) -> str:
+        return "haswell"
 
     def is_branch(self, mnemonic: str) -> bool:
         m = mnemonic.lower()
@@ -274,6 +292,14 @@ class AArch64Arch(ArchBase):
 
     def __init__(self, objdump: str = "objdump"):
         super().__init__(objdump, ["-march=aarch64", "-mcpu=cortex-a57"])
+
+    @property
+    def triple(self) -> str:
+        return "aarch64-unknown-linux-gnu"
+
+    @property
+    def cpu(self) -> str:
+        return "cortex-a57"
 
     def is_branch(self, mnemonic: str) -> bool:
         m = mnemonic.lower()
@@ -355,6 +381,14 @@ class ARMArch(ArchBase):
     def __init__(self, objdump: str = "objdump"):
         super().__init__(objdump, ["-march=arm"])
 
+    @property
+    def triple(self) -> str:
+        return "arm-unknown-linux-gnueabihf"
+
+    @property
+    def cpu(self) -> str:
+        return "cortex-a15"
+
     def is_branch(self, mnemonic: str) -> bool:
         return mnemonic.lower() in _ARM_BRANCHES
 
@@ -401,6 +435,14 @@ class RISCVArch(ArchBase):
         if mca_args is None:
             mca_args = ["-march=riscv64", "-mcpu=sifive-u74"]
         super().__init__(objdump, mca_args)
+
+    @property
+    def triple(self) -> str:
+        return "riscv64-unknown-linux-gnu"
+
+    @property
+    def cpu(self) -> str:
+        return "sifive-u74"
 
     def is_branch(self, mnemonic: str) -> bool:
         return mnemonic.lower() in _RISCV_BRANCHES

@@ -173,12 +173,13 @@ def load_str_file(path: str):
 def analyze_str(
     instrs,
     arch: ArchBase,
-    mcpu: str = "",
+    mcpu: str = None,
+    march: str = None,
     window_width: int = 4,
     dependency: str = "none",
     mlp_window_assignment: str = "max-containing",
 ):
-    """Run llvm-mca on pre-loaded instruction tuples.
+    """Run MCA on pre-loaded instruction tuples.
 
     Parameters
     ----------
@@ -188,8 +189,10 @@ def analyze_str(
     arch:
         Architecture object, as returned by :func:`load_str_file`.
     mcpu:
-        If non-empty, overrides the default ``-mcpu`` value chosen by the
-        architecture and is forwarded to llvm-mca.
+        If provided, overrides the default ``-mcpu`` value chosen by the
+        architecture.
+    march:
+        If provided, overrides the target architecture.
     window_width:
         The window width used to compute Memory Level Parallelism.
     dependency:
@@ -200,14 +203,9 @@ def analyze_str(
     Returns
     -------
     ``(retired_instructions, elapsed_cycles, load_instructions, mlp)`` on success,
-    or ``None`` when llvm-mca produces no result.
+    or ``None`` when MCA produces no result.
     """
-    mca_args = arch.mca_args
-    if mcpu:
-        mca_args = [a for a in mca_args if not a.startswith("-mcpu=")]
-        mca_args = mca_args + [f"-mcpu={mcpu}"]
-
-    result = _run_mca(instrs, mca_args, arch=arch)
+    result = _run_mca(instrs, mcpu=mcpu, march=march, arch=arch)
     if result is None:
         return None
         
@@ -244,12 +242,22 @@ def main():
     )
     parser.add_argument(
         "--mcpu",
-        default="",
+        default=None,
         metavar="CPU",
         help=(
-            "Target CPU passed to llvm-mca via -mcpu (e.g. cortex-a72, "
+            "Target CPU passed to MCA via -mcpu (e.g. cortex-a72, "
             "neoverse-n1, sifive-u74). Overrides the default CPU inferred "
             "from the filename."
+        ),
+    )
+    parser.add_argument(
+        "--march",
+        default=None,
+        metavar="ARCH",
+        help=(
+            "Target architecture passed to MCA via -march (e.g. aarch64, "
+            "x86-64). Overrides the default architecture inferred from the "
+            "filename."
         ),
     )
     parser.add_argument(
@@ -294,10 +302,11 @@ def main():
     result = analyze_str(
         instrs,
         arch,
-        args.mcpu,
-        args.window_width,
-        args.dependency,
-        args.mlp_window_assignment,
+        mcpu=args.mcpu,
+        march=args.march,
+        window_width=args.window_width,
+        dependency=args.dependency,
+        mlp_window_assignment=args.mlp_window_assignment,
     )
     if result is None:
         return
