@@ -12,6 +12,7 @@ Run with::
     python3 -m pytest tests/test_analyze.py -v
 """
 
+import builtins
 import os
 import re
 import shutil
@@ -613,6 +614,50 @@ class TestAnalyzeMlpAssignmentPlumbing:
 
         assert len(results) == 1
         assert captured["mlp_window_assignment"] == "max-containing"
+
+
+class TestMainStreamingOutput:
+    def test_main_prints_header_and_first_row_before_analysis_completes(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        binary = tmp_path / "dummy.elf"
+        binary.write_bytes(b"\x7fELF")
+
+        def _fake_analyze(*_args, **_kwargs):
+            yield 0x10, 0x20, 100, 10, 50, 1.5
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(analyze, "analyze", _fake_analyze)
+        monkeypatch.setattr(sys, "argv", ["analyze.py", str(binary)])
+
+        with pytest.raises(RuntimeError, match="boom"):
+            analyze.main()
+
+        out_lines = capsys.readouterr().out.splitlines()
+        assert out_lines[0] == (
+            "start_address,end_address,retired_instructions,load_instructions,cycles,mlp"
+        )
+        assert out_lines[1] == "0x10,0x20,100,10,50,1.5"
+
+    def test_main_ignores_broken_pipe_during_output(self, monkeypatch, tmp_path):
+        binary = tmp_path / "dummy.elf"
+        binary.write_bytes(b"\x7fELF")
+
+        def _fake_analyze(*_args, **_kwargs):
+            yield 0x10, 0x20, 100, 10, 50, 1.5
+
+        call_count = {"print": 0}
+
+        def _fake_print(*args, **kwargs):
+            call_count["print"] += 1
+            if call_count["print"] == 2:
+                raise BrokenPipeError()
+
+        monkeypatch.setattr(analyze, "analyze", _fake_analyze)
+        monkeypatch.setattr(sys, "argv", ["analyze.py", str(binary)])
+        monkeypatch.setattr(builtins, "print", _fake_print)
+
+        analyze.main()
 
 
 # ---------------------------------------------------------------------------

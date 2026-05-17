@@ -123,8 +123,6 @@ def _find_loops(instrs, arch: ArchBase):
             if target is not None and target < addr and target in addr_set:
                 loops.append((target, addr))
 
-    # Inner loops first (smaller end address; for equal end, larger start = smaller span)
-    loops.sort(key=lambda x: (x[1], -x[0]))
     return loops
 
 
@@ -585,6 +583,7 @@ def analyze(
     dumper = Dumper() if dump else None
 
     for _func_name, instrs in disassemble(binary, arch):
+        retval = []
         for start, end, retired, cycles, load_instrs, mlp, _kind in _analyze_function(
                 instrs,
                 mca_args,
@@ -593,7 +592,10 @@ def analyze(
                 window_width,
                 dependency,
                 mlp_window_assignment):
-            yield start, end, retired, load_instrs, cycles, mlp
+            retval = retval + [[start, end, retired, load_instrs, cycles, mlp]]
+        # Inner loops first (smaller end address; for equal end, larger start = smaller span)
+        retval.sort(key=lambda x: (x[1], -x[0]))
+        yield from retval
 
 
 # ---------------------------------------------------------------------------
@@ -668,29 +670,21 @@ def main():
     if not os.path.isfile(args.binary):
         parser.error(f"{args.binary}: no such file")
 
-    # Single analysis pass over the binary.
-    raw_results = list(analyze(
-        binary=args.binary,
-        mcpu=args.mcpu,
-        dump=args.dump,
-        window_width=args.window_width,
-        dependency=args.dependency,
-        mlp_window_assignment=args.mlp_window_assignment,
-    ))
-
-    # Deduplicate by (start, end), keeping the first occurrence.
-    all_results: dict = {}
-    for start, end, retired, load_instrs, cycles, mlp in raw_results:
-        key = (start, end)
-        if key not in all_results:
-            all_results[key] = (start, end, retired, load_instrs, cycles, mlp)
-
-    # Sort and print results.
-    sorted_results = sorted(all_results.values(), key=lambda x: (x[1], -x[0]))
-
-    print("start_address,end_address,retired_instructions,load_instructions,cycles,mlp")
-    for start, end, retired, load_instrs, cycles, mlp in sorted_results:
-        print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles},{mlp}")
+    try:
+        print("start_address,end_address,retired_instructions,load_instructions,cycles,mlp")
+        for start, end, retired, load_instrs, cycles, mlp in analyze(
+            binary=args.binary,
+            mcpu=args.mcpu,
+            dump=args.dump,
+            window_width=args.window_width,
+            dependency=args.dependency,
+            mlp_window_assignment=args.mlp_window_assignment,
+        ):
+            print(f"0x{start:x},0x{end:x},{retired},{load_instrs},{cycles},{mlp}")
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return
 
 
 if __name__ == "__main__":
