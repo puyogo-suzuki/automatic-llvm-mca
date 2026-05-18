@@ -89,7 +89,7 @@ struct ScopedSilence {
     }
 };
 
-void run_mca(const std::vector<Instr>& instrs, const MCSubtargetInfo& STI, const MCInstrInfo& MCII,
+void run_mca(llvm::ArrayRef<Instr> instrs, const MCSubtargetInfo& STI, const MCInstrInfo& MCII,
              const MCRegisterInfo& MRI, const MCInstrAnalysis* MCIA, const mca::PipelineOptions& PO) {
     if (instrs.empty()) return;
     mca::Context MCAContext(MRI, STI);
@@ -230,48 +230,61 @@ int main(int argc, char **argv) {
 
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
             const auto& I = SectionInstrs[i];
-
-            // Update current function boundaries if symbols are available
             if (hasSymbols) {
                 while (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->second) ++FuncIt;
                 if (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->first && I.Addr < FuncIt->second) {
                     CurFuncStart = FuncIt->first;
                     CurFuncEnd = FuncIt->second;
-                } else {
-                    CurFuncStart = CurFuncEnd = 0; // Padding or unknown region
-                }
+                } else { CurFuncStart = CurFuncEnd = 0; }
             }
 
             if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr) {
                 int64_t start_idx = find_idx(I.BranchTarget);
                 if (start_idx != -1) {
                     size_t sz = i - (size_t)start_idx + 1;
-                    if (!(hasSymbols && I.BranchTarget < CurFuncStart) &&
-                          sz <= (size_t)LoopMaxInstrs) {
-                        std::vector<Instr> Loop;
-                        for (size_t j = (size_t)start_idx; j <= i; ++j) {
-                            Loop.push_back(SectionInstrs[j]);
-                            InLoop[j] = true;
-                        }
-                        run_mca(Loop, *STI, *MCII, *MRI, MCIA.get(), PO);
+                    bool same_function = true;
+                    if (hasSymbols && I.BranchTarget < CurFuncStart) same_function = false;
+
+                    if (same_function && sz <= (size_t)LoopMaxInstrs) {
+                        run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(start_idx, sz), 
+                                *STI, *MCII, *MRI, MCIA.get(), PO);
+                        for (size_t j = (size_t)start_idx; j <= i; ++j) InLoop[j] = true;
                     }
                 }
             }
         }
-        std::vector<Instr> BB;
+        
+        size_t bb_start = 0;
+        bool in_bb = false;
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
-            const auto& I = SectionInstrs[i];
             if (InLoop[i]) {
-                if (!BB.empty() && BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
-                BB.clear(); continue;
+                if (in_bb) {
+                    size_t bb_size = i - bb_start;
+                    if (bb_size > 0 && bb_size <= (size_t)BBMaxInstrs) {
+                        run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
+                                *STI, *MCII, *MRI, MCIA.get(), PO);
+                    }
+                    in_bb = false;
+                }
+                continue;
             }
-            BB.push_back(I);
-            if (I.EndsBB) {
-                if (BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
-                BB.clear();
+            if (!in_bb) { bb_start = i; in_bb = true; }
+            if (SectionInstrs[i].EndsBB) {
+                size_t bb_size = i - bb_start + 1;
+                if (bb_size <= (size_t)BBMaxInstrs) {
+                    run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
+                            *STI, *MCII, *MRI, MCIA.get(), PO);
+                }
+                in_bb = false;
             }
         }
-        if (!BB.empty() && BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
+        if (in_bb) {
+            size_t bb_size = SectionInstrs.size() - bb_start;
+            if (bb_size <= (size_t)BBMaxInstrs) {
+                run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
+                        *STI, *MCII, *MRI, MCIA.get(), PO);
+            }
+        }
     }
     return 0;
 }

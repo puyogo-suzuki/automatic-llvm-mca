@@ -9,10 +9,11 @@ static bool has_intersection(const std::vector<unsigned>& regs, const RegSet& ma
     return false;
 }
 
-float compute_mlp(const std::vector<Instr>& instrs, int width, 
+float compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
                   DependencyKind DepKind, 
                   MLPWindowAssignmentKind AssignKind, 
-                  const MCInstrInfo& MCII) {
+                  const llvm::MCInstrInfo& MCII) {
+
     int n = instrs.size();
     if (n == 0) return 1.0;
     std::vector<bool> is_load(n, false);

@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <bitset>
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrInfo.h"
 
@@ -20,7 +21,7 @@ struct Instr {
 
 typedef std::bitset<1024> RegSet;
 
-float compute_mlp(const std::vector<Instr>& instrs, int width, 
+float compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
                   DependencyKind DepKind, 
                   MLPWindowAssignmentKind AssignKind, 
                   const llvm::MCInstrInfo& MCII);
