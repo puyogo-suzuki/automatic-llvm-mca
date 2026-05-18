@@ -30,6 +30,7 @@
 #include "llvm/MCA/CustomBehaviour.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/ELFObjectFile.h"
+#include "llvm/Object/ELFTypes.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -64,6 +65,8 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
     ), cl::init(MLPWindowAssignmentKind::MaxContaining));
 
 static cl::opt<int> Iterations("iterations", cl::desc("Number of MCA iterations"), cl::init(100));
+static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
+static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
 
 struct ScopedSilence {
     int devNull;
@@ -163,6 +166,26 @@ int main(int argc, char **argv) {
 
     printf("start_address,end_address,retired_instructions,load_instructions,cycles,mlp\n");
 
+    std::map<uint64_t, uint64_t> FunctionBoundaries; // Start -> End
+    for (const auto &Sym : Obj.symbols()) {
+        auto TypeOrErr = Sym.getType();
+        if (!TypeOrErr || *TypeOrErr != SymbolRef::ST_Function) continue;
+        auto AddrOrErr = Sym.getAddress();
+        if (!AddrOrErr) continue;
+        uint64_t Addr = *AddrOrErr;
+        uint64_t Size = 0;
+        if (auto *Elf32LE = dyn_cast<ELF32LEObjectFile>(&Obj)) {
+            if (auto SymOrErr = Elf32LE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
+        } else if (auto *Elf64LE = dyn_cast<ELF64LEObjectFile>(&Obj)) {
+            if (auto SymOrErr = Elf64LE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
+        } else if (auto *Elf32BE = dyn_cast<ELF32BEObjectFile>(&Obj)) {
+            if (auto SymOrErr = Elf32BE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
+        } else if (auto *Elf64BE = dyn_cast<ELF64BEObjectFile>(&Obj)) {
+            if (auto SymOrErr = Elf64BE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
+        }
+        if (Size > 0) FunctionBoundaries[Addr] = Addr + Size;
+    }
+
     for (const SectionRef &Section : Obj.sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
         uint64_t SAddr = Section.getAddress();
@@ -171,6 +194,7 @@ int main(int argc, char **argv) {
         StringRef Contents = *ContentsOrErr;
 
         std::vector<Instr> SectionInstrs;
+        SectionInstrs.reserve(Contents.size() / 4);
         ArrayRef<uint8_t> Data(reinterpret_cast<const uint8_t*>(Contents.data()), Contents.size());
         for (uint64_t Index = 0; Index < Data.size(); ) {
             MCInst Inst;
@@ -188,31 +212,55 @@ int main(int argc, char **argv) {
         }
         if (SectionInstrs.empty()) continue;
 
+        auto find_idx = [&](uint64_t addr) -> int64_t {
+            auto it = std::lower_bound(SectionInstrs.begin(), SectionInstrs.end(), addr,
+                                       [](const Instr& a, uint64_t val) { return a.Addr < val; });
+            if (it != SectionInstrs.end() && it->Addr == addr)
+                return std::distance(SectionInstrs.begin(), it);
+            return -1;
+        };
+
         ScopedSilence silence;
-        std::map<uint64_t, size_t> AddrToIndex;
-        for (size_t i = 0; i < SectionInstrs.size(); ++i) AddrToIndex[SectionInstrs[i].Addr] = i;
-        
-        std::set<uint64_t> InLoop;
-        for (const auto& I : SectionInstrs) {
-            if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr && AddrToIndex.count(I.BranchTarget)) {
-                std::vector<Instr> Loop;
-                for (size_t j = AddrToIndex[I.BranchTarget]; j <= AddrToIndex[I.Addr]; ++j) {
-                    Loop.push_back(SectionInstrs[j]);
-                    InLoop.insert(SectionInstrs[j].Addr);
+        std::vector<bool> InLoop(SectionInstrs.size(), false);
+        for (size_t i = 0; i < SectionInstrs.size(); ++i) {
+            const auto& I = SectionInstrs[i];
+            if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr) {
+                int64_t start_idx = find_idx(I.BranchTarget);
+                if (start_idx != -1) {
+                    bool same_function = false;
+                    auto it = FunctionBoundaries.upper_bound(I.Addr);
+                    if (it != FunctionBoundaries.begin()) {
+                        --it;
+                        if (I.Addr >= it->first && I.Addr < it->second && I.BranchTarget >= it->first && I.BranchTarget < it->second)
+                            same_function = true;
+                    }
+                    if (same_function && (i - (size_t)start_idx + 1) <= (size_t)LoopMaxInstrs) {
+                        std::vector<Instr> Loop;
+                        for (size_t j = (size_t)start_idx; j <= i; ++j) {
+                            Loop.push_back(SectionInstrs[j]);
+                            InLoop[j] = true;
+                        }
+                        run_mca(Loop, *STI, *MCII, *MRI, MCIA.get(), PO);
+                    }
                 }
-                run_mca(Loop, *STI, *MCII, *MRI, MCIA.get(), PO);
             }
         }
         std::vector<Instr> BB;
-        for (const auto& I : SectionInstrs) {
-            if (InLoop.count(I.Addr)) { 
-                if (!BB.empty()) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO); 
+        for (size_t i = 0; i < SectionInstrs.size(); ++i) {
+            const auto& I = SectionInstrs[i];
+            if (InLoop[i]) { 
+                if (!BB.empty()) {
+                    if (BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO); 
+                }
                 BB.clear(); continue; 
             }
             BB.push_back(I);
-            if (I.EndsBB) { run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO); BB.clear(); }
+            if (I.EndsBB) { 
+                if (BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO); 
+                BB.clear(); 
+            }
         }
-        if (!BB.empty()) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
+        if (!BB.empty() && BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
     }
     return 0;
 }
