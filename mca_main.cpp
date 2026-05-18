@@ -222,19 +222,32 @@ int main(int argc, char **argv) {
 
         ScopedSilence silence;
         std::vector<bool> InLoop(SectionInstrs.size(), false);
+        
+        uint64_t CurFuncStart = 0;
+        uint64_t CurFuncEnd = 0;
+        auto FuncIt = FunctionBoundaries.begin();
+        bool hasSymbols = !FunctionBoundaries.empty();
+
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
             const auto& I = SectionInstrs[i];
+
+            // Update current function boundaries if symbols are available
+            if (hasSymbols) {
+                while (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->second) ++FuncIt;
+                if (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->first && I.Addr < FuncIt->second) {
+                    CurFuncStart = FuncIt->first;
+                    CurFuncEnd = FuncIt->second;
+                } else {
+                    CurFuncStart = CurFuncEnd = 0; // Padding or unknown region
+                }
+            }
+
             if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr) {
                 int64_t start_idx = find_idx(I.BranchTarget);
                 if (start_idx != -1) {
-                    bool same_function = false;
-                    auto it = FunctionBoundaries.upper_bound(I.Addr);
-                    if (it != FunctionBoundaries.begin()) {
-                        --it;
-                        if (I.Addr >= it->first && I.Addr < it->second && I.BranchTarget >= it->first && I.BranchTarget < it->second)
-                            same_function = true;
-                    }
-                    if (same_function && (i - (size_t)start_idx + 1) <= (size_t)LoopMaxInstrs) {
+                    size_t sz = i - (size_t)start_idx + 1;
+                    if (!(hasSymbols && I.BranchTarget < CurFuncStart) &&
+                          sz <= (size_t)LoopMaxInstrs) {
                         std::vector<Instr> Loop;
                         for (size_t j = (size_t)start_idx; j <= i; ++j) {
                             Loop.push_back(SectionInstrs[j]);
@@ -248,16 +261,14 @@ int main(int argc, char **argv) {
         std::vector<Instr> BB;
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
             const auto& I = SectionInstrs[i];
-            if (InLoop[i]) { 
-                if (!BB.empty()) {
-                    if (BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO); 
-                }
-                BB.clear(); continue; 
+            if (InLoop[i]) {
+                if (!BB.empty() && BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
+                BB.clear(); continue;
             }
             BB.push_back(I);
-            if (I.EndsBB) { 
-                if (BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO); 
-                BB.clear(); 
+            if (I.EndsBB) {
+                if (BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
+                BB.clear();
             }
         }
         if (!BB.empty() && BB.size() <= (size_t)BBMaxInstrs) run_mca(BB, *STI, *MCII, *MRI, MCIA.get(), PO);
