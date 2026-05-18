@@ -89,8 +89,8 @@ struct ScopedSilence {
     }
 };
 
-void run_mca(llvm::ArrayRef<Instr> instrs, const MCSubtargetInfo& STI, const MCInstrInfo& MCII,
-             const MCRegisterInfo& MRI, const MCInstrAnalysis* MCIA, const mca::PipelineOptions& PO) {
+void run_mca_print(llvm::ArrayRef<Instr> instrs, const MCSubtargetInfo& STI, const MCInstrInfo& MCII,
+                   const MCRegisterInfo& MRI, const MCInstrAnalysis* MCIA, const mca::PipelineOptions& PO) {
     if (instrs.empty()) return;
     mca::Context MCAContext(MRI, STI);
     mca::InstrumentManager IM(STI, MCII);
@@ -113,6 +113,7 @@ void run_mca(llvm::ArrayRef<Instr> instrs, const MCSubtargetInfo& STI, const MCI
     float mlp = compute_mlp(instrs, WindowWidth, DepKind, AssignKind, MCII);
     uint64_t load_count = 0;
     for (const auto& I : instrs) if (MCII.get(I.Inst.getOpcode()).mayLoad()) load_count++;
+    
     printf("0x%lx,0x%lx,%zu,%lu,%u,%.2f\n",
            instrs.front().Addr, instrs.back().Addr, instrs.size() * Iterations,
            load_count * Iterations, (unsigned)*ExpectedCycles, mlp);
@@ -228,6 +229,7 @@ int main(int argc, char **argv) {
         auto FuncIt = FunctionBoundaries.begin();
         bool hasSymbols = !FunctionBoundaries.empty();
 
+        // Pass 1: Pre-detect all loops and mark InLoop
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
             const auto& I = SectionInstrs[i];
             if (hasSymbols) {
@@ -246,34 +248,65 @@ int main(int argc, char **argv) {
                     if (hasSymbols && I.BranchTarget < CurFuncStart) same_function = false;
 
                     if (same_function && sz <= (size_t)LoopMaxInstrs) {
-                        run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(start_idx, sz), 
-                                *STI, *MCII, *MRI, MCIA.get(), PO);
                         for (size_t j = (size_t)start_idx; j <= i; ++j) InLoop[j] = true;
                     }
                 }
             }
         }
         
+        // Reset iterator for Pass 2
+        FuncIt = FunctionBoundaries.begin();
+        CurFuncStart = CurFuncEnd = 0;
+
+        // Pass 2: Iterate and analyze on-the-fly (Natural end-address order)
         size_t bb_start = 0;
         bool in_bb = false;
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
+            const auto& I = SectionInstrs[i];
+            
+            // Track function boundaries
+            if (hasSymbols) {
+                while (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->second) ++FuncIt;
+                if (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->first && I.Addr < FuncIt->second) {
+                    CurFuncStart = FuncIt->first;
+                    CurFuncEnd = FuncIt->second;
+                } else { CurFuncStart = CurFuncEnd = 0; }
+            }
+
+            // A. Check for loop end at this instruction
+            if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr) {
+                int64_t start_idx = find_idx(I.BranchTarget);
+                if (start_idx != -1) {
+                    size_t sz = i - (size_t)start_idx + 1;
+                    bool same_function = true;
+                    if (hasSymbols && I.BranchTarget < CurFuncStart) same_function = false;
+                    if (same_function && sz <= (size_t)LoopMaxInstrs) {
+                        run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(start_idx, sz), 
+                                      *STI, *MCII, *MRI, MCIA.get(), PO);
+                    }
+                }
+            }
+
+            // B. Basic Block handling
             if (InLoop[i]) {
                 if (in_bb) {
                     size_t bb_size = i - bb_start;
                     if (bb_size > 0 && bb_size <= (size_t)BBMaxInstrs) {
-                        run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
-                                *STI, *MCII, *MRI, MCIA.get(), PO);
+                        run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
+                                      *STI, *MCII, *MRI, MCIA.get(), PO);
                     }
                     in_bb = false;
                 }
                 continue;
             }
+
             if (!in_bb) { bb_start = i; in_bb = true; }
-            if (SectionInstrs[i].EndsBB) {
+
+            if (I.EndsBB) {
                 size_t bb_size = i - bb_start + 1;
                 if (bb_size <= (size_t)BBMaxInstrs) {
-                    run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
-                            *STI, *MCII, *MRI, MCIA.get(), PO);
+                    run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
+                                  *STI, *MCII, *MRI, MCIA.get(), PO);
                 }
                 in_bb = false;
             }
@@ -281,8 +314,8 @@ int main(int argc, char **argv) {
         if (in_bb) {
             size_t bb_size = SectionInstrs.size() - bb_start;
             if (bb_size <= (size_t)BBMaxInstrs) {
-                run_mca(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
-                        *STI, *MCII, *MRI, MCIA.get(), PO);
+                run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
+                              *STI, *MCII, *MRI, MCIA.get(), PO);
             }
         }
     }

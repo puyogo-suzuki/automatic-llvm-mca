@@ -46,3 +46,5 @@ target_link_libraries(mca_unit_tests PRIVATE gtest_main mca_common_lib ${llvm_li
 
 include(GoogleTest)
 gtest_discover_tests(mca_unit_tests)
+add_executable(convergence_test convergence_test.cpp)
+target_link_libraries(convergence_test PRIVATE mca_common_lib ${llvm_libs})
