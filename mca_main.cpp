@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <set>
 #include <map>
+#include <optional>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -44,6 +44,72 @@
 
 using namespace llvm;
 using namespace llvm::object;
+
+namespace {
+
+using FunctionBoundaries = std::map<uint64_t, uint64_t>;
+
+void initializeTargets() {
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmParser();
+    LLVMInitializeX86Disassembler();
+
+    LLVMInitializeAArch64TargetInfo();
+    LLVMInitializeAArch64Target();
+    LLVMInitializeAArch64TargetMC();
+    LLVMInitializeAArch64AsmParser();
+    LLVMInitializeAArch64Disassembler();
+
+    LLVMInitializeARMTargetInfo();
+    LLVMInitializeARMTarget();
+    LLVMInitializeARMTargetMC();
+    LLVMInitializeARMAsmParser();
+    LLVMInitializeARMDisassembler();
+
+    LLVMInitializeRISCVTargetInfo();
+    LLVMInitializeRISCVTarget();
+    LLVMInitializeRISCVTargetMC();
+    LLVMInitializeRISCVAsmParser();
+    LLVMInitializeRISCVDisassembler();
+}
+
+uint64_t getELFSymbolSize(const ObjectFile &Obj, SymbolRef Sym) {
+    if (const auto *Elf32LE = dyn_cast<ELF32LEObjectFile>(&Obj)) {
+        if (auto SymOrErr = Elf32LE->getSymbol(Sym.getRawDataRefImpl())) return (*SymOrErr)->st_size;
+    } else if (const auto *Elf64LE = dyn_cast<ELF64LEObjectFile>(&Obj)) {
+        if (auto SymOrErr = Elf64LE->getSymbol(Sym.getRawDataRefImpl())) return (*SymOrErr)->st_size;
+    } else if (const auto *Elf32BE = dyn_cast<ELF32BEObjectFile>(&Obj)) {
+        if (auto SymOrErr = Elf32BE->getSymbol(Sym.getRawDataRefImpl())) return (*SymOrErr)->st_size;
+    } else if (const auto *Elf64BE = dyn_cast<ELF64BEObjectFile>(&Obj)) {
+        if (auto SymOrErr = Elf64BE->getSymbol(Sym.getRawDataRefImpl())) return (*SymOrErr)->st_size;
+    }
+    return 0;
+}
+
+FunctionBoundaries collectFunctionBoundaries(const ObjectFile &Obj) {
+    FunctionBoundaries boundaries;
+    for (const auto &Sym : Obj.symbols()) {
+        auto TypeOrErr = Sym.getType();
+        if (!TypeOrErr || *TypeOrErr != SymbolRef::ST_Function) continue;
+
+        auto AddrOrErr = Sym.getAddress();
+        if (!AddrOrErr) continue;
+
+        const uint64_t Addr = *AddrOrErr;
+        const uint64_t Size = getELFSymbolSize(Obj, Sym);
+        if (Size > 0) boundaries[Addr] = Addr + Size;
+    }
+    return boundaries;
+}
+
+struct LoopSpan {
+    size_t Start;
+    size_t Size;
+};
+
+}  // namespace
 
 // Command line options
 static cl::opt<std::string> InputBinary(cl::Positional, cl::desc("<input binary>"), cl::Required);
@@ -110,7 +176,7 @@ void run_mca_print(llvm::ArrayRef<Instr> instrs, const MCSubtargetInfo& STI, con
 
     auto ExpectedCycles = P->run();
     if (!ExpectedCycles) { consumeError(ExpectedCycles.takeError()); return; }
-    float mlp = compute_mlp(instrs, WindowWidth, DepKind, AssignKind, MCII);
+    float mlp = compute_mlp(instrs, WindowWidth, DepKind, AssignKind, MCII, MRI);
     uint64_t load_count = 0;
     for (const auto& I : instrs) if (MCII.get(I.Inst.getOpcode()).mayLoad()) load_count++;
     
@@ -121,10 +187,7 @@ void run_mca_print(llvm::ArrayRef<Instr> instrs, const MCSubtargetInfo& STI, con
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
-    LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target(); LLVMInitializeX86TargetMC(); LLVMInitializeX86AsmParser(); LLVMInitializeX86Disassembler();
-    LLVMInitializeAArch64TargetInfo(); LLVMInitializeAArch64Target(); LLVMInitializeAArch64TargetMC(); LLVMInitializeAArch64AsmParser(); LLVMInitializeAArch64Disassembler();
-    LLVMInitializeARMTargetInfo(); LLVMInitializeARMTarget(); LLVMInitializeARMTargetMC(); LLVMInitializeARMAsmParser(); LLVMInitializeARMDisassembler();
-    LLVMInitializeRISCVTargetInfo(); LLVMInitializeRISCVTarget(); LLVMInitializeRISCVTargetMC(); LLVMInitializeRISCVAsmParser(); LLVMInitializeRISCVDisassembler();
+    initializeTargets();
 
     cl::ParseCommandLineOptions(argc, argv, "automatic-llvm-mca optimized C++ tool\n");
 
@@ -167,25 +230,7 @@ int main(int argc, char **argv) {
 
     printf("start_address,end_address,retired_instructions,load_instructions,cycles,mlp\n");
 
-    std::map<uint64_t, uint64_t> FunctionBoundaries; // Start -> End
-    for (const auto &Sym : Obj.symbols()) {
-        auto TypeOrErr = Sym.getType();
-        if (!TypeOrErr || *TypeOrErr != SymbolRef::ST_Function) continue;
-        auto AddrOrErr = Sym.getAddress();
-        if (!AddrOrErr) continue;
-        uint64_t Addr = *AddrOrErr;
-        uint64_t Size = 0;
-        if (auto *Elf32LE = dyn_cast<ELF32LEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf32LE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        } else if (auto *Elf64LE = dyn_cast<ELF64LEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf64LE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        } else if (auto *Elf32BE = dyn_cast<ELF32BEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf32BE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        } else if (auto *Elf64BE = dyn_cast<ELF64BEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf64BE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        }
-        if (Size > 0) FunctionBoundaries[Addr] = Addr + Size;
-    }
+    FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
 
     for (const SectionRef &Section : Obj.sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
@@ -223,78 +268,70 @@ int main(int argc, char **argv) {
 
         ScopedSilence silence;
         std::vector<bool> InLoop(SectionInstrs.size(), false);
-        
-        uint64_t CurFuncStart = 0;
-        uint64_t CurFuncEnd = 0;
-        auto FuncIt = FunctionBoundaries.begin();
-        bool hasSymbols = !FunctionBoundaries.empty();
+        const bool hasSymbols = !FunctionRanges.empty();
+        std::vector<uint64_t> FuncStartAt(SectionInstrs.size(), 0);
 
-        // Pass 1: Pre-detect all loops and mark InLoop
-        for (size_t i = 0; i < SectionInstrs.size(); ++i) {
-            const auto& I = SectionInstrs[i];
-            if (hasSymbols) {
-                while (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->second) ++FuncIt;
-                if (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->first && I.Addr < FuncIt->second) {
-                    CurFuncStart = FuncIt->first;
-                    CurFuncEnd = FuncIt->second;
-                } else { CurFuncStart = CurFuncEnd = 0; }
-            }
-
-            if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr) {
-                int64_t start_idx = find_idx(I.BranchTarget);
-                if (start_idx != -1) {
-                    size_t sz = i - (size_t)start_idx + 1;
-                    bool same_function = true;
-                    if (hasSymbols && I.BranchTarget < CurFuncStart) same_function = false;
-
-                    if (same_function && sz <= (size_t)LoopMaxInstrs) {
-                        for (size_t j = (size_t)start_idx; j <= i; ++j) InLoop[j] = true;
-                    }
+        if (hasSymbols) {
+            auto FuncIt = FunctionRanges.begin();
+            for (size_t i = 0; i < SectionInstrs.size(); ++i) {
+                const uint64_t Addr = SectionInstrs[i].Addr;
+                while (FuncIt != FunctionRanges.end() && Addr >= FuncIt->second) ++FuncIt;
+                if (FuncIt != FunctionRanges.end() && Addr >= FuncIt->first && Addr < FuncIt->second) {
+                    FuncStartAt[i] = FuncIt->first;
                 }
             }
         }
-        
-        // Reset iterator for Pass 2
-        FuncIt = FunctionBoundaries.begin();
-        CurFuncStart = CurFuncEnd = 0;
+
+        auto run_slice = [&](size_t start, size_t size, int max_instrs) {
+            if (size == 0 || max_instrs <= 0) return;
+            for (size_t offset = 0; offset < size; offset += max_instrs) {
+                size_t chunk_size = std::min(size - offset, static_cast<size_t>(max_instrs));
+                run_mca_print(ArrayRef<Instr>(SectionInstrs).slice(start + offset, chunk_size), *STI, *MCII, *MRI, MCIA.get(), PO);
+            }
+        };
+
+        auto is_same_function = [&](size_t idx, uint64_t branch_target) {
+            return !hasSymbols || FuncStartAt[idx] == 0 || branch_target >= FuncStartAt[idx];
+        };
+
+        auto get_loop_span = [&](size_t idx) -> std::optional<LoopSpan> {
+            const auto &I = SectionInstrs[idx];
+            if (!I.IsBranch || I.BranchTarget == 0 || I.BranchTarget >= I.Addr) return std::nullopt;
+
+            int64_t start_idx = find_idx(I.BranchTarget);
+            if (start_idx == -1) return std::nullopt;
+
+            const size_t loop_start = static_cast<size_t>(start_idx);
+            const size_t loop_size = idx - loop_start + 1;
+            if (loop_size > static_cast<size_t>(LoopMaxInstrs) || !is_same_function(idx, I.BranchTarget)) {
+                return std::nullopt;
+            }
+            return LoopSpan{loop_start, loop_size};
+        };
+
+        // Pass 1: Pre-detect all loops and mark InLoop
+        for (size_t i = 0; i < SectionInstrs.size(); ++i) {
+            if (auto loop = get_loop_span(i)) {
+                for (size_t j = loop->Start; j < loop->Start + loop->Size; ++j) InLoop[j] = true;
+            }
+        }
 
         // Pass 2: Iterate and analyze on-the-fly (Natural end-address order)
         size_t bb_start = 0;
         bool in_bb = false;
         for (size_t i = 0; i < SectionInstrs.size(); ++i) {
             const auto& I = SectionInstrs[i];
-            
-            // Track function boundaries
-            if (hasSymbols) {
-                while (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->second) ++FuncIt;
-                if (FuncIt != FunctionBoundaries.end() && I.Addr >= FuncIt->first && I.Addr < FuncIt->second) {
-                    CurFuncStart = FuncIt->first;
-                    CurFuncEnd = FuncIt->second;
-                } else { CurFuncStart = CurFuncEnd = 0; }
-            }
 
             // A. Check for loop end at this instruction
-            if (I.IsBranch && I.BranchTarget != 0 && I.BranchTarget < I.Addr) {
-                int64_t start_idx = find_idx(I.BranchTarget);
-                if (start_idx != -1) {
-                    size_t sz = i - (size_t)start_idx + 1;
-                    bool same_function = true;
-                    if (hasSymbols && I.BranchTarget < CurFuncStart) same_function = false;
-                    if (same_function && sz <= (size_t)LoopMaxInstrs) {
-                        run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(start_idx, sz), 
-                                      *STI, *MCII, *MRI, MCIA.get(), PO);
-                    }
-                }
+            if (auto loop = get_loop_span(i)) {
+                run_slice(loop->Start, loop->Size, LoopMaxInstrs);
             }
 
             // B. Basic Block handling
             if (InLoop[i]) {
                 if (in_bb) {
                     size_t bb_size = i - bb_start;
-                    if (bb_size > 0 && bb_size <= (size_t)BBMaxInstrs) {
-                        run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
-                                      *STI, *MCII, *MRI, MCIA.get(), PO);
-                    }
+                    run_slice(bb_start, bb_size, BBMaxInstrs);
                     in_bb = false;
                 }
                 continue;
@@ -304,19 +341,13 @@ int main(int argc, char **argv) {
 
             if (I.EndsBB) {
                 size_t bb_size = i - bb_start + 1;
-                if (bb_size <= (size_t)BBMaxInstrs) {
-                    run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
-                                  *STI, *MCII, *MRI, MCIA.get(), PO);
-                }
+                run_slice(bb_start, bb_size, BBMaxInstrs);
                 in_bb = false;
             }
         }
         if (in_bb) {
             size_t bb_size = SectionInstrs.size() - bb_start;
-            if (bb_size <= (size_t)BBMaxInstrs) {
-                run_mca_print(llvm::ArrayRef<Instr>(SectionInstrs).slice(bb_start, bb_size), 
-                              *STI, *MCII, *MRI, MCIA.get(), PO);
-            }
+            run_slice(bb_start, bb_size, BBMaxInstrs);
         }
     }
     return 0;

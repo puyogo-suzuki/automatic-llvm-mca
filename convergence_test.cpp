@@ -68,7 +68,7 @@ Result run_mca_varied(llvm::ArrayRef<Instr> instrs, int iterations, const MCSubt
     
     double total_instrs = (double)instrs.size() * iterations;
     double cpi = (double)*ExpectedCycles / total_instrs;
-    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, MCII);
+    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, MCII, MRI);
     return {cpi, mlp};
 }
 

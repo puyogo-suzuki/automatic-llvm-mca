@@ -78,13 +78,13 @@ protected:
 TEST_F(MLPTest, DependencyNone) {
     auto instrs = parseAsm("mov %eax, %ebx\nmovq (%rsi), %rax\nmovq (%rdi), %rbx");
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::Forward, *MCII), 1.5, 0.01);
+    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.5, 0.01);
 }
 
 TEST_F(MLPTest, DependencyOOO) {
     auto instrs = parseAsm("movq (%rdi), %rax\nmovq (%rax), %rbx");
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *MCII), 1.0, 0.01);
+    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.0, 0.01);
 }
 
 TEST_F(MLPTest, IOBarrier) {
@@ -96,11 +96,11 @@ TEST_F(MLPTest, IOBarrier) {
         "movq (%r8), %r9"
     );
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 5, DependencyKind::IO, MLPWindowAssignmentKind::Forward, *MCII), 1.666, 0.01);
+    EXPECT_NEAR(compute_mlp(instrs, 5, DependencyKind::IO, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.666, 0.01);
 }
 
 TEST_F(MLPTest, MaxContainingNone) {
     auto instrs = parseAsm("mov %eax, %ebx\nmovq (%rsi), %rax\nmovq (%rdi), %rbx");
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, *MCII), 2.0, 0.01);
+    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, *MCII, *MRI), 2.0, 0.01);
 }
