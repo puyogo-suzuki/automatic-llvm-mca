@@ -41,9 +41,11 @@ This will produce the standalone tool `build/mca_tool` and the unit tests `build
 
 ```bash
 ./build/mca_tool [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] <elf-binary>
+./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] <elf-binary>
 ```
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
+*   `mlp-objdump` — Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address.
 *   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a72`, `haswell`, `sifive-u74`).
 *   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `x86_64-linux-gnu`).
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).

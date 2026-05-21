@@ -9,11 +9,13 @@ include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
 # Common library for shared logic between tool and tests
-add_library(mca_common_lib STATIC mlp_logic.cpp)
+add_library(mca_common_lib STATIC mlp_logic.cpp mca.cpp splitter.cpp)
 target_link_libraries(mca_common_lib PUBLIC LLVM)
 
 add_executable(mca_tool mca_main.cpp)
+add_executable(mlp_objdump mlp_objdump.cpp)
 add_executable(analyze_distribution analyze_distribution.cpp)
+set_target_properties(mlp_objdump PROPERTIES OUTPUT_NAME "mlp-objdump")
 
 # Explicitly link all necessary components for each supported architecture
 llvm_map_components_to_libnames(llvm_libs 
@@ -31,6 +33,7 @@ llvm_map_components_to_libnames(llvm_libs
 )
 
 target_link_libraries(mca_tool PRIVATE mca_common_lib ${llvm_libs})
+target_link_libraries(mlp_objdump PRIVATE mca_common_lib ${llvm_libs})
 target_link_libraries(analyze_distribution PRIVATE mca_common_lib ${llvm_libs})
 
 # GoogleTest setup
