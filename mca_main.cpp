@@ -44,7 +44,7 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
         clEnumValN(MLPWindowAssignmentKind::Forward, "forward", "Forward window"),
         clEnumValN(MLPWindowAssignmentKind::MaxContaining, "max-containing", "Max MLP of containing windows")
     ), cl::init(MLPWindowAssignmentKind::MaxContaining));
-static cl::opt<int> Iterations("iterations", cl::desc("Number of MCA iterations"), cl::init(100));
+static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(100));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
 

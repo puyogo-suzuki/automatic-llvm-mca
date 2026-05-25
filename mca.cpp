@@ -14,6 +14,7 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/MCA/Context.h"
 #include "llvm/MCA/CustomBehaviour.h"
+#include "llvm/MCA/HWEventListener.h"
 #include "llvm/MCA/InstrBuilder.h"
 #include "llvm/MCA/Pipeline.h"
 #include "llvm/MCA/SourceMgr.h"
@@ -39,6 +40,50 @@ uint64_t getELFSymbolSizeImpl(const ObjectFile &Obj, SymbolRef Sym) {
         if (auto SymOrErr = Elf64BE->getSymbol(Sym.getRawDataRefImpl())) return (*SymOrErr)->st_size;
     }
     return 0;
+}
+
+struct SteadyStateTracker : mca::HWEventListener {
+    unsigned WarmupRetiredLimit;
+    unsigned TotalRetired = 0;
+    unsigned SteadyRetired = 0;
+    unsigned CurrentCycle = 0;
+    unsigned SteadyStartCycle = 0;
+    unsigned SteadyCycles = 0;
+    bool WarmupComplete = false;
+
+    explicit SteadyStateTracker(unsigned WarmupRetiredLimit) : WarmupRetiredLimit(WarmupRetiredLimit) {}
+
+    void onCycleBegin() override { ++CurrentCycle; }
+
+    void onCycleEnd() override {
+        if (WarmupComplete && CurrentCycle > SteadyStartCycle) ++SteadyCycles;
+    }
+
+    void onEvent(const mca::HWInstructionEvent &Event) override {
+        if (Event.Type != mca::HWInstructionEvent::Retired) return;
+        ++TotalRetired;
+        if (WarmupComplete) {
+            ++SteadyRetired;
+            return;
+        }
+        if (TotalRetired >= WarmupRetiredLimit) {
+            WarmupComplete = true;
+            SteadyStartCycle = CurrentCycle;
+        }
+    }
+};
+
+unsigned getWarmupWindowSize(const MCSubtargetInfo &STI) {
+    const auto &SM = STI.getSchedModel();
+    if (SM.isOutOfOrder()) return std::max(SM.MicroOpBufferSize, SM.LoopMicroOpBufferSize);
+    return std::max(1u, SM.IssueWidth);
+}
+
+unsigned computeWarmupIterations(const MCSubtargetInfo &STI, size_t regionInstrCount) {
+    if (regionInstrCount == 0) return 1;
+    const unsigned WindowSize = std::max(1u, getWarmupWindowSize(STI));
+    return std::max(1u, (WindowSize + static_cast<unsigned>(regionInstrCount) - 1) /
+                            static_cast<unsigned>(regionInstrCount));
 }
 
 } // namespace
@@ -141,11 +186,16 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         Sequence.push_back(std::move(*ExpectedInst));
     }
 
-    mca::CircularSourceMgr CSM(Sequence, iterations);
+    const unsigned WarmupIterations = computeWarmupIterations(STI, instrs.size());
+    const unsigned SteadyIterations = std::max(1u, static_cast<unsigned>(iterations) * WarmupIterations);
+    mca::CircularSourceMgr CSM(Sequence, WarmupIterations + SteadyIterations);
     mca::CustomBehaviour CB(STI, CSM, MCII);
     std::unique_ptr<mca::Pipeline> P;
     if (STI.getSchedModel().isOutOfOrder()) P = MCAContext.createDefaultPipeline(PO, CSM, CB);
     else P = MCAContext.createInOrderPipeline(PO, CSM, CB);
+
+    SteadyStateTracker Tracker(instrs.size() * WarmupIterations);
+    P->addEventListener(&Tracker);
 
     auto ExpectedCycles = P->run();
     if (!ExpectedCycles) {
@@ -154,13 +204,15 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     }
 
     McaMetrics M;
-    M.RetiredInstructions = instrs.size() * static_cast<size_t>(iterations);
+    M.RetiredInstructions = Tracker.SteadyRetired;
     M.LoadInstructions = 0;
     for (const auto &I : instrs) if (MCII.get(I.Inst.getOpcode()).mayLoad()) ++M.LoadInstructions;
-    M.LoadInstructions *= static_cast<size_t>(iterations);
-    M.Cycles = static_cast<uint64_t>(*ExpectedCycles);
+    M.LoadInstructions *= static_cast<size_t>(SteadyIterations);
+    M.Cycles = Tracker.SteadyCycles;
     M.MLP = compute_mlp(instrs, windowWidth, depKind, assignKind, MCII, MRI);
-    M.BaseCPI = static_cast<double>(M.Cycles) / (static_cast<double>(instrs.size()) * iterations);
+    if (M.RetiredInstructions > 0) {
+        M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);
+    }
     M.Valid = true;
     return M;
 }

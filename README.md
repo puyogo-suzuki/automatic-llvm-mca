@@ -51,7 +51,7 @@ This will produce the standalone tool `build/mca_tool` and the unit tests `build
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).
 *   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`).
 *   `--mlp-window-assignment <mode>` — (Optional) MLP assignment mode (`forward`, `max-containing`).
-*   `--iterations <N>` — (Optional) Number of MCA iterations (default: 100).
+*   `--iterations <N>` — (Optional) Steady-state repetition multiplier (default: 100).
 
 Note: `call-latency` is fixed to 0.
 
