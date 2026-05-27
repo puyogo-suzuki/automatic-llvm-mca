@@ -95,6 +95,9 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
 static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(100));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
+static cl::opt<bool> IgnoreLoopCarried("ignore-loop-carried",
+    cl::desc("Ignore loop-carried register dependencies during cycle estimation"),
+    cl::init(false));
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
@@ -162,7 +165,8 @@ int main(int argc, char **argv) {
             if (Span.Size == 0) return;
             const SpanKey Key{Span.Start, Span.Size};
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
-                                           *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind);
+                                           *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
+                                           IgnoreLoopCarried);
             mergeMetrics(MetricsBySpan[Key], Result);
         };
 

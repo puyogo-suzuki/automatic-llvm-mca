@@ -27,7 +27,39 @@
 using namespace llvm;
 using namespace llvm::object;
 
+#include "llvm/MCA/HardwareUnits/RegisterFile.h"
+
+// Private member accessor hacks
+struct RegisterFile_RegisterMappings_Tag {};
+auto get_mappings(RegisterFile_RegisterMappings_Tag);
+
+template <typename Tag, auto M>
+struct RobStoreMappings {
+  friend auto get_mappings(Tag) {
+    return M;
+  }
+};
+template struct RobStoreMappings<RegisterFile_RegisterMappings_Tag, &mca::RegisterFile::RegisterMappings>;
+
 namespace {
+
+template<typename Tag, typename Tag::type M>
+struct RobStore {
+  friend typename Tag::type get(Tag) { return M; }
+};
+
+struct ReadState_IsReady_Tag {
+  typedef bool mca::ReadState::*type;
+  friend type get(ReadState_IsReady_Tag);
+};
+template struct RobStore<ReadState_IsReady_Tag, &mca::ReadState::IsReady>;
+
+struct Context_Hardware_Tag {
+  typedef SmallVector<std::unique_ptr<mca::HardwareUnit>, 4> mca::Context::*type;
+  friend type get(Context_Hardware_Tag);
+};
+template struct RobStore<Context_Hardware_Tag, &mca::Context::Hardware>;
+
 
 uint64_t getELFSymbolSizeImpl(const ObjectFile &Obj, SymbolRef Sym) {
     if (const auto *Elf32LE = dyn_cast<ELF32LEObjectFile>(&Obj)) {
@@ -50,25 +82,72 @@ struct SteadyStateTracker : mca::HWEventListener {
     unsigned SteadyStartCycle = 0;
     unsigned SteadyCycles = 0;
     bool WarmupComplete = false;
+    unsigned LoopSize = 0;
+    bool IgnoreLoopCarriedDep = false;
+    mca::RegisterFile *PRF = nullptr;
+    unsigned MaxDispatchedIID = 0;
 
-    explicit SteadyStateTracker(unsigned WarmupRetiredLimit) : WarmupRetiredLimit(WarmupRetiredLimit) {}
+    explicit SteadyStateTracker(unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
+        : WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF) {}
 
-    void onCycleBegin() override { ++CurrentCycle; }
+    void onCycleBegin() override {
+        ++CurrentCycle;
+        if (IgnoreLoopCarriedDep && PRF && LoopSize > 0) {
+            auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
+            auto &mappings = (*PRF).*member_ptr;
+            for (auto &mapping : mappings) {
+                if (mapping.first.isValid()) {
+                    unsigned writerIID = mapping.first.getSourceIndex();
+                    if (writerIID / LoopSize < MaxDispatchedIID / LoopSize) {
+                        mapping.first = mca::WriteRef();
+                    }
+                }
+            }
+        }
+    }
 
     void onCycleEnd() override {
         if (WarmupComplete && CurrentCycle > SteadyStartCycle) ++SteadyCycles;
     }
 
     void onEvent(const mca::HWInstructionEvent &Event) override {
-        if (Event.Type != mca::HWInstructionEvent::Retired) return;
-        ++TotalRetired;
-        if (WarmupComplete) {
-            ++SteadyRetired;
-            return;
-        }
-        if (TotalRetired >= WarmupRetiredLimit) {
-            WarmupComplete = true;
-            SteadyStartCycle = CurrentCycle;
+        if (Event.Type == mca::HWInstructionEvent::Retired) {
+            ++TotalRetired;
+            if (WarmupComplete) {
+                ++SteadyRetired;
+                return;
+            }
+            if (TotalRetired >= WarmupRetiredLimit) {
+                WarmupComplete = true;
+                SteadyStartCycle = CurrentCycle;
+            }
+        } else if (IgnoreLoopCarriedDep && Event.Type == mca::HWInstructionEvent::Dispatched) {
+            mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
+            unsigned readerIID = Event.IR.getSourceIndex();
+            MaxDispatchedIID = std::max(MaxDispatchedIID, readerIID);
+            if (LoopSize > 0) {
+                if (PRF) {
+                    auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
+                    auto &mappings = (*PRF).*member_ptr;
+                    for (auto &mapping : mappings) {
+                        if (mapping.first.isValid()) {
+                            unsigned writerIID = mapping.first.getSourceIndex();
+                            if (writerIID / LoopSize < readerIID / LoopSize) {
+                                mapping.first = mca::WriteRef();
+                            }
+                        }
+                    }
+                }
+                for (mca::ReadState &RS : Inst.getUses()) {
+                    if (!RS.isReady()) {
+                        const mca::CriticalDependency &CRD = RS.getCriticalRegDep();
+                        if (CRD.IID / LoopSize < readerIID / LoopSize) {
+                            RS.*get(ReadState_IsReady_Tag{}) = true;
+                            RS.setIndependentFromDef();
+                        }
+                    }
+                }
+            }
         }
     }
 };
@@ -169,7 +248,7 @@ std::vector<Instr> disassembleTextSection(const SectionRef &Section, const MCDis
 McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, const MCInstrInfo &MCII,
                             const MCRegisterInfo &MRI, const MCInstrAnalysis *MCIA, const mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
-                            MLPWindowAssignmentKind assignKind) {
+                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep) {
     if (instrs.empty()) return {};
 
     mca::Context MCAContext(MRI, STI);
@@ -194,7 +273,16 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     if (STI.getSchedModel().isOutOfOrder()) P = MCAContext.createDefaultPipeline(PO, CSM, CB);
     else P = MCAContext.createInOrderPipeline(PO, CSM, CB);
 
-    SteadyStateTracker Tracker(instrs.size() * WarmupIterations);
+    mca::RegisterFile *PRF = nullptr;
+    auto &hardware = MCAContext.*get(Context_Hardware_Tag{});
+    for (auto &hu : hardware) {
+        if (auto *r = dynamic_cast<mca::RegisterFile *>(hu.get())) {
+            PRF = r;
+            break;
+        }
+    }
+
+    SteadyStateTracker Tracker(instrs.size() * WarmupIterations, instrs.size(), ignoreLoopCarriedDep, PRF);
     P->addEventListener(&Tracker);
 
     auto ExpectedCycles = P->run();
@@ -202,6 +290,8 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         consumeError(ExpectedCycles.takeError());
         return {};
     }
+
+
 
     McaMetrics M;
     M.RetiredInstructions = Tracker.SteadyRetired;

@@ -47,6 +47,9 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
 static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(100));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
+static cl::opt<bool> IgnoreLoopCarried("ignore-loop-carried",
+    cl::desc("Ignore loop-carried register dependencies during cycle estimation"),
+    cl::init(false));
 
 struct ScopedSilence {
     int devNull = -1;
@@ -131,7 +134,8 @@ int main(int argc, char **argv) {
         ScopedSilence silence;
         auto emitRegion = [&](const RegionSpan &Span) {
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
-                                           *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind);
+                                           *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
+                                           IgnoreLoopCarried);
             if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Result);
         };
 
