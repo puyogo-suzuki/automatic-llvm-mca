@@ -55,7 +55,8 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             const llvm::MCInstrInfo &MCII, const llvm::MCRegisterInfo &MRI,
                             const llvm::MCInstrAnalysis *MCIA, const llvm::mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
-                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep = false);
+                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep = false,
+                            int overrideLoadLatency = -1);
 void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
                  int bbMaxInstrs, const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);

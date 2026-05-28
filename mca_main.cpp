@@ -50,6 +50,9 @@ static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions 
 static cl::opt<bool> IgnoreLoopCarried("ignore-loop-carried",
     cl::desc("Ignore loop-carried register dependencies during cycle estimation"),
     cl::init(false));
+static cl::opt<int> OverrideLoadLatency("override-load-latency",
+    cl::desc("Override load instruction latency in cycles"),
+    cl::init(-1));
 
 struct ScopedSilence {
     int devNull = -1;
@@ -135,7 +138,7 @@ int main(int argc, char **argv) {
         auto emitRegion = [&](const RegionSpan &Span) {
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
-                                           IgnoreLoopCarried);
+                                           IgnoreLoopCarried, OverrideLoadLatency);
             if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Result);
         };
 

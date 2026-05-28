@@ -98,6 +98,9 @@ static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions 
 static cl::opt<bool> IgnoreLoopCarried("ignore-loop-carried",
     cl::desc("Ignore loop-carried register dependencies during cycle estimation"),
     cl::init(false));
+static cl::opt<int> OverrideLoadLatency("override-load-latency",
+    cl::desc("Override load instruction latency in cycles"),
+    cl::init(-1));
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
@@ -166,8 +169,13 @@ int main(int argc, char **argv) {
             const SpanKey Key{Span.Start, Span.Size};
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
-                                           IgnoreLoopCarried);
+                                           IgnoreLoopCarried, OverrideLoadLatency);
             mergeMetrics(MetricsBySpan[Key], Result);
+            for (size_t i = Span.Start; i < Span.Start + Span.Size; ++i) {
+                if (SpanForInstr[i].second == 0) {
+                    SpanForInstr[i] = Key;
+                }
+            }
         };
 
         auto rememberBasicBlock = [&](const RegionSpan &Span) {

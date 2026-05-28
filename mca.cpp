@@ -248,7 +248,8 @@ std::vector<Instr> disassembleTextSection(const SectionRef &Section, const MCDis
 McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, const MCInstrInfo &MCII,
                             const MCRegisterInfo &MRI, const MCInstrAnalysis *MCIA, const mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
-                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep) {
+                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep,
+                            int overrideLoadLatency) {
     if (instrs.empty()) return {};
 
     mca::Context MCAContext(MRI, STI);
@@ -262,7 +263,23 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
             consumeError(ExpectedInst.takeError());
             return {};
         }
-        Sequence.push_back(std::move(*ExpectedInst));
+        
+        std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
+        if (Inst->getMayLoad() && overrideLoadLatency > 0) {
+            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
+            for (auto &W : MutableDesc.Writes) {
+                if (W.Latency > 1) {
+                    W.Latency = overrideLoadLatency;
+                }
+            }
+            unsigned MaxLatency = 0;
+            for (const auto &W : MutableDesc.Writes) {
+                MaxLatency = std::max(MaxLatency, W.Latency);
+            }
+            MutableDesc.MaxLatency = MaxLatency;
+        }
+        
+        Sequence.push_back(std::move(Inst));
     }
 
     const unsigned WarmupIterations = computeWarmupIterations(STI, instrs.size());
