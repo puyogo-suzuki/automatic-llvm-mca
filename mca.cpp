@@ -85,25 +85,13 @@ struct SteadyStateTracker : mca::HWEventListener {
     unsigned LoopSize = 0;
     bool IgnoreLoopCarriedDep = false;
     mca::RegisterFile *PRF = nullptr;
-    unsigned MaxDispatchedIID = 0;
+    unsigned CurrentIteration = 0;
 
     explicit SteadyStateTracker(unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
         : WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF) {}
 
     void onCycleBegin() override {
         ++CurrentCycle;
-        if (IgnoreLoopCarriedDep && PRF && LoopSize > 0) {
-            auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
-            auto &mappings = (*PRF).*member_ptr;
-            for (auto &mapping : mappings) {
-                if (mapping.first.isValid()) {
-                    unsigned writerIID = mapping.first.getSourceIndex();
-                    if (writerIID / LoopSize < MaxDispatchedIID / LoopSize) {
-                        mapping.first = mca::WriteRef();
-                    }
-                }
-            }
-        }
     }
 
     void onCycleEnd() override {
@@ -124,24 +112,30 @@ struct SteadyStateTracker : mca::HWEventListener {
         } else if (IgnoreLoopCarriedDep && Event.Type == mca::HWInstructionEvent::Dispatched) {
             mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
             unsigned readerIID = Event.IR.getSourceIndex();
-            MaxDispatchedIID = std::max(MaxDispatchedIID, readerIID);
             if (LoopSize > 0) {
-                if (PRF) {
-                    auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
-                    auto &mappings = (*PRF).*member_ptr;
-                    for (auto &mapping : mappings) {
-                        if (mapping.first.isValid()) {
-                            unsigned writerIID = mapping.first.getSourceIndex();
-                            if (writerIID / LoopSize < readerIID / LoopSize) {
-                                mapping.first = mca::WriteRef();
+                unsigned readerIteration = readerIID / LoopSize;
+                unsigned limitIID = readerIteration * LoopSize;
+                
+                if (readerIteration > CurrentIteration) {
+                    CurrentIteration = readerIteration;
+                    if (PRF) {
+                        auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
+                        auto &mappings = (*PRF).*member_ptr;
+                        for (auto &mapping : mappings) {
+                            if (mapping.first.isValid()) {
+                                unsigned writerIID = mapping.first.getSourceIndex();
+                                if (writerIID < limitIID) {
+                                    mapping.first = mca::WriteRef();
+                                }
                             }
                         }
                     }
                 }
+
                 for (mca::ReadState &RS : Inst.getUses()) {
                     if (!RS.isReady()) {
                         const mca::CriticalDependency &CRD = RS.getCriticalRegDep();
-                        if (CRD.IID / LoopSize < readerIID / LoopSize) {
+                        if (CRD.IID < limitIID) {
                             RS.*get(ReadState_IsReady_Tag{}) = true;
                             RS.setIndependentFromDef();
                         }
