@@ -75,6 +75,9 @@ uint64_t getELFSymbolSizeImpl(const ObjectFile &Obj, SymbolRef Sym) {
 }
 
 struct SteadyStateTracker : mca::HWEventListener {
+    const MCSubtargetInfo &STI;
+    const MCRegisterInfo &MRI;
+    ArrayRef<Instr> Instrs;
     unsigned WarmupRetiredLimit;
     unsigned TotalRetired = 0;
     unsigned SteadyRetired = 0;
@@ -86,18 +89,18 @@ struct SteadyStateTracker : mca::HWEventListener {
     bool IgnoreLoopCarriedDep = false;
     mca::RegisterFile *PRF = nullptr;
     unsigned CurrentIteration = 0;
-
-    explicit SteadyStateTracker(unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
-        : WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF) {}
-
+ 
+    explicit SteadyStateTracker(const MCSubtargetInfo &STI, const MCRegisterInfo &MRI, ArrayRef<Instr> Instrs, unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
+        : STI(STI), MRI(MRI), Instrs(Instrs), WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF) {}
+ 
     void onCycleBegin() override {
         ++CurrentCycle;
     }
-
+ 
     void onCycleEnd() override {
         if (WarmupComplete && CurrentCycle > SteadyStartCycle) ++SteadyCycles;
     }
-
+ 
     void onEvent(const mca::HWInstructionEvent &Event) override {
         if (Event.Type == mca::HWInstructionEvent::Retired) {
             ++TotalRetired;
@@ -109,35 +112,48 @@ struct SteadyStateTracker : mca::HWEventListener {
                 WarmupComplete = true;
                 SteadyStartCycle = CurrentCycle;
             }
-        } else if (IgnoreLoopCarriedDep && Event.Type == mca::HWInstructionEvent::Dispatched) {
+        } else if (Event.Type == mca::HWInstructionEvent::Dispatched) {
             mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
-            unsigned readerIID = Event.IR.getSourceIndex();
-            if (LoopSize > 0) {
-                unsigned readerIteration = readerIID / LoopSize;
-                unsigned limitIID = readerIteration * LoopSize;
-                
-                if (readerIteration > CurrentIteration) {
-                    CurrentIteration = readerIteration;
-                    if (PRF) {
-                        auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
-                        auto &mappings = (*PRF).*member_ptr;
-                        for (auto &mapping : mappings) {
-                            if (mapping.first.isValid()) {
-                                unsigned writerIID = mapping.first.getSourceIndex();
-                                if (writerIID < limitIID) {
-                                    mapping.first = mca::WriteRef();
+            
+            // Break condition flags (NZCV) dependency to allow same-cycle dual issue of conditional instructions
+            if (STI.getCPU() == "cortex-a55") {
+                for (mca::ReadState &RS : Inst.getUses()) {
+                    if (RS.getRegisterID() > 0 && std::strcmp(MRI.getName(RS.getRegisterID()), "NZCV") == 0) {
+                        RS.*get(ReadState_IsReady_Tag{}) = true;
+                        RS.setIndependentFromDef();
+                    }
+                }
+            }
+
+            if (IgnoreLoopCarriedDep) {
+                unsigned readerIID = Event.IR.getSourceIndex();
+                if (LoopSize > 0) {
+                    unsigned readerIteration = readerIID / LoopSize;
+                    unsigned limitIID = readerIteration * LoopSize;
+                    
+                    if (readerIteration > CurrentIteration) {
+                        CurrentIteration = readerIteration;
+                        if (PRF) {
+                            auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
+                            auto &mappings = (*PRF).*member_ptr;
+                            for (auto &mapping : mappings) {
+                                if (mapping.first.isValid()) {
+                                    unsigned writerIID = mapping.first.getSourceIndex();
+                                    if (writerIID < limitIID) {
+                                        mapping.first = mca::WriteRef();
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                for (mca::ReadState &RS : Inst.getUses()) {
-                    if (!RS.isReady()) {
-                        const mca::CriticalDependency &CRD = RS.getCriticalRegDep();
-                        if (CRD.IID < limitIID) {
-                            RS.*get(ReadState_IsReady_Tag{}) = true;
-                            RS.setIndependentFromDef();
+                    for (mca::ReadState &RS : Inst.getUses()) {
+                        if (!RS.isReady()) {
+                            const mca::CriticalDependency &CRD = RS.getCriticalRegDep();
+                            if (CRD.IID < limitIID) {
+                                RS.*get(ReadState_IsReady_Tag{}) = true;
+                                RS.setIndependentFromDef();
+                            }
                         }
                     }
                 }
@@ -259,6 +275,21 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         }
         
         std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
+        // Break condition flags (NZCV) dependency at instruction construction time
+        // to allow same-cycle dual issue of conditional instructions
+        if (STI.getCPU() == "cortex-a55") {
+            for (mca::WriteState &WS : Inst->getDefs()) {
+                if (WS.getRegisterID() > 0 && std::strcmp(MRI.getName(WS.getRegisterID()), "NZCV") == 0) {
+                    WS.setRegisterID(0);
+                }
+            }
+            for (mca::ReadState &RS : Inst->getUses()) {
+                if (RS.getRegisterID() > 0 && std::strcmp(MRI.getName(RS.getRegisterID()), "NZCV") == 0) {
+                    RS.*get(ReadState_IsReady_Tag{}) = true;
+                    RS.setIndependentFromDef();
+                }
+            }
+        }
         if (Inst->getMayLoad() && overrideLoadLatency > 0) {
             mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
             for (auto &W : MutableDesc.Writes) {
@@ -293,7 +324,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         }
     }
 
-    SteadyStateTracker Tracker(instrs.size() * WarmupIterations, instrs.size(), ignoreLoopCarriedDep, PRF);
+    SteadyStateTracker Tracker(STI, MRI, instrs, instrs.size() * WarmupIterations, instrs.size(), ignoreLoopCarriedDep, PRF);
     P->addEventListener(&Tracker);
 
     auto ExpectedCycles = P->run();

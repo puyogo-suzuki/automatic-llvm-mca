@@ -27,6 +27,15 @@ This tool is implemented in pure C++ using LLVM 23 APIs, providing extreme perfo
 *   CMake 3.10+
 *   C++17 compatible compiler
 
+To compile the customized TableGen-based pipeline, you need a local copy of the LLVM AArch64 target sources. Clone `llvm-project` into a directory named `llvm-source` at the project root using a sparse checkout (to save disk space and download time):
+
+```bash
+git clone --depth 1 --sparse https://github.com/llvm/llvm-project.git llvm-source
+cd llvm-source
+git sparse-checkout set llvm/lib/Target/AArch64 llvm/include
+cd ..
+```
+
 ### Build
 
 ```bash
@@ -35,25 +44,43 @@ cmake ..
 make
 ```
 
-This will produce the standalone tool `build/mca_tool` and the unit tests `build/mca_unit_tests`.
+This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp-objdump` and `build/mca-insts-info`, and the unit tests `build/mca_unit_tests`.
+
+## Added/Updated Features and Tools
+
+### 1. New Features
+*   **`--ignore-loop-carried`**: Ignores loop-carried register dependencies during cycle estimation. This is useful for analyzing the theoretical peak throughput limited only by execution resource bounds rather than iteration-carried dependency chains.
+*   **`--override-load-latency <N>`**: Overrides load instruction latencies.
+*   **Cortex-A55 Scheduling Model Customization**:
+    *   Models the physical hardware of Cortex-A55 accurately based on the *Cortex-A55 Software Optimization Guide (SOG)*.
+    *   Includes a specialized **0-cycle same-cycle flag bypass** (`cmp` $\to$ `csel`/conditional branch) which prevents artificial 1-cycle flag latency stalls, bringing the simulated CPI of tight loop kernels down under 1.0 (matching actual hardware).
+    *   Customized TableGen files are located in `ModifiedTarget/AArch64/AArch64SchedA55.td` and integrated into the build pipeline using `llvm-tblgen-23`.
+
+### 2. Standalone Cost Dumper (`mca-insts-info`)
+Outputs a comprehensive table of all target machine instructions along with their TableGen internal names, assembly mnemonics, scheduling classes, execution latencies, reciprocal throughputs, and resource usages. It dynamically resolves variant scheduling classes using register-class operand matching.
+
+```bash
+./build/mca-insts-info --mtriple aarch64-linux-gnu --mcpu cortex-a55 [--format csv/tsv] > output.csv
+```
 
 ## Usage
 
 ```bash
-./build/mca_tool [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] <elf-binary>
-./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] <elf-binary>
+./build/mca_tool [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
+
+./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
 ```
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
 *   `mlp-objdump` — Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address.
-*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a72`, `haswell`, `sifive-u74`).
-*   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `x86_64-linux-gnu`).
+*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a72`, `haswell`).
+*   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `aarch64-linux-gnu`).
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).
 *   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`).
 *   `--mlp-window-assignment <mode>` — (Optional) MLP assignment mode (`forward`, `max-containing`).
 *   `--iterations <N>` — (Optional) Steady-state repetition multiplier (default: 100).
-
-Note: `call-latency` is fixed to 0.
+*   `--ignore-loop-carried` — (Optional) Ignore loop-carried register dependencies.
+*   `--override-load-latency <N>` — (Optional) Override load instruction latency (default: -1, inactive).
 
 ## Tests
 

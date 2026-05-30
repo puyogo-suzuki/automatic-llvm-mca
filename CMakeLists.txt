@@ -5,11 +5,57 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(LLVM 23 REQUIRED CONFIG)
 
-include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
+# Custom command to run llvm-tblgen and generate AArch64GenSubtargetInfo.inc
+set(A55_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedA55.td)
+set(GEN_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenSubtargetInfo.inc)
+set(GEN_REG_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenRegisterInfo.inc)
+set(GEN_INSTR_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenInstrInfo.inc)
+
+add_custom_command(
+    OUTPUT ${GEN_INC_FILE}
+    COMMAND /usr/bin/llvm-tblgen-23 -gen-subtarget
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/include
+            -I /usr/include/llvm-23
+            ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+            -o ${GEN_INC_FILE}
+    DEPENDS ${A55_TD_FILE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+    COMMENT "Generating AArch64GenSubtargetInfo.inc using llvm-tblgen"
+)
+
+add_custom_command(
+    OUTPUT ${GEN_REG_INC_FILE}
+    COMMAND /usr/bin/llvm-tblgen-23 -gen-register-info
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/include
+            -I /usr/include/llvm-23
+            ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+            -o ${GEN_REG_INC_FILE}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+    COMMENT "Generating AArch64GenRegisterInfo.inc using llvm-tblgen"
+)
+
+add_custom_command(
+    OUTPUT ${GEN_INSTR_INC_FILE}
+    COMMAND /usr/bin/llvm-tblgen-23 -gen-instr-info
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/include
+            -I /usr/include/llvm-23
+            ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+            -o ${GEN_INSTR_INC_FILE}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+    COMMENT "Generating AArch64GenInstrInfo.inc using llvm-tblgen"
+)
+
+include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
 # Common library for shared logic between tool and tests
-add_library(mca_common_lib STATIC mlp_logic.cpp mca.cpp splitter.cpp)
+add_library(mca_common_lib STATIC mlp_logic.cpp mca.cpp splitter.cpp custom_a55_sched.cpp ${GEN_INC_FILE} ${GEN_REG_INC_FILE} ${GEN_INSTR_INC_FILE})
 target_link_libraries(mca_common_lib PUBLIC LLVM)
 
 add_executable(mca_tool mca_main.cpp)

@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "custom_a55_sched.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -109,6 +110,9 @@ int main(int argc, char **argv) {
     std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
     std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
     std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, MCPU, ""));
+    if (STI) {
+        llvm::overrideCortexA55SchedModel(*STI);
+    }
     std::unique_ptr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(TT, 0, *MAI, *MCII, *MRI));
 
     if (!MRI || !MAI || !MCII || !STI || !IP) {
