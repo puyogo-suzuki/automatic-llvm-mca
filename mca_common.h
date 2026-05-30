@@ -18,6 +18,7 @@
 
 enum class DependencyKind { None, IO, OOO };
 enum class MLPWindowAssignmentKind { Forward, MaxContaining };
+enum class IgnoreLoopCarriedMode { Default, Force, Disable };
 
 struct Instr {
     uint64_t Addr;

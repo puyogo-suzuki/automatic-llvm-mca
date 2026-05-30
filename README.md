@@ -49,7 +49,10 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 ## Added/Updated Features and Tools
 
 ### 1. New Features
-*   **`--ignore-loop-carried`**: Ignores loop-carried register dependencies during cycle estimation. This is useful for analyzing the theoretical peak throughput limited only by execution resource bounds rather than iteration-carried dependency chains.
+*   **`--ignore-loop-carried <mode>`**: Mode for ignoring loop-carried register dependencies during cycle estimation (options: `default`, `force`, `disable`).
+    *   `default`: Ignores loop-carried dependencies in basic blocks, but considers them in loops (default behavior if option is omitted).
+    *   `force`: Ignores loop-carried dependencies in both loops and basic blocks.
+    *   `disable`: Considers loop-carried dependencies in both loops and basic blocks.
 *   **`--override-load-latency <N>`**: Overrides load instruction latencies.
 *   **Cortex-A55 Scheduling Model Customization**:
     *   Models the physical hardware of Cortex-A55 accurately based on the *Cortex-A55 Software Optimization Guide (SOG)*.
@@ -79,7 +82,7 @@ Outputs a comprehensive table of all target machine instructions along with thei
 *   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`).
 *   `--mlp-window-assignment <mode>` — (Optional) MLP assignment mode (`forward`, `max-containing`).
 *   `--iterations <N>` — (Optional) Steady-state repetition multiplier (default: 100).
-*   `--ignore-loop-carried` — (Optional) Ignore loop-carried register dependencies.
+*   `--ignore-loop-carried <mode>` — (Optional) Ignore loop-carried register dependencies mode (`default`, `force`, or `disable`; default: `default`).
 *   `--override-load-latency <N>` — (Optional) Override load instruction latency (default: -1, inactive).
 
 ## Tests

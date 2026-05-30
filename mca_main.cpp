@@ -48,9 +48,13 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
 static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(100));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
-static cl::opt<bool> IgnoreLoopCarried("ignore-loop-carried",
-    cl::desc("Ignore loop-carried register dependencies during cycle estimation"),
-    cl::init(false));
+static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
+    cl::desc("Ignore loop-carried register dependencies mode"),
+    cl::values(
+        clEnumValN(IgnoreLoopCarriedMode::Default, "default", "Ignore in basic blocks, but not in loops"),
+        clEnumValN(IgnoreLoopCarriedMode::Force, "force", "Ignore in both loops and basic blocks"),
+        clEnumValN(IgnoreLoopCarriedMode::Disable, "disable", "Do not ignore loop-carried dependencies anywhere")
+    ), cl::init(IgnoreLoopCarriedMode::Default));
 static cl::opt<int> OverrideLoadLatency("override-load-latency",
     cl::desc("Override load instruction latency in cycles"),
     cl::init(-1));
@@ -139,14 +143,24 @@ int main(int argc, char **argv) {
         if (SectionInstrs.empty()) continue;
 
         ScopedSilence silence;
-        auto emitRegion = [&](const RegionSpan &Span) {
+        auto emitRegion = [&](const RegionSpan &Span, bool isLoop) {
+            bool ignore = false;
+            if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
+                ignore = true;
+            } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Default) {
+                ignore = !isLoop;
+            } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
+                ignore = false;
+            }
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
-                                           IgnoreLoopCarried, OverrideLoadLatency);
+                                           ignore, OverrideLoadLatency);
             if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Result);
         };
 
-        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, emitRegion, emitRegion);
+        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs,
+                    [&](const RegionSpan &Span) { emitRegion(Span, true); },
+                    [&](const RegionSpan &Span) { emitRegion(Span, false); });
     }
 
     return 0;
