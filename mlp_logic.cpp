@@ -1,16 +1,17 @@
 #include "mca_common.h"
 #include <algorithm>
+#include "llvm/ADT/SmallVector.h"
 
 using namespace llvm;
 
 namespace {
 
 struct RegDeps {
-    std::vector<unsigned> inputs;
-    std::vector<unsigned> outputs;
+    llvm::SmallVector<unsigned, 4> inputs;
+    llvm::SmallVector<unsigned, 4> outputs;
 };
 
-static bool has_intersection(const std::vector<unsigned>& regs, const RegSet& mask) {
+static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const RegSet& mask) {
     for (unsigned r : regs) {
         if (r < mask.size() && mask.test(r)) return true;
     }
@@ -38,8 +39,8 @@ int count_loads_no_dependency(const std::vector<bool> &is_load, int i, int n, in
 }
 
 int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
-                    int width, unsigned reg_count) {
-    RegSet load_dep_regs(reg_count);
+                    int width, RegSet &load_dep_regs) {
+    load_dep_regs.reset();
 
     int count = 0;
     for (int j = i; j < window_end(i, n, width); ++j) {
@@ -59,8 +60,8 @@ int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps>
 }
 
 int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
-                   unsigned reg_count) {
-    RegSet load_dep_regs(reg_count);
+                   RegSet &load_dep_regs) {
+    load_dep_regs.reset();
     for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
 
     int count = 1;
@@ -124,6 +125,7 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     if (load_indices.empty()) return 1.0;
 
     std::vector<float> mlp_vals(n, 1.0);
+    RegSet load_dep_regs(reg_count);
 
     switch (DepKind) {
         case DependencyKind::None:
@@ -134,13 +136,13 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
             break;
         case DependencyKind::OOO:
             for (int i : load_indices) {
-                const float score = static_cast<float>(count_loads_ooo(is_load, io_regs, i, n, width, reg_count));
+                const float score = static_cast<float>(count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
             }
             break;
         case DependencyKind::IO:
             for (int i : load_indices) {
-                const float score = static_cast<float>(count_loads_io(is_load, io_regs, i, n, width, reg_count));
+                const float score = static_cast<float>(count_loads_io(is_load, io_regs, i, n, width, load_dep_regs));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
             }
             break;
