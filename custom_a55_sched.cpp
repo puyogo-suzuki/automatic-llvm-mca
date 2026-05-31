@@ -53,6 +53,11 @@ void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI) {
         STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
         STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
         STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
+    } else if (STI.getCPU() == "cortex-a76" || STI.getCPU() == "cortex-a76ae") {
+        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseN1Model;
+        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
+        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
+        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
     }
 }
 }

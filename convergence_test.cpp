@@ -106,6 +106,9 @@ int main(int argc, char **argv) {
     const MCSchedModel &SM = STI->getSchedModel();
     PO.MicroOpQueueSize = SM.MicroOpBufferSize;
     PO.DispatchWidth = SM.IssueWidth;
+    if (STI->getCPU() == "cortex-a76" || STI->getCPU() == "cortex-a76ae" || STI->getCPU() == "neoverse-n1") {
+        PO.DispatchWidth = 8;
+    }
     PO.AssumeNoAlias = true;
 
     // Find 3 representative loops

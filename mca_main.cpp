@@ -58,6 +58,9 @@ static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
 static cl::opt<int> OverrideLoadLatency("override-load-latency",
     cl::desc("Override load instruction latency in cycles"),
     cl::init(-1));
+static cl::opt<std::string> TargetAddressStr("target-address",
+    cl::desc("Only analyze region starting at this hex address"),
+    cl::init(""));
 
 struct ScopedSilence {
     int devNull = -1;
@@ -131,7 +134,15 @@ int main(int argc, char **argv) {
     const MCSchedModel &SM = STI->getSchedModel();
     PO.MicroOpQueueSize = SM.MicroOpBufferSize;
     PO.DispatchWidth = SM.IssueWidth;
+    if (STI->getCPU() == "cortex-a76" || STI->getCPU() == "cortex-a76ae" || STI->getCPU() == "neoverse-n1") {
+        PO.DispatchWidth = 8;
+    }
     PO.AssumeNoAlias = true;
+
+    uint64_t TargetAddress = 0;
+    if (!TargetAddressStr.empty()) {
+        TargetAddress = std::stoull(TargetAddressStr, nullptr, 16);
+    }
 
     std::printf("start_address,end_address,retired_instructions,load_instructions,cycles,mlp\n");
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
@@ -144,6 +155,8 @@ int main(int argc, char **argv) {
 
         ScopedSilence silence;
         auto emitRegion = [&](const RegionSpan &Span, bool isLoop) {
+            uint64_t regionAddr = SectionInstrs[Span.Start].Addr;
+            if (TargetAddress != 0 && regionAddr != TargetAddress) return;
             bool ignore = false;
             if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
                 ignore = true;
