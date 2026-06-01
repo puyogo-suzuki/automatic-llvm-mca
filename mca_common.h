@@ -16,7 +16,7 @@
 #include "llvm/MCA/Context.h"
 #include "llvm/Object/ObjectFile.h"
 
-enum class DependencyKind { None, IO, OOO };
+enum class DependencyKind { None, IO, OOO, Dependency };
 enum class MLPWindowAssignmentKind { Forward, MaxContaining };
 enum class IgnoreLoopCarriedMode { Default, Force, Disable };
 

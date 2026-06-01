@@ -104,3 +104,16 @@ TEST_F(MLPTest, MaxContainingNone) {
     ASSERT_FALSE(instrs.empty());
     EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, *MCII, *MRI), 2.0, 0.01);
 }
+
+TEST_F(MLPTest, DependencyMode) {
+    auto instrs = parseAsm(
+        "movq (%rdi), %rax\n"
+        "addq $1, %rbx\n"
+        "addq %rax, %rcx\n"
+        "movq (%rsi), %rdx\n"
+        "subq $1, %rdx"
+    );
+    ASSERT_FALSE(instrs.empty());
+    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::Dependency, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.5, 0.01);
+}
+

@@ -86,7 +86,8 @@ static cl::opt<DependencyKind> DepKind("dependency", cl::desc("Dependency mode")
     cl::values(
         clEnumValN(DependencyKind::None, "none", "No dependency tracking"),
         clEnumValN(DependencyKind::IO, "io", "In-order dependency"),
-        clEnumValN(DependencyKind::OOO, "ooo", "Out-of-order dependency")
+        clEnumValN(DependencyKind::OOO, "ooo", "Out-of-order dependency"),
+        clEnumValN(DependencyKind::Dependency, "dependency", "Load-use dependency distance")
     ), cl::init(DependencyKind::None));
 static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::desc("Per-load MLP assignment mode"),
     cl::values(

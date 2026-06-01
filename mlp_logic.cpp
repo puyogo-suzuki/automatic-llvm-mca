@@ -81,6 +81,24 @@ int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> 
     return count;
 }
 
+int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
+                           RegSet &load_dep_regs) {
+    load_dep_regs.reset();
+    for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
+
+    int count = 1;
+    for (int j = i + 1; j < window_end(i, n, width); ++j) {
+        if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
+        ++count;
+        if (is_load[j]) {
+            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+        } else {
+            for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+        }
+    }
+    return count;
+}
+
 void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<bool> &is_load, int i, int n, int width,
                       float score, MLPWindowAssignmentKind assign_kind) {
     if (assign_kind == MLPWindowAssignmentKind::Forward) {
@@ -143,6 +161,12 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         case DependencyKind::IO:
             for (int i : load_indices) {
                 const float score = static_cast<float>(count_loads_io(is_load, io_regs, i, n, width, load_dep_regs));
+                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
+            }
+            break;
+        case DependencyKind::Dependency:
+            for (int i : load_indices) {
+                const float score = static_cast<float>(count_loads_dependency(is_load, io_regs, i, n, width, load_dep_regs));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
             }
             break;
