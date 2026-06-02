@@ -84,8 +84,9 @@ struct ScopedSilence {
     }
 };
 
-static void printResultCsv(const Instr &First, const Instr &Last, const McaMetrics &M) {
-    std::printf("0x%lx,0x%lx,%lu,%lu,%u,%.2f\n", First.Addr, Last.Addr,
+static void printResultCsv(const Instr &First, const Instr &Last, size_t Length, const McaMetrics &M) {
+    std::printf("0x%lx,0x%lx,%lu,%lu,%lu,%u,%.2f\n", First.Addr, Last.Addr,
+                static_cast<unsigned long>(Length),
                 static_cast<unsigned long>(M.RetiredInstructions),
                 static_cast<unsigned long>(M.LoadInstructions),
                 static_cast<unsigned>(M.Cycles), M.MLP);
@@ -145,7 +146,7 @@ int main(int argc, char **argv) {
         TargetAddress = std::stoull(TargetAddressStr, nullptr, 16);
     }
 
-    std::printf("start_address,end_address,retired_instructions,load_instructions,cycles,mlp\n");
+    std::printf("start_address,end_address,length,retired_instructions,load_instructions,cycles,mlp\n");
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
 
     for (const SectionRef &Section : Obj.sections()) {
@@ -169,7 +170,7 @@ int main(int argc, char **argv) {
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
                                            ignore, OverrideLoadLatency);
-            if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Result);
+            if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Span.Size, Result);
         };
 
         walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs,
