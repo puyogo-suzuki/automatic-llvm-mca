@@ -18,23 +18,15 @@
 
 using namespace llvm;
 
-class MLPTest : public ::testing::Test {
-protected:
-    static void SetUpTestSuite() {
-        LLVMInitializeX86TargetInfo();
-        LLVMInitializeX86Target();
-        LLVMInitializeX86TargetMC();
-        LLVMInitializeX86AsmParser();
-    }
-
-    std::unique_ptr<MCInstrInfo> MCII;
-    std::unique_ptr<MCRegisterInfo> MRI;
-    std::unique_ptr<MCSubtargetInfo> STI;
-    std::unique_ptr<MCAsmInfo> MAI;
-    const Target* TheTarget;
+struct TestContext {
     Triple TT;
+    const Target* TheTarget;
+    std::unique_ptr<MCRegisterInfo> MRI;
+    std::unique_ptr<MCAsmInfo> MAI;
+    std::unique_ptr<MCInstrInfo> MCII;
+    std::unique_ptr<MCSubtargetInfo> STI;
 
-    MLPTest() : TT("x86_64-unknown-linux-gnu") {
+    TestContext() : TT("x86_64-unknown-linux-gnu") {
         std::string Error;
         TheTarget = TargetRegistry::lookupTarget(TT, Error);
         MRI.reset(TheTarget->createMCRegInfo(TT));
@@ -42,53 +34,76 @@ protected:
         MCII.reset(TheTarget->createMCInstrInfo());
         STI.reset(TheTarget->createMCSubtargetInfo(TT, "haswell", ""));
     }
-
-    std::vector<Instr> parseAsm(const std::string& asm_code) {
-        SourceMgr SrcMgr;
-        SrcMgr.AddNewSourceBuffer(MemoryBuffer::getMemBuffer(asm_code), SMLoc());
-        
-        MCContext Ctx(TT, *MAI, *MRI, *STI, &SrcMgr);
-        MCObjectFileInfo MOFI;
-        MOFI.initMCObjectFileInfo(Ctx, /*PIC=*/false);
-        Ctx.setObjectFileInfo(&MOFI);
-
-        std::vector<Instr> instrs;
-        struct TestStreamer : public MCStreamer {
-            std::vector<Instr>& out;
-            TestStreamer(MCContext& ctx, std::vector<Instr>& o) : MCStreamer(ctx), out(o) {}
-            void emitInstruction(const MCInst& Inst, const MCSubtargetInfo& STI) override {
-                Instr I; I.Inst = Inst; I.Addr = out.size() * 4;
-                out.push_back(I);
-            }
-            bool emitSymbolAttribute(MCSymbol*, MCSymbolAttr) override { return true; }
-            void emitCommonSymbol(MCSymbol*, uint64_t, Align) override {}
-            void emitZerofill(MCSection*, MCSymbol*, uint64_t, Align, SMLoc) override {}
-            void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {}
-        };
-
-        TestStreamer streamer(Ctx, instrs);
-        std::unique_ptr<MCAsmParser> parser(createMCAsmParser(SrcMgr, Ctx, streamer, *MAI));
-        std::unique_ptr<MCTargetAsmParser> tap(TheTarget->createMCAsmParser(*STI, *parser, *MCII));
-        parser->setTargetParser(*tap);
-        parser->Run(false);
-        return instrs;
-    }
 };
 
-TEST_F(MLPTest, DependencyNone) {
-    auto instrs = parseAsm("mov %eax, %ebx\nmovq (%rsi), %rax\nmovq (%rdi), %rbx");
-    ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.5, 0.01);
+static void initLLVMX86() {
+    static bool initialized = false;
+    if (!initialized) {
+        LLVMInitializeX86TargetInfo();
+        LLVMInitializeX86Target();
+        LLVMInitializeX86TargetMC();
+        LLVMInitializeX86AsmParser();
+        initialized = true;
+    }
 }
 
-TEST_F(MLPTest, DependencyOOO) {
-    auto instrs = parseAsm("movq (%rdi), %rax\nmovq (%rax), %rbx");
-    ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.0, 0.01);
+static std::vector<Instr> parseAsm(const TestContext &TC, const std::string& asm_code) {
+    SourceMgr SrcMgr;
+    SrcMgr.AddNewSourceBuffer(MemoryBuffer::getMemBuffer(asm_code), SMLoc());
+    
+    MCContext Ctx(TC.TT, *TC.MAI, *TC.MRI, *TC.STI, &SrcMgr);
+    MCObjectFileInfo MOFI;
+    MOFI.initMCObjectFileInfo(Ctx, /*PIC=*/false);
+    Ctx.setObjectFileInfo(&MOFI);
+
+    std::vector<Instr> instrs;
+    struct TestStreamer : public MCStreamer {
+        std::vector<Instr>& out;
+        TestStreamer(MCContext& ctx, std::vector<Instr>& o) : MCStreamer(ctx), out(o) {}
+        void emitInstruction(const MCInst& Inst, const MCSubtargetInfo& STI) override {
+            Instr I; I.Inst = Inst; I.Addr = out.size() * 4;
+            out.push_back(I);
+        }
+        bool emitSymbolAttribute(MCSymbol*, MCSymbolAttr) override { return true; }
+        void emitCommonSymbol(MCSymbol*, uint64_t, Align) override {}
+        void emitZerofill(MCSection*, MCSymbol*, uint64_t, Align, SMLoc) override {}
+        void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {}
+    };
+
+    TestStreamer streamer(Ctx, instrs);
+    std::unique_ptr<MCAsmParser> parser(createMCAsmParser(SrcMgr, Ctx, streamer, *TC.MAI));
+    std::unique_ptr<MCTargetAsmParser> tap(TC.TheTarget->createMCAsmParser(*TC.STI, *parser, *TC.MCII));
+    parser->setTargetParser(*tap);
+    parser->Run(false);
+    return instrs;
 }
 
-TEST_F(MLPTest, IOBarrier) {
-    auto instrs = parseAsm(
+TEST(MLPTest, DependencyNone) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC, "mov %eax, %ebx\nmovq (%rsi), %rax\nmovq (%rdi), %rbx");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio);
+    EXPECT_NEAR(val1, 1.5, 0.01);
+    EXPECT_NEAR(ratio, 1.0, 0.01);
+}
+
+TEST(MLPTest, DependencyOOO) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC, "movq (%rdi), %rax\nmovq (%rax), %rbx");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio);
+    EXPECT_NEAR(val1, 1.0, 0.01);
+    EXPECT_NEAR(ratio, 0.75, 0.01);
+}
+
+TEST(MLPTest, IOBarrier) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC,
         "movq (%rdi), %rax\n"
         "movq (%rsi), %rbx\n"
         "addq $1, %rcx\n"
@@ -96,17 +111,26 @@ TEST_F(MLPTest, IOBarrier) {
         "movq (%r8), %r9"
     );
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 5, DependencyKind::IO, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.666, 0.01);
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 5, DependencyKind::IO, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio);
+    EXPECT_NEAR(val1, 1.666, 0.01);
+    EXPECT_NEAR(ratio, 0.8888, 0.01);
 }
 
-TEST_F(MLPTest, MaxContainingNone) {
-    auto instrs = parseAsm("mov %eax, %ebx\nmovq (%rsi), %rax\nmovq (%rdi), %rbx");
+TEST(MLPTest, MaxContainingNone) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC, "mov %eax, %ebx\nmovq (%rsi), %rax\nmovq (%rdi), %rbx");
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, *MCII, *MRI), 2.0, 0.01);
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, *TC.MCII, *TC.MRI, ratio);
+    EXPECT_NEAR(val1, 2.0, 0.01);
 }
 
-TEST_F(MLPTest, DependencyMode) {
-    auto instrs = parseAsm(
+TEST(MLPTest, DependencyMode) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC,
         "movq (%rdi), %rax\n"
         "addq $1, %rbx\n"
         "addq %rax, %rcx\n"
@@ -114,6 +138,7 @@ TEST_F(MLPTest, DependencyMode) {
         "subq $1, %rdx"
     );
     ASSERT_FALSE(instrs.empty());
-    EXPECT_NEAR(compute_mlp(instrs, 2, DependencyKind::Dependency, MLPWindowAssignmentKind::Forward, *MCII, *MRI), 1.5, 0.01);
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 2, DependencyKind::Dependency, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio);
+    EXPECT_NEAR(val1, 1.5, 0.01);
 }
-

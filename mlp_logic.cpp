@@ -99,6 +99,77 @@ int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<R
     return count;
 }
 
+float count_loads_ooo_r(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
+                        int width, RegSet &load_dep_regs) {
+    load_dep_regs.reset();
+
+    int count_dep = 0;
+    int count_indep = 0;
+    for (int j = i; j < window_end(i, n, width); ++j) {
+        const bool is_dep = has_intersection(io_regs[j].inputs, load_dep_regs);
+        if (is_load[j]) {
+            if (is_dep) {
+                ++count_dep;
+            } else {
+                ++count_indep;
+            }
+            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+        } else if (!io_regs[j].outputs.empty()) {
+            if (is_dep) {
+                for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+            } else {
+                for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+            }
+        }
+    }
+    int total = count_indep + count_dep;
+    if (total == 0) return -1.0f;
+    return static_cast<float>(count_indep) / total;
+}
+
+float count_loads_io_r(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
+                       int width, RegSet &load_dep_regs) {
+    load_dep_regs.reset();
+
+    int count_indep = 0;
+    int count_dep = 0;
+    bool barrier_hit = false;
+
+    if (is_load[i]) {
+        count_indep = 1;
+        for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
+    }
+
+    for (int j = i + 1; j < window_end(i, n, width); ++j) {
+        if (!barrier_hit) {
+            if (has_intersection(io_regs[j].inputs, load_dep_regs)) {
+                barrier_hit = true;
+            }
+        }
+
+        if (barrier_hit) {
+            if (is_load[j]) {
+                ++count_dep;
+            }
+        } else {
+            if (is_load[j]) {
+                ++count_indep;
+                for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+            } else {
+                if (has_intersection(io_regs[j].inputs, load_dep_regs)) {
+                    for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+                } else {
+                    for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+                }
+            }
+        }
+    }
+
+    int total = count_indep + count_dep;
+    if (total == 0) return -1.0f;
+    return static_cast<float>(count_indep) / total;
+}
+
 void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<bool> &is_load, int i, int n, int width,
                       float score, MLPWindowAssignmentKind assign_kind) {
     if (assign_kind == MLPWindowAssignmentKind::Forward) {
@@ -117,10 +188,14 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                   DependencyKind DepKind, 
                   MLPWindowAssignmentKind AssignKind, 
                   const llvm::MCInstrInfo& MCII,
-                  const llvm::MCRegisterInfo& MRI) {
+                  const llvm::MCRegisterInfo& MRI,
+                  float &mlp_r) {
 
     int n = instrs.size();
-    if (n == 0) return 1.0;
+    if (n == 0) {
+        mlp_r = 1.0f;
+        return 1.0f;
+    }
     const unsigned reg_count = MRI.getNumRegs() + 1;
     std::vector<bool> is_load(n, false);
     std::vector<RegDeps> io_regs(n);
@@ -140,38 +215,60 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         for (MCPhysReg R : MCID.implicit_defs()) io_regs[i].outputs.push_back(R);
         for (MCPhysReg R : MCID.implicit_uses()) io_regs[i].inputs.push_back(R);
     }
-    if (load_indices.empty()) return 1.0;
+    if (load_indices.empty()) {
+        mlp_r = 1.0f;
+        return 1.0f;
+    }
 
-    std::vector<float> mlp_vals(n, 1.0);
+    std::vector<float> mlp_vals(n, 1.0f);
+    std::vector<float> mlp_r_vals(n, -1.0f);
     RegSet load_dep_regs(reg_count);
 
     switch (DepKind) {
         case DependencyKind::None:
             for (int i : load_indices) {
-                const float score = static_cast<float>(count_loads_no_dependency(is_load, i, n, width));
+                float score = static_cast<float>(count_loads_no_dependency(is_load, i, n, width));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, 1.0f, AssignKind);
             }
             break;
         case DependencyKind::OOO:
             for (int i : load_indices) {
-                const float score = static_cast<float>(count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs));
+                float score = static_cast<float>(count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
+                float score_r = count_loads_ooo_r(is_load, io_regs, i, n, width, load_dep_regs);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind);
             }
             break;
         case DependencyKind::IO:
             for (int i : load_indices) {
-                const float score = static_cast<float>(count_loads_io(is_load, io_regs, i, n, width, load_dep_regs));
+                float score = static_cast<float>(count_loads_io(is_load, io_regs, i, n, width, load_dep_regs));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
+                float score_r = count_loads_io_r(is_load, io_regs, i, n, width, load_dep_regs);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind);
             }
             break;
         case DependencyKind::Dependency:
             for (int i : load_indices) {
-                const float score = static_cast<float>(count_loads_dependency(is_load, io_regs, i, n, width, load_dep_regs));
+                float score = static_cast<float>(count_loads_dependency(is_load, io_regs, i, n, width, load_dep_regs));
                 assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, 1.0f, AssignKind);
             }
             break;
     }
     double total_mlp = 0;
     for (int i : load_indices) total_mlp += mlp_vals[i];
-    return (float)(total_mlp / load_indices.size());
+    float avg_mlp = (float)(total_mlp / load_indices.size());
+
+    double total_mlp_r = 0;
+    int count_r = 0;
+    for (int i : load_indices) {
+        if (mlp_r_vals[i] >= 0.0f) {
+            total_mlp_r += mlp_r_vals[i];
+            count_r++;
+        }
+    }
+    mlp_r = (count_r == 0) ? 0.0f : (float)(total_mlp_r / count_r);
+
+    return avg_mlp;
 }

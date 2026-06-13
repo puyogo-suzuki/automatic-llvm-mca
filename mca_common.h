@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 #include <string>
+#include <utility>
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -41,6 +42,7 @@ struct McaMetrics {
     uint64_t LoadInstructions = 0;
     uint64_t Cycles = 0;
     float MLP = 0.0f;
+    float MLP_R = 0.0f;
     double BaseCPI = 0.0;
     bool Valid = false;
 };
@@ -66,6 +68,7 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                   DependencyKind DepKind, 
                   MLPWindowAssignmentKind AssignKind, 
                   const llvm::MCInstrInfo& MCII,
-                  const llvm::MCRegisterInfo& MRI);
+                  const llvm::MCRegisterInfo& MRI,
+                  float &mlp_r);
 
 #endif
