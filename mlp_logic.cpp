@@ -87,7 +87,7 @@ int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<R
     for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
 
     int count = 1;
-    for (int j = i + 1; j < window_end(i, n, width); ++j) {
+    for (int j = i + 1; j < window_end(i, n, n /* width ... ignore width! */); ++j) {
         if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
         ++count;
         if (is_load[j]) {
