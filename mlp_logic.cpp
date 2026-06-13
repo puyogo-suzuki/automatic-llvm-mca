@@ -39,72 +39,11 @@ int count_loads_no_dependency(const std::vector<bool> &is_load, int i, int n, in
 }
 
 int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
-                    int width, RegSet &load_dep_regs) {
+                    int width, RegSet &load_dep_regs, float &ratio) {
     load_dep_regs.reset();
 
-    int count = 0;
-    for (int j = i; j < window_end(i, n, width); ++j) {
-        const bool is_dep = has_intersection(io_regs[j].inputs, load_dep_regs);
-        if (is_load[j]) {
-            if (!is_dep) ++count;
-            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
-        } else if (!io_regs[j].outputs.empty()) {
-            if (is_dep) {
-                for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
-            } else {
-                for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
-            }
-        }
-    }
-    return count;
-}
-
-int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
-                   RegSet &load_dep_regs) {
-    load_dep_regs.reset();
-    for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
-
-    int count = 1;
-    for (int j = i + 1; j < window_end(i, n, width); ++j) {
-        if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
-        if (is_load[j]) {
-            ++count;
-            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
-        } else {
-            if (has_intersection(io_regs[j].inputs, load_dep_regs)) {
-                for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
-            } else {
-                for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
-            }
-        }
-    }
-    return count;
-}
-
-int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
-                           RegSet &load_dep_regs) {
-    load_dep_regs.reset();
-    for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
-
-    int count = 1;
-    for (int j = i + 1; j < window_end(i, n, n /* width ... ignore width! */); ++j) {
-        if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
-        ++count;
-        if (is_load[j]) {
-            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
-        } else {
-            for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
-        }
-    }
-    return count;
-}
-
-float count_loads_ooo_r(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
-                        int width, RegSet &load_dep_regs) {
-    load_dep_regs.reset();
-
-    int count_dep = 0;
     int count_indep = 0;
+    int count_dep = 0;
     for (int j = i; j < window_end(i, n, width); ++j) {
         const bool is_dep = has_intersection(io_regs[j].inputs, load_dep_regs);
         if (is_load[j]) {
@@ -123,12 +62,12 @@ float count_loads_ooo_r(const std::vector<bool> &is_load, const std::vector<RegD
         }
     }
     int total = count_indep + count_dep;
-    if (total == 0) return -1.0f;
-    return static_cast<float>(count_indep) / total;
+    ratio = (total == 0) ? -1.0f : static_cast<float>(count_indep) / total;
+    return count_indep;
 }
 
-float count_loads_io_r(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
-                       int width, RegSet &load_dep_regs) {
+int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
+                   int width, RegSet &load_dep_regs, float &ratio) {
     load_dep_regs.reset();
 
     int count_indep = 0;
@@ -166,8 +105,26 @@ float count_loads_io_r(const std::vector<bool> &is_load, const std::vector<RegDe
     }
 
     int total = count_indep + count_dep;
-    if (total == 0) return -1.0f;
-    return static_cast<float>(count_indep) / total;
+    ratio = (total == 0) ? -1.0f : static_cast<float>(count_indep) / total;
+    return count_indep;
+}
+
+int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
+                           RegSet &load_dep_regs) {
+    load_dep_regs.reset();
+    for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
+
+    int count = 1;
+    for (int j = i + 1; j < window_end(i, n, n /* width ... ignore width! */); ++j) {
+        if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
+        ++count;
+        if (is_load[j]) {
+            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+        } else {
+            for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+        }
+    }
+    return count;
 }
 
 void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<bool> &is_load, int i, int n, int width,
@@ -234,17 +191,17 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
             break;
         case DependencyKind::OOO:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs));
-                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
-                float score_r = count_loads_ooo_r(is_load, io_regs, i, n, width, load_dep_regs);
+                float score_r = 0.0f;
+                int score = count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs, score_r);
+                assign_mlp_score(mlp_vals, is_load, i, n, width, static_cast<float>(score), AssignKind);
                 assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind);
             }
             break;
         case DependencyKind::IO:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_io(is_load, io_regs, i, n, width, load_dep_regs));
-                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
-                float score_r = count_loads_io_r(is_load, io_regs, i, n, width, load_dep_regs);
+                float score_r = 0.0f;
+                int score = count_loads_io(is_load, io_regs, i, n, width, load_dep_regs, score_r);
+                assign_mlp_score(mlp_vals, is_load, i, n, width, static_cast<float>(score), AssignKind);
                 assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind);
             }
             break;
