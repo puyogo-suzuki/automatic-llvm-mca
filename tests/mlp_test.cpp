@@ -142,3 +142,24 @@ TEST(MLPTest, DependencyMode) {
     float val1 = compute_mlp(instrs, 2, DependencyKind::Dependency, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio);
     EXPECT_NEAR(val1, 1.5, 0.01);
 }
+
+TEST(MLPTest, WindowLoopNone) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC, "movq (%rsi), %rax\nmovq (%rdi), %rbx");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val1, 2.0, 0.01);
+}
+
+TEST(MLPTest, WindowLoopOOO) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC, "movq (%rdi), %rax\nmovq (%rax), %rbx");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    float val1 = compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val1, 1.5, 0.01);
+    EXPECT_NEAR(ratio, 0.75, 0.01);
+}

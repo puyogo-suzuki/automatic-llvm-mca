@@ -59,6 +59,13 @@ static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
 static cl::opt<int> OverrideLoadLatency("override-load-latency",
     cl::desc("Override load instruction latency in cycles"),
     cl::init(-1));
+static cl::opt<MlpWindowLoopMode> MlpWindowLoop("mlp-window-loop",
+    cl::desc("Loop back to the start of the basic block mode"),
+    cl::values(
+        clEnumValN(MlpWindowLoopMode::Default, "default", "Loop back to the start only for loops"),
+        clEnumValN(MlpWindowLoopMode::Force, "force", "Always loop back to the start (even for non-loops)"),
+        clEnumValN(MlpWindowLoopMode::Disable, "disable", "Never loop back to the start")
+    ), cl::init(MlpWindowLoopMode::Default));
 static cl::opt<std::string> TargetAddressStr("target-address",
     cl::desc("Only analyze region starting at this hex address"),
     cl::init(""));
@@ -84,9 +91,10 @@ struct ScopedSilence {
     }
 };
 
-static void printResultCsv(const Instr &First, const Instr &Last, size_t Length, const McaMetrics &M) {
-    std::printf("0x%lx,0x%lx,%lu,%lu,%lu,%u,%.2f,%.2f\n", First.Addr, Last.Addr,
+static void printResultCsv(const Instr &First, const Instr &Last, size_t Length, bool isLoop, const McaMetrics &M) {
+    std::printf("0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f\n", First.Addr, Last.Addr,
                 static_cast<unsigned long>(Length),
+                isLoop ? 1 : 0,
                 static_cast<unsigned long>(M.RetiredInstructions),
                 static_cast<unsigned long>(M.LoadInstructions),
                 static_cast<unsigned>(M.Cycles), M.MLP, M.MLP_R);
@@ -152,7 +160,7 @@ int main(int argc, char **argv) {
         TargetAddress = std::stoull(TargetAddressStr, nullptr, 16);
     }
 
-    std::printf("start_address,end_address,length,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
+    std::printf("start_address,end_address,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
 
     for (const SectionRef &Section : Obj.sections()) {
@@ -173,10 +181,18 @@ int main(int argc, char **argv) {
             } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
                 ignore = false;
             }
+            bool mlpLoop = false;
+            if (MlpWindowLoop == MlpWindowLoopMode::Force) {
+                mlpLoop = true;
+            } else if (MlpWindowLoop == MlpWindowLoopMode::Default) {
+                mlpLoop = isLoop;
+            } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
+                mlpLoop = false;
+            }
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
-                                           ignore, OverrideLoadLatency);
-            if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Span.Size, Result);
+                                           ignore, OverrideLoadLatency, mlpLoop);
+            if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Span.Size, isLoop, Result);
         };
 
         walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs,

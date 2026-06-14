@@ -107,6 +107,13 @@ static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
 static cl::opt<int> OverrideLoadLatency("override-load-latency",
     cl::desc("Override load instruction latency in cycles"),
     cl::init(-1));
+static cl::opt<MlpWindowLoopMode> MlpWindowLoop("mlp-window-loop",
+    cl::desc("Loop back to the start of the basic block mode"),
+    cl::values(
+        clEnumValN(MlpWindowLoopMode::Default, "default", "Loop back to the start only for loops"),
+        clEnumValN(MlpWindowLoopMode::Force, "force", "Always loop back to the start (even for non-loops)"),
+        clEnumValN(MlpWindowLoopMode::Disable, "disable", "Never loop back to the start")
+    ), cl::init(MlpWindowLoopMode::Default));
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
@@ -193,9 +200,17 @@ int main(int argc, char **argv) {
             } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
                 ignore = false;
             }
+            bool mlpLoop = false;
+            if (MlpWindowLoop == MlpWindowLoopMode::Force) {
+                mlpLoop = true;
+            } else if (MlpWindowLoop == MlpWindowLoopMode::Default) {
+                mlpLoop = isLoop;
+            } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
+                mlpLoop = false;
+            }
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
-                                           ignore, OverrideLoadLatency);
+                                           ignore, OverrideLoadLatency, mlpLoop);
             mergeMetrics(MetricsBySpan[Key], Result);
             for (size_t i = Span.Start; i < Span.Start + Span.Size; ++i) {
                 if (SpanForInstr[i].second == 0) {

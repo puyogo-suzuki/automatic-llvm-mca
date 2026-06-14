@@ -30,21 +30,25 @@ int window_end(int i, int n, int width) {
     return std::min(n, i + width);
 }
 
-int count_loads_no_dependency(const std::vector<bool> &is_load, int i, int n, int width) {
+int count_loads_no_dependency(const std::vector<bool> &is_load, int i, int n, int width, bool mlpWindowLoop) {
     int count = 0;
-    for (int j = i; j < window_end(i, n, width); ++j) {
+    int limit = mlpWindowLoop ? width : std::min(width, n - i);
+    for (int step = 0; step < limit; ++step) {
+        int j = (i + step) % n;
         if (is_load[j]) ++count;
     }
     return count;
 }
 
 int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
-                    int width, RegSet &load_dep_regs, float &ratio) {
+                    int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop) {
     load_dep_regs.reset();
 
     int count_indep = 0;
     int count_dep = 0;
-    for (int j = i; j < window_end(i, n, width); ++j) {
+    int limit = mlpWindowLoop ? width : std::min(width, n - i);
+    for (int step = 0; step < limit; ++step) {
+        int j = (i + step) % n;
         const bool is_dep = has_intersection(io_regs[j].inputs, load_dep_regs);
         if (is_load[j]) {
             if (is_dep) {
@@ -67,7 +71,7 @@ int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps>
 }
 
 int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n,
-                   int width, RegSet &load_dep_regs, float &ratio) {
+                   int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop) {
     load_dep_regs.reset();
 
     int count_indep = 0;
@@ -79,7 +83,9 @@ int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> 
         for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
     }
 
-    for (int j = i + 1; j < window_end(i, n, width); ++j) {
+    int limit = mlpWindowLoop ? width : std::min(width, n - i);
+    for (int step = 1; step < limit; ++step) {
+        int j = (i + step) % n;
         if (!barrier_hit) {
             if (has_intersection(io_regs[j].inputs, load_dep_regs)) {
                 barrier_hit = true;
@@ -110,12 +116,14 @@ int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> 
 }
 
 int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
-                           RegSet &load_dep_regs) {
+                           RegSet &load_dep_regs, bool mlpWindowLoop) {
     load_dep_regs.reset();
     for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
 
     int count = 1;
-    for (int j = i + 1; j < window_end(i, n, n /* width ... ignore width! */); ++j) {
+    int limit = mlpWindowLoop ? n : (n - i);
+    for (int step = 1; step < limit; ++step) {
+        int j = (i + step) % n;
         if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
         ++count;
         if (is_load[j]) {
@@ -128,13 +136,15 @@ int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<R
 }
 
 void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<bool> &is_load, int i, int n, int width,
-                      float score, MLPWindowAssignmentKind assign_kind) {
+                      float score, MLPWindowAssignmentKind assign_kind, bool mlpWindowLoop) {
     if (assign_kind == MLPWindowAssignmentKind::Forward) {
         mlp_vals[i] = score;
         return;
     }
 
-    for (int j = i; j < window_end(i, n, width); ++j) {
+    int limit = mlpWindowLoop ? width : std::min(width, n - i);
+    for (int step = 0; step < limit; ++step) {
+        int j = (i + step) % n;
         if (is_load[j]) mlp_vals[j] = std::max(mlp_vals[j], score);
     }
 }
@@ -146,7 +156,8 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                   MLPWindowAssignmentKind AssignKind, 
                   const llvm::MCInstrInfo& MCII,
                   const llvm::MCRegisterInfo& MRI,
-                  float &mlp_r) {
+                  float &mlp_r,
+                  bool mlpWindowLoop) {
 
     int n = instrs.size();
     if (n == 0) {
@@ -184,32 +195,32 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     switch (DepKind) {
         case DependencyKind::None:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_no_dependency(is_load, i, n, width));
-                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
-                assign_mlp_score(mlp_r_vals, is_load, i, n, width, 1.0f, AssignKind);
+                float score = static_cast<float>(count_loads_no_dependency(is_load, i, n, width, mlpWindowLoop));
+                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::OOO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs, score_r);
-                assign_mlp_score(mlp_vals, is_load, i, n, width, static_cast<float>(score), AssignKind);
-                assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind);
+                int score = count_loads_ooo(is_load, io_regs, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
+                assign_mlp_score(mlp_vals, is_load, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::IO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_io(is_load, io_regs, i, n, width, load_dep_regs, score_r);
-                assign_mlp_score(mlp_vals, is_load, i, n, width, static_cast<float>(score), AssignKind);
-                assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind);
+                int score = count_loads_io(is_load, io_regs, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
+                assign_mlp_score(mlp_vals, is_load, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, score_r, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::Dependency:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_dependency(is_load, io_regs, i, n, width, load_dep_regs));
-                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind);
-                assign_mlp_score(mlp_r_vals, is_load, i, n, width, 1.0f, AssignKind);
+                float score = static_cast<float>(count_loads_dependency(is_load, io_regs, i, n, width, load_dep_regs, mlpWindowLoop));
+                assign_mlp_score(mlp_vals, is_load, i, n, width, score, AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, is_load, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
             }
             break;
     }

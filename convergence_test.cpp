@@ -39,6 +39,13 @@ using namespace llvm;
 using namespace llvm::object;
 
 static cl::opt<std::string> InputBinary(cl::Positional, cl::desc("<input binary>"), cl::Required);
+static cl::opt<MlpWindowLoopMode> MlpWindowLoop("mlp-window-loop",
+    cl::desc("Loop back to the start of the basic block mode"),
+    cl::values(
+        clEnumValN(MlpWindowLoopMode::Default, "default", "Loop back to the start only for loops"),
+        clEnumValN(MlpWindowLoopMode::Force, "force", "Always loop back to the start (even for non-loops)"),
+        clEnumValN(MlpWindowLoopMode::Disable, "disable", "Never loop back to the start")
+    ), cl::init(MlpWindowLoopMode::Default));
 
 struct Result {
     double cpi;
@@ -69,7 +76,15 @@ Result run_mca_varied(llvm::ArrayRef<Instr> instrs, int iterations, const MCSubt
     double total_instrs = (double)instrs.size() * iterations;
     double cpi = (double)*ExpectedCycles / total_instrs;
     float dummy_mlp_r = 0.0f;
-    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, MCII, MRI, dummy_mlp_r);
+    bool mlpLoop = false;
+    if (MlpWindowLoop == MlpWindowLoopMode::Force) {
+        mlpLoop = true;
+    } else if (MlpWindowLoop == MlpWindowLoopMode::Default) {
+        mlpLoop = true; // convergence_test.cpp processes loops
+    } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
+        mlpLoop = false;
+    }
+    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, MCII, MRI, dummy_mlp_r, mlpLoop);
     return {cpi, mlp};
 }
 

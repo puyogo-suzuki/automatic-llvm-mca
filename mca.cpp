@@ -259,7 +259,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
                             const MCRegisterInfo &MRI, const MCInstrAnalysis *MCIA, const mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
                             MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep,
-                            int overrideLoadLatency) {
+                            int overrideLoadLatency, bool mlpWindowLoop) {
     if (instrs.empty()) return {};
 
     mca::Context MCAContext(MRI, STI);
@@ -341,7 +341,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     for (const auto &I : instrs) if (MCII.get(I.Inst.getOpcode()).mayLoad()) ++M.LoadInstructions;
     M.LoadInstructions *= static_cast<size_t>(SteadyIterations);
     M.Cycles = Tracker.SteadyCycles;
-    M.MLP = compute_mlp(instrs, windowWidth, depKind, assignKind, MCII, MRI, M.MLP_R);
+    M.MLP = compute_mlp(instrs, windowWidth, depKind, assignKind, MCII, MRI, M.MLP_R, mlpWindowLoop);
     if (M.RetiredInstructions > 0) {
         M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);
     }

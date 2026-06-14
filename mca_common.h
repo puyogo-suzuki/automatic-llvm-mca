@@ -20,6 +20,7 @@
 enum class DependencyKind { None, IO, OOO, Dependency };
 enum class MLPWindowAssignmentKind { Forward, MaxContaining };
 enum class IgnoreLoopCarriedMode { Default, Force, Disable };
+enum class MlpWindowLoopMode { Default, Force, Disable };
 
 struct Instr {
     uint64_t Addr;
@@ -59,7 +60,7 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             const llvm::MCInstrAnalysis *MCIA, const llvm::mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
                             MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep = false,
-                            int overrideLoadLatency = -1);
+                            int overrideLoadLatency = -1, bool mlpWindowLoop = false);
 void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
                  int bbMaxInstrs, const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);
@@ -69,6 +70,7 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                   MLPWindowAssignmentKind AssignKind, 
                   const llvm::MCInstrInfo& MCII,
                   const llvm::MCRegisterInfo& MRI,
-                  float &mlp_r);
+                  float &mlp_r,
+                  bool mlpWindowLoop = false);
 
 #endif
