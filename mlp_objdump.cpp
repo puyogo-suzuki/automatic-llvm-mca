@@ -161,6 +161,14 @@ int main(int argc, char **argv) {
 
     mca::PipelineOptions PO(0, 0, 0, 0, 0, 0, true);
     const MCSchedModel &SM = STI->getSchedModel();
+    int windowWidth = WindowWidth;
+    if (WindowWidth.getNumOccurrences() == 0 && !MCPU.empty()) {
+        if (SM.MicroOpBufferSize > 0) {
+            windowWidth = SM.MicroOpBufferSize;
+        } else {
+            windowWidth = SM.IssueWidth * SM.MispredictPenalty;
+        }
+    }
     PO.MicroOpQueueSize = SM.MicroOpBufferSize;
     PO.DispatchWidth = SM.IssueWidth;
     if (STI->getCPU() == "cortex-a76" || STI->getCPU() == "cortex-a76ae" || STI->getCPU() == "neoverse-n1") {
@@ -209,7 +217,7 @@ int main(int argc, char **argv) {
                 mlpLoop = false;
             }
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
-                                           *MRI, MCIA.get(), PO, Iterations, WindowWidth, DepKind, AssignKind,
+                                           *MRI, MCIA.get(), PO, Iterations, windowWidth, DepKind, AssignKind,
                                            ignore, OverrideLoadLatency, mlpLoop);
             mergeMetrics(MetricsBySpan[Key], Result);
             for (size_t i = Span.Start; i < Span.Start + Span.Size; ++i) {
