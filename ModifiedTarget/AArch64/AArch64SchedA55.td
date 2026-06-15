@@ -76,12 +76,12 @@ def : WriteRes<WriteIM64, [CortexA55UnitMAC]> { let Latency = 4; }   // 64-bit M
 
 // Div
 def : WriteRes<WriteID32, [CortexA55UnitDiv]> {
-  // let Latency = 8; let ReleaseAtCycles = [8];
-  let Latency = 3; let ReleaseAtCycles = [3]; // Assume best/minimum latency from SOG (early termination)
+  let Latency = 8; let ReleaseAtCycles = [8];
+  // let Latency = 3; let ReleaseAtCycles = [3]; // Assume best/minimum latency from SOG (early termination)
 }
 def : WriteRes<WriteID64, [CortexA55UnitDiv]> {
-  // let Latency = 8; let ReleaseAtCycles = [8];
-  let Latency = 3; let ReleaseAtCycles = [3]; // Assume best/minimum latency from SOG (early termination)
+  let Latency = 8; let ReleaseAtCycles = [8];
+  // let Latency = 3; let ReleaseAtCycles = [3]; // Assume best/minimum latency from SOG (early termination)
 }
 
 // Load
