@@ -84,7 +84,7 @@ Result run_mca_varied(llvm::ArrayRef<Instr> instrs, int iterations, const MCSubt
     } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
         mlpLoop = false;
     }
-    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, MCII, MRI, dummy_mlp_r, mlpLoop);
+    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, STI, MCII, MRI, dummy_mlp_r, mlpLoop);
     return {cpi, mlp};
 }
 

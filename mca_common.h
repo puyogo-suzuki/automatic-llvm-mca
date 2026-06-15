@@ -68,6 +68,7 @@ void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundar
 float compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
                   DependencyKind DepKind, 
                   MLPWindowAssignmentKind AssignKind, 
+                  const llvm::MCSubtargetInfo& STI,
                   const llvm::MCInstrInfo& MCII,
                   const llvm::MCRegisterInfo& MRI,
                   float &mlp_r,
