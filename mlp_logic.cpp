@@ -1,5 +1,6 @@
 #include "mca_common.h"
 #include <algorithm>
+#include <bitset>
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCInstrInfo.h"
@@ -13,6 +14,17 @@ namespace {
 struct RegDeps {
     llvm::SmallVector<unsigned, 4> inputs;
     llvm::SmallVector<unsigned, 4> outputs;
+};
+
+struct MLPInstInfo {
+    std::bitset<2> flags; // bit 0: is_load, bit 1: is_store
+    short num_uops = 1;
+    RegDeps io_regs;
+
+    bool is_load() const { return flags.test(0); }
+    bool is_store() const { return flags.test(1); }
+    void set_is_load(bool val) { flags.set(0, val); }
+    void set_is_store(bool val) { flags.set(1, val); }
 };
 
 static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const RegSet& mask) {
@@ -58,25 +70,25 @@ static int getNumMicroOps(const llvm::MCInst &Inst, const llvm::MCSubtargetInfo 
     return 1;
 }
 
-int count_loads_no_dependency(const std::vector<bool> &is_load, const std::vector<int> &num_uops, int i, int n, int width, bool mlpWindowLoop) {
+int count_loads_no_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, int width, bool mlpWindowLoop) {
     int count = 0;
     int uops_sum = 0;
     int step_limit = mlpWindowLoop ? width : (n - i);
     for (int step = 0; step < step_limit; ++step) {
         int j = (i + step) % n;
-        int inst_uops = std::max(1, num_uops[j]);
+        int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
         if (uops_sum + inst_uops > width) {
             if (step > 0) {
                 break;
             }
         }
         uops_sum += inst_uops;
-        if (is_load[j]) ++count;
+        if (inst_infos[j].is_load()) ++count;
     }
     return count;
 }
 
-int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, const std::vector<int> &num_uops, int i, int n,
+int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                     int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop) {
     load_dep_regs.reset();
 
@@ -84,9 +96,10 @@ int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps>
     int count_dep = 0;
     int uops_sum = 0;
     int step_limit = mlpWindowLoop ? width : (n - i);
+    bool has_store_seen = false;
     for (int step = 0; step < step_limit; ++step) {
         int j = (i + step) % n;
-        int inst_uops = std::max(1, num_uops[j]);
+        int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
         if (uops_sum + inst_uops > width) {
             if (step > 0) {
                 break;
@@ -94,19 +107,27 @@ int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps>
         }
         uops_sum += inst_uops;
 
-        const bool is_dep = has_intersection(io_regs[j].inputs, load_dep_regs);
-        if (is_load[j]) {
+        if (inst_infos[j].is_store()) {
+            has_store_seen = true;
+        }
+
+        bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
+        if (has_store_seen && inst_infos[j].is_load()) {
+            is_dep = true;
+        }
+
+        if (inst_infos[j].is_load()) {
             if (is_dep) {
                 ++count_dep;
             } else {
                 ++count_indep;
             }
-            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
-        } else if (!io_regs[j].outputs.empty()) {
+            for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
+        } else if (!inst_infos[j].io_regs.outputs.empty()) {
             if (is_dep) {
-                for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
             } else {
-                for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+                for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg);
             }
         }
     }
@@ -115,7 +136,7 @@ int count_loads_ooo(const std::vector<bool> &is_load, const std::vector<RegDeps>
     return count_indep;
 }
 
-int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, const std::vector<int> &num_uops, int i, int n,
+int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                    int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop) {
     load_dep_regs.reset();
 
@@ -123,40 +144,40 @@ int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> 
     int count_dep = 0;
     bool barrier_hit = false;
 
-    if (is_load[i]) {
+    if (inst_infos[i].is_load()) {
         count_indep = 1;
-        for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
+        for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg);
     }
 
-    int uops_sum = std::max(1, num_uops[i]);
+    int uops_sum = std::max(1, static_cast<int>(inst_infos[i].num_uops));
     int step_limit = mlpWindowLoop ? width : (n - i);
     for (int step = 1; step < step_limit; ++step) {
         int j = (i + step) % n;
-        int inst_uops = std::max(1, num_uops[j]);
+        int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
         if (uops_sum + inst_uops > width) {
             break;
         }
         uops_sum += inst_uops;
 
         if (!barrier_hit) {
-            if (has_intersection(io_regs[j].inputs, load_dep_regs)) {
+            if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
                 barrier_hit = true;
             }
         }
 
         if (barrier_hit) {
-            if (is_load[j]) {
+            if (inst_infos[j].is_load()) {
                 ++count_dep;
             }
         } else {
-            if (is_load[j]) {
+            if (inst_infos[j].is_load()) {
                 ++count_indep;
-                for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
             } else {
-                if (has_intersection(io_regs[j].inputs, load_dep_regs)) {
-                    for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+                if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
+                    for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
                 } else {
-                    for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+                    for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg);
                 }
             }
         }
@@ -167,27 +188,27 @@ int count_loads_io(const std::vector<bool> &is_load, const std::vector<RegDeps> 
     return count_indep;
 }
 
-int count_loads_dependency(const std::vector<bool> &is_load, const std::vector<RegDeps> &io_regs, int i, int n, int width,
+int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, int width,
                            RegSet &load_dep_regs, bool mlpWindowLoop) {
     load_dep_regs.reset();
-    for (unsigned reg : io_regs[i].outputs) set_reg(load_dep_regs, reg);
+    for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg);
 
     int count = 1;
     int limit = mlpWindowLoop ? n : (n - i);
     for (int step = 1; step < limit; ++step) {
         int j = (i + step) % n;
-        if (has_intersection(io_regs[j].inputs, load_dep_regs)) break;
+        if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) break;
         ++count;
-        if (is_load[j]) {
-            for (unsigned reg : io_regs[j].outputs) set_reg(load_dep_regs, reg);
+        if (inst_infos[j].is_load()) {
+            for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
         } else {
-            for (unsigned reg : io_regs[j].outputs) reset_reg(load_dep_regs, reg);
+            for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg);
         }
     }
     return count;
 }
 
-void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<bool> &is_load, const std::vector<int> &num_uops, int i, int n, int width,
+void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInfo> &inst_infos, int i, int n, int width,
                       float score, MLPWindowAssignmentKind assign_kind, bool mlpWindowLoop) {
     if (assign_kind == MLPWindowAssignmentKind::Forward) {
         mlp_vals[i] = score;
@@ -198,14 +219,14 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<bool> &is_
     int step_limit = mlpWindowLoop ? width : (n - i);
     for (int step = 0; step < step_limit; ++step) {
         int j = (i + step) % n;
-        int inst_uops = std::max(1, num_uops[j]);
+        int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
         if (uops_sum + inst_uops > width) {
             if (step > 0) {
                 break;
             }
         }
         uops_sum += inst_uops;
-        if (is_load[j]) mlp_vals[j] = std::max(mlp_vals[j], score);
+        if (inst_infos[j].is_load()) mlp_vals[j] = std::max(mlp_vals[j], score);
     }
 }
 
@@ -226,25 +247,24 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         return 1.0f;
     }
     const unsigned reg_count = MRI.getNumRegs() + 1;
-    std::vector<bool> is_load(n, false);
-    std::vector<int> num_uops(n, 1);
-    std::vector<RegDeps> io_regs(n);
+    std::vector<MLPInstInfo> inst_infos(n);
     std::vector<int> load_indices;
     for (int i = 0; i < n; ++i) {
         const MCInst& Inst = instrs[i].Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
-        is_load[i] = MCID.mayLoad();
-        num_uops[i] = getNumMicroOps(Inst, STI, MCII);
-        if (is_load[i]) load_indices.push_back(i);
+        inst_infos[i].set_is_load(MCID.mayLoad());
+        inst_infos[i].set_is_store(MCID.mayStore());
+        inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
+        if (inst_infos[i].is_load()) load_indices.push_back(i);
         for (unsigned j = 0; j < Inst.getNumOperands(); ++j) {
             const MCOperand& Op = Inst.getOperand(j);
             if (Op.isReg() && Op.getReg() != 0) {
-                if (j < MCID.getNumDefs()) io_regs[i].outputs.push_back(Op.getReg());
-                else io_regs[i].inputs.push_back(Op.getReg());
+                if (j < MCID.getNumDefs()) inst_infos[i].io_regs.outputs.push_back(Op.getReg());
+                else inst_infos[i].io_regs.inputs.push_back(Op.getReg());
             }
         }
-        for (MCPhysReg R : MCID.implicit_defs()) io_regs[i].outputs.push_back(R);
-        for (MCPhysReg R : MCID.implicit_uses()) io_regs[i].inputs.push_back(R);
+        for (MCPhysReg R : MCID.implicit_defs()) inst_infos[i].io_regs.outputs.push_back(R);
+        for (MCPhysReg R : MCID.implicit_uses()) inst_infos[i].io_regs.inputs.push_back(R);
     }
     if (load_indices.empty()) {
         mlp_r = 1.0f;
@@ -258,32 +278,32 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     switch (DepKind) {
         case DependencyKind::None:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_no_dependency(is_load, num_uops, i, n, width, mlpWindowLoop));
-                assign_mlp_score(mlp_vals, is_load, num_uops, i, n, width, score, AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, is_load, num_uops, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
+                float score = static_cast<float>(count_loads_no_dependency(inst_infos, i, n, width, mlpWindowLoop));
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::OOO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_ooo(is_load, io_regs, num_uops, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
-                assign_mlp_score(mlp_vals, is_load, num_uops, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, is_load, num_uops, i, n, width, score_r, AssignKind, mlpWindowLoop);
+                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::IO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_io(is_load, io_regs, num_uops, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
-                assign_mlp_score(mlp_vals, is_load, num_uops, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, is_load, num_uops, i, n, width, score_r, AssignKind, mlpWindowLoop);
+                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::Dependency:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_dependency(is_load, io_regs, i, n, width, load_dep_regs, mlpWindowLoop));
-                assign_mlp_score(mlp_vals, is_load, num_uops, i, n, width, score, AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, is_load, num_uops, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
+                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, mlpWindowLoop));
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, mlpWindowLoop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
             }
             break;
     }
