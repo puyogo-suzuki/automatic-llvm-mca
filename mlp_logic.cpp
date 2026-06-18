@@ -42,32 +42,26 @@ static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) 
     }
 }
 
-static bool isIndependentMemoryAccess(const MemAccessInfo &load_info, const MemAccessInfo &store_info) {
-    if (!load_info.valid() || !store_info.valid()) {
-        return false;
-    }
-    // Pattern 3: Stack access vs Heap/Global access separation.
-    if (load_info.is_stack_access() != store_info.is_stack_access()) {
-        return true;
-    }
-    // Pattern 1: Same base register but different offsets.
-    if (load_info.base_reg == store_info.base_reg &&
-        !store_info.is_pc_relative() &&
-        load_info.offset != store_info.offset) {
-        return true;
-    }
-    return false;
-}
-
 static bool hasStoreDependency(const MemAccessInfo &load_info, const std::vector<MemAccessInfo> &seen_stores) {
-    // Check is_pc_relative once before looping over all stores
-    if (load_info.valid() && load_info.is_pc_relative()) {
+    // If the load is PC-relative, it does not depend on stores
+    if (load_info.is_pc_relative()) {
         return false;
     }
+
     for (const auto &store_info : seen_stores) {
-        if (!isIndependentMemoryAccess(load_info, store_info)) {
-            return true;
+        // If the store is PC-relative, they are independent (no dependency)
+        if (store_info.is_pc_relative()) {
+            continue;
         }
+
+        // Pattern 1: Same base register but different offsets (independent)
+        if (load_info.base_reg == store_info.base_reg &&
+            load_info.offset != store_info.offset) {
+            continue;
+        }
+
+        // Otherwise, they are dependent
+        return true;
     }
     return false;
 }
@@ -153,7 +147,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         }
         uops_sum += inst_uops;
 
-        if (inst_infos[j].is_store()) {
+        if (step < n && inst_infos[j].is_store() && inst_infos[j].mem_info.valid()) {
             seen_stores.push_back(inst_infos[j].mem_info);
         }
 
