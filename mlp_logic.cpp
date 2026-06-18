@@ -537,8 +537,7 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     return avg_mlp;
 }
 
-size_t countNonStackLoads(MemAccessDecoderFn decoder,
-                          llvm::ArrayRef<Instr> instrs,
+size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
                           const llvm::MCSubtargetInfo& STI,
                           const llvm::MCInstrInfo& MCII,
                           const llvm::MCRegisterInfo& MRI) {
