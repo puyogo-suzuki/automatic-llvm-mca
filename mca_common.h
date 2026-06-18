@@ -74,4 +74,9 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                   float &mlp_r,
                   bool mlpWindowLoop = false);
 
+size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
+                          const llvm::MCSubtargetInfo& STI,
+                          const llvm::MCInstrInfo& MCII,
+                          const llvm::MCRegisterInfo& MRI);
+
 #endif

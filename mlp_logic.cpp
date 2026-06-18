@@ -536,3 +536,33 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
 
     return avg_mlp;
 }
+
+size_t countNonStackLoads(MemAccessDecoderFn decoder,
+                          llvm::ArrayRef<Instr> instrs,
+                          const llvm::MCSubtargetInfo& STI,
+                          const llvm::MCInstrInfo& MCII,
+                          const llvm::MCRegisterInfo& MRI) {
+    std::string arch = STI.getTargetTriple().getArchName().str();
+    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
+
+    MemAccessDecoderFn decoder = nullptr;
+    if (arch.rfind("riscv", 0) == 0) {
+        decoder = getMemAccessInfoRISCV;
+    } else if (arch.rfind("x86", 0) == 0 || arch == "i386") {
+        decoder = getMemAccessInfoX86;
+    } else {
+        decoder = getMemAccessInfoAArch64;
+    }
+
+    size_t count = 0;
+    for (const auto &I : instrs) {
+        const MCInst& Inst = I.Inst;
+        const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
+        MemAccessInfo mem_info = decoder(Inst, MCID, MRI);
+        if (mem_info.is_load) {
+            count++;
+        }
+    }
+    return count;
+}
+
