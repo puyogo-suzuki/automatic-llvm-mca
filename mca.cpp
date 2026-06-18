@@ -258,7 +258,8 @@ std::vector<Instr> disassembleTextSection(const SectionRef &Section, const MCDis
 McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, const MCInstrInfo &MCII,
                             const MCRegisterInfo &MRI, const MCInstrAnalysis *MCIA, const mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
-                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep,
+                            MLPWindowAssignmentKind assignKind, const MLPAnalyzer &analyzer,
+                            bool ignoreLoopCarriedDep,
                             int overrideLoadLatency, bool mlpWindowLoop) {
     if (instrs.empty()) return {};
 
@@ -337,9 +338,9 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
 
     McaMetrics M;
     M.RetiredInstructions = Tracker.SteadyRetired;
-    M.LoadInstructions = countNonStackLoads(instrs, STI, MCII, MRI);
+    M.LoadInstructions = analyzer.countNonStackLoads(instrs, STI, MCII, MRI);
     M.Cycles = Tracker.SteadyCycles;
-    M.MLP = compute_mlp(instrs, windowWidth, depKind, assignKind, STI, MCII, MRI, M.MLP_R, mlpWindowLoop);
+    M.MLP = analyzer.compute_mlp(instrs, windowWidth, depKind, assignKind, STI, MCII, MRI, M.MLP_R, mlpWindowLoop);
     if (M.RetiredInstructions > 0) {
         M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);
     }

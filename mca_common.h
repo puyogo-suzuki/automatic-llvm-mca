@@ -6,6 +6,8 @@
 #include <vector>
 #include <string>
 #include <utility>
+#include <memory>
+#include <bitset>
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -48,6 +50,73 @@ struct McaMetrics {
     bool Valid = false;
 };
 
+struct MemAccessInfo {
+    std::bitset<5> flags;
+    unsigned base_reg = 0;
+    int64_t offset = 0;
+
+    bool valid() const { return flags.test(0); }
+    void set_valid(bool val) { flags.set(0, val); }
+
+    bool is_pc_relative() const { return flags.test(1); }
+    void set_is_pc_relative(bool val) { flags.set(1, val); }
+
+    bool is_stack_access() const { return flags.test(2); }
+    void set_is_stack_access(bool val) { flags.set(2, val); }
+
+    bool is_load() const { return flags.test(3); }
+    void set_is_load(bool val) { flags.set(3, val); }
+
+    bool is_store() const { return flags.test(4); }
+    void set_is_store(bool val) { flags.set(4, val); }
+};
+
+class MLPAnalyzer {
+public:
+    virtual ~MLPAnalyzer() = default;
+
+    static std::unique_ptr<MLPAnalyzer> create(const llvm::MCSubtargetInfo &STI);
+
+    virtual MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
+                                           const llvm::MCInstrDesc &MCID,
+                                           const llvm::MCRegisterInfo &MRI) const = 0;
+
+    virtual float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
+                              DependencyKind DepKind,
+                              MLPWindowAssignmentKind AssignKind,
+                              const llvm::MCSubtargetInfo& STI,
+                              const llvm::MCInstrInfo& MCII,
+                              const llvm::MCRegisterInfo& MRI,
+                              float &mlp_r,
+                              bool mlpWindowLoop = false) const;
+
+    virtual size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
+                                      const llvm::MCSubtargetInfo& STI,
+                                      const llvm::MCInstrInfo& MCII,
+                                      const llvm::MCRegisterInfo& MRI) const;
+};
+
+class RISCVMLPAnalyzer : public MLPAnalyzer {
+public:
+    MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
+                                   const llvm::MCInstrDesc &MCID,
+                                   const llvm::MCRegisterInfo &MRI) const override;
+};
+
+class X86MLPAnalyzer : public MLPAnalyzer {
+public:
+    MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
+                                   const llvm::MCInstrDesc &MCID,
+                                   const llvm::MCRegisterInfo &MRI) const override;
+};
+
+class AArch64MLPAnalyzer : public MLPAnalyzer {
+public:
+    MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
+                                   const llvm::MCInstrDesc &MCID,
+                                   const llvm::MCRegisterInfo &MRI) const override;
+};
+
 void initializeTargets();
 uint64_t getELFSymbolSize(const llvm::object::ObjectFile &Obj, llvm::object::SymbolRef Sym);
 FunctionBoundaries collectFunctionBoundaries(const llvm::object::ObjectFile &Obj);
@@ -59,24 +128,11 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             const llvm::MCInstrInfo &MCII, const llvm::MCRegisterInfo &MRI,
                             const llvm::MCInstrAnalysis *MCIA, const llvm::mca::PipelineOptions &PO,
                             int iterations, int windowWidth, DependencyKind depKind,
-                            MLPWindowAssignmentKind assignKind, bool ignoreLoopCarriedDep = false,
+                            MLPWindowAssignmentKind assignKind, const MLPAnalyzer &analyzer,
+                            bool ignoreLoopCarriedDep = false,
                             int overrideLoadLatency = -1, bool mlpWindowLoop = false);
 void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
                  int bbMaxInstrs, const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);
-
-float compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
-                  DependencyKind DepKind, 
-                  MLPWindowAssignmentKind AssignKind, 
-                  const llvm::MCSubtargetInfo& STI,
-                  const llvm::MCInstrInfo& MCII,
-                  const llvm::MCRegisterInfo& MRI,
-                  float &mlp_r,
-                  bool mlpWindowLoop = false);
-
-size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
-                          const llvm::MCSubtargetInfo& STI,
-                          const llvm::MCInstrInfo& MCII,
-                          const llvm::MCRegisterInfo& MRI);
 
 #endif

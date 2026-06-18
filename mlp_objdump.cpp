@@ -182,6 +182,8 @@ int main(int argc, char **argv) {
     }
     PO.AssumeNoAlias = true;
 
+    std::unique_ptr<MLPAnalyzer> Analyzer = MLPAnalyzer::create(*STI);
+
     FunctionBoundaries Boundaries = collectFunctionBoundaries(Obj);
     bool FirstSection = true;
 
@@ -218,7 +220,7 @@ int main(int argc, char **argv) {
             }
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, windowWidth, DepKind, AssignKind,
-                                           ignore, OverrideLoadLatency, mlpLoop);
+                                           *Analyzer, ignore, OverrideLoadLatency, mlpLoop);
             mergeMetrics(MetricsBySpan[Key], Result);
             for (size_t i = Span.Start; i < Span.Start + Span.Size; ++i) {
                 if (SpanForInstr[i].second == 0) {

@@ -84,7 +84,10 @@ Result run_mca_varied(llvm::ArrayRef<Instr> instrs, int iterations, const MCSubt
     } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
         mlpLoop = false;
     }
-    float mlp = compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, STI, MCII, MRI, dummy_mlp_r, mlpLoop);
+
+    std::unique_ptr<MLPAnalyzer> analyzer = MLPAnalyzer::create(STI);
+
+    float mlp = analyzer->compute_mlp(instrs, 4, DependencyKind::None, MLPWindowAssignmentKind::MaxContaining, STI, MCII, MRI, dummy_mlp_r, mlpLoop);
     return {cpi, mlp};
 }
 

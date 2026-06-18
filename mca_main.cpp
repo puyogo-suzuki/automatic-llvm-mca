@@ -168,6 +168,8 @@ int main(int argc, char **argv) {
         TargetAddress = std::stoull(TargetAddressStr, nullptr, 16);
     }
 
+    std::unique_ptr<MLPAnalyzer> Analyzer = MLPAnalyzer::create(*STI);
+
     std::printf("start_address,end_address,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
 
@@ -199,7 +201,7 @@ int main(int argc, char **argv) {
             }
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
                                            *MRI, MCIA.get(), PO, Iterations, windowWidth, DepKind, AssignKind,
-                                           ignore, OverrideLoadLatency, mlpLoop);
+                                           *Analyzer, ignore, OverrideLoadLatency, mlpLoop);
             if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Span.Size, isLoop, Result);
         };
 

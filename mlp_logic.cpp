@@ -19,16 +19,6 @@ struct RegDeps {
     llvm::SmallVector<unsigned, 4> outputs;
 };
 
-struct MemAccessInfo {
-    bool valid = false;
-    unsigned base_reg = 0;
-    int64_t offset = 0;
-    bool is_pc_relative = false;
-    bool is_stack_access = false;
-    bool is_load = false;
-    bool is_store = false;
-};
-
 struct MLPInstInfo {
     std::bitset<2> flags; // bit 0: is_load, bit 1: is_store
     short num_uops = 1;
@@ -41,168 +31,28 @@ struct MLPInstInfo {
     void set_is_store(bool val) { flags.set(1, val); }
 };
 
-using MemAccessDecoderFn = MemAccessInfo (*)(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI);
-
 static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) {
-    info.is_load = MCID.mayLoad();
-    info.is_store = MCID.mayStore();
+    info.set_is_load(MCID.mayLoad());
+    info.set_is_store(MCID.mayStore());
 
     // Ignore stack pointer-based memory operations entirely as they won't miss in cache
-    if (info.is_stack_access) {
-        info.is_load = false;
-        info.is_store = false;
+    if (info.is_stack_access()) {
+        info.set_is_load(false);
+        info.set_is_store(false);
     }
-}
-
-static MemAccessInfo getMemAccessInfoRISCV(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) {
-    MemAccessInfo info;
-    if (!MCID.mayLoad() && !MCID.mayStore()) return info;
-    unsigned num_ops = Inst.getNumOperands();
-    if (num_ops == 0) return info;
-
-    for (unsigned i = 0; i < num_ops; ++i) {
-        if (Inst.getOperand(i).isExpr()) {
-            info.valid = true;
-            info.is_pc_relative = true;
-            finalizeMemAccessInfo(info, MCID);
-            return info;
-        }
-    }
-
-    if (num_ops >= 3 && Inst.getOperand(0).isReg() && 
-        Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
-        info.base_reg = Inst.getOperand(1).getReg();
-        info.offset = Inst.getOperand(2).getImm();
-        info.valid = true;
-    }
-
-    if (info.valid && info.base_reg != 0) {
-        if (const char* reg_name = MRI.getName(info.base_reg)) {
-            std::string name(reg_name);
-            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-            // RISC-V Stack pointer names
-            if (name == "sp" || name == "x2") {
-                info.is_stack_access = true;
-            }
-        }
-    }
-
-    finalizeMemAccessInfo(info, MCID);
-    return info;
-}
-
-static MemAccessInfo getMemAccessInfoX86(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) {
-    MemAccessInfo info;
-    if (!MCID.mayLoad() && !MCID.mayStore()) return info;
-    unsigned num_ops = Inst.getNumOperands();
-    if (num_ops == 0) return info;
-
-    for (unsigned i = 0; i < num_ops; ++i) {
-        if (Inst.getOperand(i).isExpr()) {
-            info.valid = true;
-            info.is_pc_relative = true;
-            finalizeMemAccessInfo(info, MCID);
-            return info;
-        }
-    }
-
-    for (unsigned i = 0; i + 4 < num_ops; ++i) {
-        if (Inst.getOperand(i).isReg() && 
-            Inst.getOperand(i+1).isImm() && 
-            Inst.getOperand(i+2).isReg() && 
-            (Inst.getOperand(i+3).isImm() || Inst.getOperand(i+3).isExpr()) && 
-            Inst.getOperand(i+4).isReg()) {
-            
-            info.base_reg = Inst.getOperand(i).getReg();
-            if (Inst.getOperand(i+3).isImm()) {
-                info.offset = Inst.getOperand(i+3).getImm();
-            } else {
-                info.is_pc_relative = true;
-            }
-            info.valid = true;
-            break;
-        }
-    }
-
-    if (info.valid && info.base_reg != 0) {
-        if (const char* reg_name = MRI.getName(info.base_reg)) {
-            std::string name(reg_name);
-            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-            // x86 Stack & Frame pointer names
-            if (name == "rsp" || name == "esp" || name == "sp" || 
-                name == "rbp" || name == "ebp" || name == "bp") {
-                info.is_stack_access = true;
-            }
-        }
-    }
-
-    finalizeMemAccessInfo(info, MCID);
-    return info;
-}
-
-static MemAccessInfo getMemAccessInfoAArch64(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) {
-    MemAccessInfo info;
-    if (!MCID.mayLoad() && !MCID.mayStore()) return info;
-    unsigned num_ops = Inst.getNumOperands();
-    if (num_ops == 0) return info;
-
-    for (unsigned i = 0; i < num_ops; ++i) {
-        if (Inst.getOperand(i).isExpr()) {
-            info.valid = true;
-            info.is_pc_relative = true;
-            finalizeMemAccessInfo(info, MCID);
-            return info;
-        }
-    }
-
-    // Pattern A: LDP/STP (Pair)
-    if (num_ops >= 4 && Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() && 
-        Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
-        info.base_reg = Inst.getOperand(2).getReg();
-        info.offset = Inst.getOperand(3).getImm();
-        info.valid = true;
-    }
-    // Pattern B: LDR/STR (Single)
-    else if (num_ops >= 3 && Inst.getOperand(0).isReg() && 
-             Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
-        info.base_reg = Inst.getOperand(1).getReg();
-        info.offset = Inst.getOperand(2).getImm();
-        info.valid = true;
-    }
-    // Pattern C: LDR/STR post/pre-index
-    else if (num_ops >= 4 && Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() && 
-             Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
-        info.base_reg = Inst.getOperand(2).getReg();
-        info.offset = Inst.getOperand(3).getImm();
-        info.valid = true;
-    }
-
-    if (info.valid && info.base_reg != 0) {
-        if (const char* reg_name = MRI.getName(info.base_reg)) {
-            std::string name(reg_name);
-            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-            // ARM/AArch64 Stack pointer names
-            if (name == "sp" || name == "wsp") {
-                info.is_stack_access = true;
-            }
-        }
-    }
-
-    finalizeMemAccessInfo(info, MCID);
-    return info;
 }
 
 static bool isIndependentMemoryAccess(const MemAccessInfo &load_info, const MemAccessInfo &store_info) {
-    if (!load_info.valid || !store_info.valid) {
+    if (!load_info.valid() || !store_info.valid()) {
         return false;
     }
     // Pattern 3: Stack access vs Heap/Global access separation.
-    if (load_info.is_stack_access != store_info.is_stack_access) {
+    if (load_info.is_stack_access() != store_info.is_stack_access()) {
         return true;
     }
     // Pattern 1: Same base register but different offsets.
     if (load_info.base_reg == store_info.base_reg &&
-        !store_info.is_pc_relative &&
+        !store_info.is_pc_relative() &&
         load_info.offset != store_info.offset) {
         return true;
     }
@@ -211,7 +61,7 @@ static bool isIndependentMemoryAccess(const MemAccessInfo &load_info, const MemA
 
 static bool hasStoreDependency(const MemAccessInfo &load_info, const std::vector<MemAccessInfo> &seen_stores) {
     // Check is_pc_relative once before looping over all stores
-    if (load_info.valid && load_info.is_pc_relative) {
+    if (load_info.valid() && load_info.is_pc_relative()) {
         return false;
     }
     for (const auto &store_info : seen_stores) {
@@ -428,32 +278,157 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
 
 }  // namespace
 
-float compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
-                  DependencyKind DepKind, 
-                  MLPWindowAssignmentKind AssignKind, 
-                  const llvm::MCSubtargetInfo& STI,
-                  const llvm::MCInstrInfo& MCII,
-                  const llvm::MCRegisterInfo& MRI,
-                  float &mlp_r,
-                  bool mlpWindowLoop) {
+MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) const {
+    MemAccessInfo info;
+    if (!MCID.mayLoad() && !MCID.mayStore()) return info;
+    unsigned num_ops = Inst.getNumOperands();
+    if (num_ops == 0) return info;
+
+    for (unsigned i = 0; i < num_ops; ++i) {
+        if (Inst.getOperand(i).isExpr()) {
+            info.set_valid(true);
+            info.set_is_pc_relative(true);
+            finalizeMemAccessInfo(info, MCID);
+            return info;
+        }
+    }
+
+    if (num_ops >= 3 && Inst.getOperand(0).isReg() && 
+        Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
+        info.base_reg = Inst.getOperand(1).getReg();
+        info.offset = Inst.getOperand(2).getImm();
+        info.set_valid(true);
+    }
+
+    if (info.valid() && info.base_reg != 0) {
+        if (const char* reg_name = MRI.getName(info.base_reg)) {
+            std::string name(reg_name);
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            // RISC-V Stack pointer names
+            if (name == "sp" || name == "x2") {
+                info.set_is_stack_access(true);
+            }
+        }
+    }
+
+    finalizeMemAccessInfo(info, MCID);
+    return info;
+}
+
+MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) const {
+    MemAccessInfo info;
+    if (!MCID.mayLoad() && !MCID.mayStore()) return info;
+    unsigned num_ops = Inst.getNumOperands();
+    if (num_ops == 0) return info;
+
+    for (unsigned i = 0; i < num_ops; ++i) {
+        if (Inst.getOperand(i).isExpr()) {
+            info.set_valid(true);
+            info.set_is_pc_relative(true);
+            finalizeMemAccessInfo(info, MCID);
+            return info;
+        }
+    }
+
+    for (unsigned i = 0; i + 4 < num_ops; ++i) {
+        if (Inst.getOperand(i).isReg() && 
+            Inst.getOperand(i+1).isImm() && 
+            Inst.getOperand(i+2).isReg() && 
+            (Inst.getOperand(i+3).isImm() || Inst.getOperand(i+3).isExpr()) && 
+            Inst.getOperand(i+4).isReg()) {
+            
+            info.base_reg = Inst.getOperand(i).getReg();
+            if (Inst.getOperand(i+3).isImm()) {
+                info.offset = Inst.getOperand(i+3).getImm();
+            } else {
+                info.set_is_pc_relative(true);
+            }
+            info.set_valid(true);
+            break;
+        }
+    }
+
+    if (info.valid() && info.base_reg != 0) {
+        if (const char* reg_name = MRI.getName(info.base_reg)) {
+            std::string name(reg_name);
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            // x86 Stack & Frame pointer names
+            if (name == "rsp" || name == "esp" || name == "sp" || 
+                name == "rbp" || name == "ebp" || name == "bp") {
+                info.set_is_stack_access(true);
+            }
+        }
+    }
+
+    finalizeMemAccessInfo(info, MCID);
+    return info;
+}
+
+MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) const {
+    MemAccessInfo info;
+    if (!MCID.mayLoad() && !MCID.mayStore()) return info;
+    unsigned num_ops = Inst.getNumOperands();
+    if (num_ops == 0) return info;
+
+    for (unsigned i = 0; i < num_ops; ++i) {
+        if (Inst.getOperand(i).isExpr()) {
+            info.set_valid(true);
+            info.set_is_pc_relative(true);
+            finalizeMemAccessInfo(info, MCID);
+            return info;
+        }
+    }
+
+    // Pattern A: LDP/STP (Pair)
+    if (num_ops >= 4 && Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() && 
+        Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
+        info.base_reg = Inst.getOperand(2).getReg();
+        info.offset = Inst.getOperand(3).getImm();
+        info.set_valid(true);
+    }
+    // Pattern B: LDR/STR (Single)
+    else if (num_ops >= 3 && Inst.getOperand(0).isReg() && 
+             Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
+        info.base_reg = Inst.getOperand(1).getReg();
+        info.offset = Inst.getOperand(2).getImm();
+        info.set_valid(true);
+    }
+    // Pattern C: LDR/STR post/pre-index
+    else if (num_ops >= 4 && Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() && 
+             Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
+        info.base_reg = Inst.getOperand(2).getReg();
+        info.offset = Inst.getOperand(3).getImm();
+        info.set_valid(true);
+    }
+
+    if (info.valid() && info.base_reg != 0) {
+        if (const char* reg_name = MRI.getName(info.base_reg)) {
+            std::string name(reg_name);
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            // ARM/AArch64 Stack pointer names
+            if (name == "sp" || name == "wsp") {
+                info.set_is_stack_access(true);
+            }
+        }
+    }
+
+    finalizeMemAccessInfo(info, MCID);
+    return info;
+}
+
+float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
+                              DependencyKind DepKind, 
+                              MLPWindowAssignmentKind AssignKind, 
+                              const llvm::MCSubtargetInfo& STI,
+                              const llvm::MCInstrInfo& MCII,
+                              const llvm::MCRegisterInfo& MRI,
+                              float &mlp_r,
+                              bool mlpWindowLoop) const {
 
     int n = instrs.size();
     if (n == 0) {
         mlp_r = 1.0f;
         return 1.0f;
-    }
-
-    // Resolve target triple and select the appropriate decoder function pointer
-    std::string arch = STI.getTargetTriple().getArchName().str();
-    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
-
-    MemAccessDecoderFn decoder = nullptr;
-    if (arch.rfind("riscv", 0) == 0) {
-        decoder = getMemAccessInfoRISCV;
-    } else if (arch.rfind("x86", 0) == 0 || arch == "i386") {
-        decoder = getMemAccessInfoX86;
-    } else {
-        decoder = getMemAccessInfoAArch64;
     }
 
     const unsigned reg_count = MRI.getNumRegs() + 1;
@@ -462,10 +437,10 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     for (int i = 0; i < n; ++i) {
         const MCInst& Inst = instrs[i].Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
-        MemAccessInfo mem_info = decoder(Inst, MCID, MRI);
+        MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI);
         
-        inst_infos[i].set_is_load(mem_info.is_load);
-        inst_infos[i].set_is_store(mem_info.is_store);
+        inst_infos[i].set_is_load(mem_info.is_load());
+        inst_infos[i].set_is_store(mem_info.is_store());
         inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
         inst_infos[i].mem_info = mem_info;
         if (inst_infos[i].is_load()) load_indices.push_back(i);
@@ -537,31 +512,31 @@ float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     return avg_mlp;
 }
 
-size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
-                          const llvm::MCSubtargetInfo& STI,
-                          const llvm::MCInstrInfo& MCII,
-                          const llvm::MCRegisterInfo& MRI) {
-    std::string arch = STI.getTargetTriple().getArchName().str();
-    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
-
-    MemAccessDecoderFn decoder = nullptr;
-    if (arch.rfind("riscv", 0) == 0) {
-        decoder = getMemAccessInfoRISCV;
-    } else if (arch.rfind("x86", 0) == 0 || arch == "i386") {
-        decoder = getMemAccessInfoX86;
-    } else {
-        decoder = getMemAccessInfoAArch64;
-    }
-
+size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
+                                      const llvm::MCSubtargetInfo& STI,
+                                      const llvm::MCInstrInfo& MCII,
+                                      const llvm::MCRegisterInfo& MRI) const {
     size_t count = 0;
     for (const auto &I : instrs) {
         const MCInst& Inst = I.Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
-        MemAccessInfo mem_info = decoder(Inst, MCID, MRI);
-        if (mem_info.is_load) {
+        MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI);
+        if (mem_info.is_load()) {
             count++;
         }
     }
     return count;
+}
+
+std::unique_ptr<MLPAnalyzer> MLPAnalyzer::create(const llvm::MCSubtargetInfo &STI) {
+    std::string Arch = STI.getTargetTriple().getArchName().str();
+    std::transform(Arch.begin(), Arch.end(), Arch.begin(), ::tolower);
+    if (Arch.rfind("riscv", 0) == 0) {
+        return std::make_unique<RISCVMLPAnalyzer>();
+    } else if (Arch.rfind("x86", 0) == 0 || Arch == "i386") {
+        return std::make_unique<X86MLPAnalyzer>();
+    } else {
+        return std::make_unique<AArch64MLPAnalyzer>();
+    }
 }
 
