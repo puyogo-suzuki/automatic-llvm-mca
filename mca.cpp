@@ -60,7 +60,6 @@ struct Context_Hardware_Tag {
 };
 template struct RobStore<Context_Hardware_Tag, &mca::Context::Hardware>;
 
-
 uint64_t getELFSymbolSizeImpl(const ObjectFile &Obj, SymbolRef Sym) {
     if (const auto *Elf32LE = dyn_cast<ELF32LEObjectFile>(&Obj)) {
         if (auto SymOrErr = Elf32LE->getSymbol(Sym.getRawDataRefImpl())) return (*SymOrErr)->st_size;
@@ -333,8 +332,6 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         consumeError(ExpectedCycles.takeError());
         return {};
     }
-
-
 
     McaMetrics M;
     M.RetiredInstructions = Tracker.SteadyRetired;
