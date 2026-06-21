@@ -47,7 +47,8 @@ static void initLLVMX86() {
     }
 }
 
-static std::vector<Instr> parseAsm(const TestContext &TC, const std::string& asm_code) {
+template <typename T>
+static std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
     SourceMgr SrcMgr;
     SrcMgr.AddNewSourceBuffer(MemoryBuffer::getMemBuffer(asm_code), SMLoc());
     
@@ -170,3 +171,66 @@ TEST(MLPTest, WindowLoopOOO) {
     EXPECT_NEAR(val1, 1.5, 0.01);
     EXPECT_NEAR(ratio, 0.75, 0.01);
 }
+
+TEST(MLPTest, PointerChasingLoopOOO) {
+    initLLVMX86();
+    TestContext TC;
+    auto instrs = parseAsm(TC, "movq (%rax), %rax");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    X86MLPAnalyzer analyzer;
+    float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val1, 1.0, 0.01);
+}
+
+struct AArch64TestContext {
+    Triple TT;
+    const Target* TheTarget;
+    std::unique_ptr<MCRegisterInfo> MRI;
+    std::unique_ptr<MCAsmInfo> MAI;
+    std::unique_ptr<MCInstrInfo> MCII;
+    std::unique_ptr<MCSubtargetInfo> STI;
+
+    AArch64TestContext() : TT("aarch64-unknown-linux-gnu") {
+        std::string Error;
+        TheTarget = TargetRegistry::lookupTarget(TT, Error);
+        MRI.reset(TheTarget->createMCRegInfo(TT));
+        MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT, MCTargetOptions()));
+        MCII.reset(TheTarget->createMCInstrInfo());
+        STI.reset(TheTarget->createMCSubtargetInfo(TT, "cortex-a76", ""));
+    }
+};
+
+static void initLLVMAArch64() {
+    static bool initialized = false;
+    if (!initialized) {
+        LLVMInitializeAArch64TargetInfo();
+        LLVMInitializeAArch64Target();
+        LLVMInitializeAArch64TargetMC();
+        LLVMInitializeAArch64AsmParser();
+        initialized = true;
+    }
+}
+
+TEST(MLPTest, AArch64PointerChasingX0) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    auto instrs = parseAsm(TC, "ldr x0, [x0, #8]");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val1, 1.0, 0.01);
+}
+
+TEST(MLPTest, AArch64WritebackPostIndex) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    auto instrs = parseAsm(TC, "ldr x0, [x1], #8");
+    ASSERT_FALSE(instrs.empty());
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val1 = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val1, 2.0, 0.01);
+}
+

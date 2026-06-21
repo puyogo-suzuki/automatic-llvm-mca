@@ -140,7 +140,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                 ++count_indep;
             }
             for (unsigned reg : inst_infos[j].io_regs.outputs) {
-                if (reg == inst_infos[j].mem_info.base_reg) {
+                if (reg == inst_infos[j].mem_info.base_reg && inst_infos[j].mem_info.is_writeback()) {
                     if (is_dep) set_reg(load_dep_regs, reg, MRI);
                     else reset_reg(load_dep_regs, reg, MRI);
                 } else {
@@ -225,16 +225,8 @@ int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, in
         int j = (i + step) % n;
         if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) break;
         ++count;
-        if (inst_infos[j].is_load()) {
-            for (unsigned reg : inst_infos[j].io_regs.outputs) {
-                if (reg == inst_infos[j].mem_info.base_reg) {
-                    reset_reg(load_dep_regs, reg, MRI);
-                } else {
-                    set_reg(load_dep_regs, reg, MRI);
-                }
-            }
-        } else {
-            for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg, MRI);
+        for (unsigned reg : inst_infos[j].io_regs.outputs) {
+            reset_reg(load_dep_regs, reg, MRI);
         }
     }
     return count;
@@ -261,18 +253,41 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
         if (inst_infos[j].is_load()) mlp_vals[j] = std::max(mlp_vals[j], score);
     }
 }
+}  // namespace
 
-static bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) {
+bool MLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const {
     if (reg == 0) return true;
     if (const char* name = MRI.getName(reg)) {
         std::string s(name);
         std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        return (s == "xzr" || s == "wzr" || s == "zero" || s == "x0");
+        return (s == "zero");
     }
     return false;
 }
 
-}  // namespace
+bool RISCVMLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const {
+    if (reg == 0) return true;
+    if (const char* name = MRI.getName(reg)) {
+        std::string s(name);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return (s == "zero" || s == "x0");
+    }
+    return false;
+}
+
+bool X86MLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const {
+    return (reg == 0);
+}
+
+bool AArch64MLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const {
+    if (reg == 0) return true;
+    if (const char* name = MRI.getName(reg)) {
+        std::string s(name);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return (s == "xzr" || s == "wzr" || s == "zero");
+    }
+    return false;
+}
 
 MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo &MCII) const {
     MemAccessInfo info;
@@ -376,9 +391,10 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
     }
 
     std::string Name = std::string(MCII.getName(Inst.getOpcode()));
+    std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
 
     // 1. Literal/PC-relative single load
-    if (Name.size() >= 4 && Name.rfind("LDR", 0) == 0 && Name.back() == 'l') {
+    if (Name.size() >= 4 && Name.rfind("ldr", 0) == 0 && Name.back() == 'l') {
         info.set_valid(true);
         info.set_is_pc_relative(true);
         finalizeMemAccessInfo(info, MCID);
@@ -386,9 +402,9 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
     }
 
     // 2. Exclusive, load-acquire, store-release (no offset, base is the last operand)
-    bool is_exclusive = (Name.rfind("LDX", 0) == 0 || Name.rfind("LDAX", 0) == 0 ||
-                         Name.rfind("LDAR", 0) == 0 || Name.rfind("STX", 0) == 0 ||
-                         Name.rfind("STLX", 0) == 0 || Name.rfind("STLR", 0) == 0);
+    bool is_exclusive = (Name.rfind("ldx", 0) == 0 || Name.rfind("ldax", 0) == 0 ||
+                         Name.rfind("ldar", 0) == 0 || Name.rfind("stx", 0) == 0 ||
+                         Name.rfind("stlx", 0) == 0 || Name.rfind("stlr", 0) == 0);
     if (is_exclusive) {
         if (num_ops > 0 && Inst.getOperand(num_ops - 1).isReg()) {
             info.base_reg = Inst.getOperand(num_ops - 1).getReg();
@@ -400,13 +416,14 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
     }
 
     // 3. Pair Loads/Stores (LDP/STP/LDNP/STNP)
-    bool is_pair = (Name.rfind("LDP", 0) == 0 || Name.rfind("STP", 0) == 0 ||
-                    Name.rfind("LDNP", 0) == 0 || Name.rfind("STNP", 0) == 0);
+    bool is_pair = (Name.rfind("ldp", 0) == 0 || Name.rfind("stp", 0) == 0 ||
+                    Name.rfind("ldnp", 0) == 0 || Name.rfind("stnp", 0) == 0);
     if (is_pair) {
         bool has_wb = (Name.find("post") != std::string::npos ||
                        Name.find("pre") != std::string::npos ||
                        Name.find("writeback") != std::string::npos);
         if (has_wb) {
+            info.set_is_writeback(true);
             if (num_ops >= 5 && Inst.getOperand(3).isReg() && Inst.getOperand(4).isImm()) {
                 info.base_reg = Inst.getOperand(3).getReg();
                 info.offset = Inst.getOperand(4).getImm();
@@ -422,7 +439,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
     }
     // 4. Single Loads/Stores (LDR/STR etc.)
     else {
-        bool is_reg_offset = (Name.find("roW") != std::string::npos || Name.find("roX") != std::string::npos);
+        bool is_reg_offset = (Name.find("row") != std::string::npos || Name.find("rox") != std::string::npos);
         if (is_reg_offset) {
             if (num_ops >= 2 && Inst.getOperand(1).isReg()) {
                 info.base_reg = Inst.getOperand(1).getReg();
@@ -434,6 +451,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
                            Name.find("pre") != std::string::npos ||
                            Name.find("writeback") != std::string::npos);
             if (has_wb) {
+                info.set_is_writeback(true);
                 if (num_ops >= 4 && Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
                     info.base_reg = Inst.getOperand(2).getReg();
                     info.offset = Inst.getOperand(3).getImm();

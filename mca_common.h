@@ -51,7 +51,7 @@ struct McaMetrics {
 };
 
 struct MemAccessInfo {
-    std::bitset<5> flags;
+    std::bitset<6> flags;
     unsigned base_reg = 0;
     int64_t offset = 0;
 
@@ -69,6 +69,9 @@ struct MemAccessInfo {
 
     bool is_store() const { return flags.test(4); }
     void set_is_store(bool val) { flags.set(4, val); }
+
+    bool is_writeback() const { return flags.test(5); }
+    void set_is_writeback(bool val) { flags.set(5, val); }
 };
 
 class MLPAnalyzer {
@@ -81,6 +84,8 @@ public:
                                            const llvm::MCInstrDesc &MCID,
                                            const llvm::MCRegisterInfo &MRI,
                                            const llvm::MCInstrInfo &MCII) const = 0;
+
+    virtual bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const;
 
     virtual float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                               DependencyKind DepKind,
@@ -103,6 +108,7 @@ public:
                                    const llvm::MCInstrDesc &MCID,
                                    const llvm::MCRegisterInfo &MRI,
                                    const llvm::MCInstrInfo &MCII) const override;
+    bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const override;
 };
 
 class X86MLPAnalyzer : public MLPAnalyzer {
@@ -111,6 +117,7 @@ public:
                                    const llvm::MCInstrDesc &MCID,
                                    const llvm::MCRegisterInfo &MRI,
                                    const llvm::MCInstrInfo &MCII) const override;
+    bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const override;
 };
 
 class AArch64MLPAnalyzer : public MLPAnalyzer {
@@ -119,6 +126,7 @@ public:
                                    const llvm::MCInstrDesc &MCID,
                                    const llvm::MCRegisterInfo &MRI,
                                    const llvm::MCInstrInfo &MCII) const override;
+    bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const override;
 };
 
 void initializeTargets();
