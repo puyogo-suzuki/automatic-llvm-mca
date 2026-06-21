@@ -79,7 +79,8 @@ public:
 
     virtual MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
                                            const llvm::MCInstrDesc &MCID,
-                                           const llvm::MCRegisterInfo &MRI) const = 0;
+                                           const llvm::MCRegisterInfo &MRI,
+                                           const llvm::MCInstrInfo &MCII) const = 0;
 
     virtual float compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                               DependencyKind DepKind,
@@ -100,21 +101,24 @@ class RISCVMLPAnalyzer : public MLPAnalyzer {
 public:
     MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
                                    const llvm::MCInstrDesc &MCID,
-                                   const llvm::MCRegisterInfo &MRI) const override;
+                                   const llvm::MCRegisterInfo &MRI,
+                                   const llvm::MCInstrInfo &MCII) const override;
 };
 
 class X86MLPAnalyzer : public MLPAnalyzer {
 public:
     MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
                                    const llvm::MCInstrDesc &MCID,
-                                   const llvm::MCRegisterInfo &MRI) const override;
+                                   const llvm::MCRegisterInfo &MRI,
+                                   const llvm::MCInstrInfo &MCII) const override;
 };
 
 class AArch64MLPAnalyzer : public MLPAnalyzer {
 public:
     MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
                                    const llvm::MCInstrDesc &MCID,
-                                   const llvm::MCRegisterInfo &MRI) const override;
+                                   const llvm::MCRegisterInfo &MRI,
+                                   const llvm::MCInstrInfo &MCII) const override;
 };
 
 void initializeTargets();

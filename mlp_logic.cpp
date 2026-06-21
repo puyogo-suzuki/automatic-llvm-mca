@@ -42,30 +42,6 @@ static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) 
     }
 }
 
-static bool hasStoreDependency(const MemAccessInfo &load_info, const std::vector<MemAccessInfo> &seen_stores) {
-    // If the load is PC-relative, it does not depend on stores
-    if (load_info.is_pc_relative()) {
-        return false;
-    }
-
-    for (const auto &store_info : seen_stores) {
-        // If the store is PC-relative, they are independent (no dependency)
-        if (store_info.is_pc_relative()) {
-            continue;
-        }
-
-        // Pattern 1: Same base register but different offsets (independent)
-        if (load_info.base_reg == store_info.base_reg &&
-            load_info.offset != store_info.offset) {
-            continue;
-        }
-
-        // Otherwise, they are dependent
-        return true;
-    }
-    return false;
-}
-
 static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const RegSet& mask) {
     for (unsigned r : regs) {
         if (r < mask.size() && mask.test(r)) return true;
@@ -73,12 +49,20 @@ static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const 
     return false;
 }
 
-static void set_reg(RegSet &mask, unsigned reg) {
-    if (reg < mask.size()) mask.set(reg);
+static void set_reg(RegSet &mask, unsigned reg, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        if (alias < mask.size()) mask.set(alias);
+    }
 }
 
-static void reset_reg(RegSet &mask, unsigned reg) {
-    if (reg < mask.size()) mask.reset(reg);
+static void reset_reg(RegSet &mask, unsigned reg, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        if (alias < mask.size()) mask.reset(alias);
+    }
 }
 
 int window_end(int i, int n, int width) {
@@ -128,14 +112,14 @@ int count_loads_no_dependency(const std::vector<MLPInstInfo> &inst_infos, int i,
 }
 
 int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
-                    int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop) {
+                    int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop,
+                    const llvm::MCRegisterInfo &MRI) {
     load_dep_regs.reset();
 
     int count_indep = 0;
     int count_dep = 0;
     int uops_sum = 0;
     int step_limit = mlpWindowLoop ? width : (n - i);
-    std::vector<MemAccessInfo> seen_stores;
 
     for (int step = 0; step < step_limit; ++step) {
         int j = (i + step) % n;
@@ -147,27 +131,27 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         }
         uops_sum += inst_uops;
 
-        if (step < n && inst_infos[j].is_store() && inst_infos[j].mem_info.valid()) {
-            seen_stores.push_back(inst_infos[j].mem_info);
-        }
-
         bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
-        if (inst_infos[j].is_load() && hasStoreDependency(inst_infos[j].mem_info, seen_stores)) {
-            is_dep = true;
-        }
 
-        if (inst_infos[j].is_load()) {
+        if (inst_infos[j].is_load() && inst_infos[j].mem_info.valid()) {
             if (is_dep) {
                 ++count_dep;
             } else {
                 ++count_indep;
             }
-            for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
+            for (unsigned reg : inst_infos[j].io_regs.outputs) {
+                if (reg == inst_infos[j].mem_info.base_reg) {
+                    if (is_dep) set_reg(load_dep_regs, reg, MRI);
+                    else reset_reg(load_dep_regs, reg, MRI);
+                } else {
+                    set_reg(load_dep_regs, reg, MRI);
+                }
+            }
         } else if (!inst_infos[j].io_regs.outputs.empty()) {
             if (is_dep) {
-                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
+                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
             } else {
-                for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg);
+                for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg, MRI);
             }
         }
     }
@@ -177,7 +161,8 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 }
 
 int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
-                   int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop) {
+                   int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop,
+                   const llvm::MCRegisterInfo &MRI) {
     load_dep_regs.reset();
 
     int count_indep = 0;
@@ -186,7 +171,7 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 
     if (inst_infos[i].is_load()) {
         count_indep = 1;
-        for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg);
+        for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
     }
 
     int uops_sum = std::max(1, static_cast<int>(inst_infos[i].num_uops));
@@ -212,12 +197,12 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         } else {
             if (inst_infos[j].is_load()) {
                 ++count_indep;
-                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
+                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
             } else {
                 if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
-                    for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
+                    for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
                 } else {
-                    for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg);
+                    for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg, MRI);
                 }
             }
         }
@@ -229,9 +214,10 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 }
 
 int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, int width,
-                           RegSet &load_dep_regs, bool mlpWindowLoop) {
+                           RegSet &load_dep_regs, bool mlpWindowLoop,
+                           const llvm::MCRegisterInfo &MRI) {
     load_dep_regs.reset();
-    for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg);
+    for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
 
     int count = 1;
     int limit = mlpWindowLoop ? n : (n - i);
@@ -240,9 +226,15 @@ int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, in
         if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) break;
         ++count;
         if (inst_infos[j].is_load()) {
-            for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg);
+            for (unsigned reg : inst_infos[j].io_regs.outputs) {
+                if (reg == inst_infos[j].mem_info.base_reg) {
+                    reset_reg(load_dep_regs, reg, MRI);
+                } else {
+                    set_reg(load_dep_regs, reg, MRI);
+                }
+            }
         } else {
-            for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg);
+            for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg, MRI);
         }
     }
     return count;
@@ -270,9 +262,19 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
     }
 }
 
+static bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return true;
+    if (const char* name = MRI.getName(reg)) {
+        std::string s(name);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return (s == "xzr" || s == "wzr" || s == "zero" || s == "x0");
+    }
+    return false;
+}
+
 }  // namespace
 
-MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) const {
+MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo &MCII) const {
     MemAccessInfo info;
     if (!MCID.mayLoad() && !MCID.mayStore()) return info;
     unsigned num_ops = Inst.getNumOperands();
@@ -309,7 +311,7 @@ MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCIns
     return info;
 }
 
-MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) const {
+MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo &MCII) const {
     MemAccessInfo info;
     if (!MCID.mayLoad() && !MCID.mayStore()) return info;
     unsigned num_ops = Inst.getNumOperands();
@@ -358,7 +360,7 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
     return info;
 }
 
-MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI) const {
+MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo &MCII) const {
     MemAccessInfo info;
     if (!MCID.mayLoad() && !MCID.mayStore()) return info;
     unsigned num_ops = Inst.getNumOperands();
@@ -373,34 +375,86 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
         }
     }
 
-    // Pattern A: LDP/STP (Pair)
-    if (num_ops >= 4 && Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() && 
-        Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
-        info.base_reg = Inst.getOperand(2).getReg();
-        info.offset = Inst.getOperand(3).getImm();
+    std::string Name = std::string(MCII.getName(Inst.getOpcode()));
+
+    // 1. Literal/PC-relative single load
+    if (Name.size() >= 4 && Name.rfind("LDR", 0) == 0 && Name.back() == 'l') {
         info.set_valid(true);
+        info.set_is_pc_relative(true);
+        finalizeMemAccessInfo(info, MCID);
+        return info;
     }
-    // Pattern B: LDR/STR (Single)
-    else if (num_ops >= 3 && Inst.getOperand(0).isReg() && 
-             Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
-        info.base_reg = Inst.getOperand(1).getReg();
-        info.offset = Inst.getOperand(2).getImm();
-        info.set_valid(true);
+
+    // 2. Exclusive, load-acquire, store-release (no offset, base is the last operand)
+    bool is_exclusive = (Name.rfind("LDX", 0) == 0 || Name.rfind("LDAX", 0) == 0 ||
+                         Name.rfind("LDAR", 0) == 0 || Name.rfind("STX", 0) == 0 ||
+                         Name.rfind("STLX", 0) == 0 || Name.rfind("STLR", 0) == 0);
+    if (is_exclusive) {
+        if (num_ops > 0 && Inst.getOperand(num_ops - 1).isReg()) {
+            info.base_reg = Inst.getOperand(num_ops - 1).getReg();
+            info.offset = 0;
+            info.set_valid(true);
+            finalizeMemAccessInfo(info, MCID);
+            return info;
+        }
     }
-    // Pattern C: LDR/STR post/pre-index
-    else if (num_ops >= 4 && Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() && 
-             Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
-        info.base_reg = Inst.getOperand(2).getReg();
-        info.offset = Inst.getOperand(3).getImm();
-        info.set_valid(true);
+
+    // 3. Pair Loads/Stores (LDP/STP/LDNP/STNP)
+    bool is_pair = (Name.rfind("LDP", 0) == 0 || Name.rfind("STP", 0) == 0 ||
+                    Name.rfind("LDNP", 0) == 0 || Name.rfind("STNP", 0) == 0);
+    if (is_pair) {
+        bool has_wb = (Name.find("post") != std::string::npos ||
+                       Name.find("pre") != std::string::npos ||
+                       Name.find("writeback") != std::string::npos);
+        if (has_wb) {
+            if (num_ops >= 5 && Inst.getOperand(3).isReg() && Inst.getOperand(4).isImm()) {
+                info.base_reg = Inst.getOperand(3).getReg();
+                info.offset = Inst.getOperand(4).getImm();
+                info.set_valid(true);
+            }
+        } else {
+            if (num_ops >= 4 && Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
+                info.base_reg = Inst.getOperand(2).getReg();
+                info.offset = Inst.getOperand(3).getImm();
+                info.set_valid(true);
+            }
+        }
+    }
+    // 4. Single Loads/Stores (LDR/STR etc.)
+    else {
+        bool is_reg_offset = (Name.find("roW") != std::string::npos || Name.find("roX") != std::string::npos);
+        if (is_reg_offset) {
+            if (num_ops >= 2 && Inst.getOperand(1).isReg()) {
+                info.base_reg = Inst.getOperand(1).getReg();
+                info.offset = 0;
+                info.set_valid(true);
+            }
+        } else {
+            bool has_wb = (Name.find("post") != std::string::npos ||
+                           Name.find("pre") != std::string::npos ||
+                           Name.find("writeback") != std::string::npos);
+            if (has_wb) {
+                if (num_ops >= 4 && Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
+                    info.base_reg = Inst.getOperand(2).getReg();
+                    info.offset = Inst.getOperand(3).getImm();
+                    info.set_valid(true);
+                }
+            } else {
+                if (num_ops >= 3 && Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
+                    info.base_reg = Inst.getOperand(1).getReg();
+                    info.offset = Inst.getOperand(2).getImm();
+                    info.set_valid(true);
+                }
+            }
+        }
     }
 
     if (info.valid() && info.base_reg != 0) {
         if (const char* reg_name = MRI.getName(info.base_reg)) {
             std::string name(reg_name);
             std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-            // ARM/AArch64 Stack pointer names
-            if (name == "sp" || name == "wsp") {
+            // ARM/AArch64 Stack and Frame pointer names
+            if (name == "sp" || name == "wsp" || name == "x29" || name == "w29" || name == "fp") {
                 info.set_is_stack_access(true);
             }
         }
@@ -431,7 +485,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     for (int i = 0; i < n; ++i) {
         const MCInst& Inst = instrs[i].Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
-        MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI);
+        MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI, MCII);
         
         inst_infos[i].set_is_load(mem_info.is_load());
         inst_infos[i].set_is_store(mem_info.is_store());
@@ -441,12 +495,18 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         for (unsigned j = 0; j < Inst.getNumOperands(); ++j) {
             const MCOperand& Op = Inst.getOperand(j);
             if (Op.isReg() && Op.getReg() != 0) {
-                if (j < MCID.getNumDefs()) inst_infos[i].io_regs.outputs.push_back(Op.getReg());
-                else inst_infos[i].io_regs.inputs.push_back(Op.getReg());
+                unsigned reg = Op.getReg();
+                if (isZeroRegister(reg, MRI)) continue;
+                if (j < MCID.getNumDefs()) inst_infos[i].io_regs.outputs.push_back(reg);
+                else inst_infos[i].io_regs.inputs.push_back(reg);
             }
         }
-        for (MCPhysReg R : MCID.implicit_defs()) inst_infos[i].io_regs.outputs.push_back(R);
-        for (MCPhysReg R : MCID.implicit_uses()) inst_infos[i].io_regs.inputs.push_back(R);
+        for (MCPhysReg R : MCID.implicit_defs()) {
+            if (!isZeroRegister(R, MRI)) inst_infos[i].io_regs.outputs.push_back(R);
+        }
+        for (MCPhysReg R : MCID.implicit_uses()) {
+            if (!isZeroRegister(R, MRI)) inst_infos[i].io_regs.inputs.push_back(R);
+        }
     }
     if (load_indices.empty()) {
         mlp_r = 1.0f;
@@ -468,7 +528,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         case DependencyKind::OOO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
+                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop, MRI);
                 assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
                 assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, mlpWindowLoop);
             }
@@ -476,14 +536,14 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         case DependencyKind::IO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop);
+                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop, MRI);
                 assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
                 assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, mlpWindowLoop);
             }
             break;
         case DependencyKind::Dependency:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, mlpWindowLoop));
+                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, mlpWindowLoop, MRI));
                 assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, mlpWindowLoop);
                 assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
             }
@@ -514,7 +574,7 @@ size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
     for (const auto &I : instrs) {
         const MCInst& Inst = I.Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
-        MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI);
+        MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI, MCII);
         if (mem_info.is_load()) {
             count++;
         }
@@ -533,4 +593,3 @@ std::unique_ptr<MLPAnalyzer> MLPAnalyzer::create(const llvm::MCSubtargetInfo &ST
         return std::make_unique<AArch64MLPAnalyzer>();
     }
 }
-
