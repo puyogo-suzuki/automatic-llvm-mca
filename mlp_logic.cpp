@@ -117,9 +117,8 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
     load_dep_regs.reset();
     RegSet seen_base_regs(MRI.getNumRegs() + 1);
 
-    // Helper for register updates (shared between warmup and actual pass)
+    // Helper: update seen_base_regs and load_dep_regs after processing instruction j.
     auto update_registers = [&](int j, bool is_valid_load, unsigned base_reg, bool is_dep) {
-        bool is_base_modified = false;
         if (is_valid_load && base_reg != 0) {
             for (unsigned reg : inst_infos[j].io_regs.outputs) {
                 for (llvm::MCRegAliasIterator AI(base_reg, &MRI, true); AI.isValid(); ++AI) {
@@ -143,36 +142,21 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         }
     };
 
-    // 1. Warmup pass if it's a loop to capture loop-carried dependencies and cache hits
-    /* DISABLE THIS.
-    if (mlpWindowLoop) {
-        int warmup_steps = width;
-        for (int step = 0; step < warmup_steps; ++step) {
-            int j = (i - warmup_steps + step) % n;
-            if (j < 0) j += n;
-
-            bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
-            bool is_valid_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
-            unsigned base_reg = is_valid_load ? inst_infos[j].mem_info.base_reg : 0;
-            bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
-
-            // Warmup pass does not count loads, it just updates register state
-            update_registers(j, is_valid_load, base_reg, is_dep);
-        }
-    } */
-
-    // 2. Actual pass (counting loads)
+    // Scan the instruction window.
+    // seen_base_regs tracks base registers used by loads within the current window;
+    // a load whose base was already seen in the same window is treated as a cache hit
+    // and not counted (except for the very first load which anchors the window).
     int count_indep = 0;
     int count_dep = 0;
     int uops_sum = 0;
-//    bool first_load = true;
+    bool first_load = true;
 
     for (int step = 0;; ++step) {
         if (!mlpWindowLoop && (i + step) >= n) break;
         int j = (i + step) % n;
         uops_sum += std::max(1, static_cast<int>(inst_infos[j].num_uops));
         // The instruction window is filled? If nothing is evaluated, continue.
-        if (uops_sum > width && step > 0 )  break;
+        if (uops_sum > width && step > 0)  break;
 
         bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
         bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
@@ -180,19 +164,15 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
 
         if (is_load) {
-            if (is_hit/* && !first_load*/) {
-                // Cache hit on same base register: do not count in MLP
+            if (is_hit && !first_load) {
+                // Cache hit on a base register already seen in this window: skip.
             } else {
-//                if (first_load) {
-//                    ++count_indep;
-//                    first_load = false;
-//                } else {
-                    if (is_dep) {
-                        ++count_dep;
-                    } else {
-                        ++count_indep;
-                    }
-//                }
+                if (is_dep) {
+                    ++count_dep;
+                } else {
+                    ++count_indep;
+                }
+                first_load = false;
             }
         }
 
@@ -636,7 +616,72 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
 size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
                                       const llvm::MCSubtargetInfo& STI,
                                       const llvm::MCInstrInfo& MCII,
-                                      const llvm::MCRegisterInfo& MRI) const {
+                                      const llvm::MCRegisterInfo& MRI,
+                                      DependencyKind depKind) const {
+    if (depKind == DependencyKind::OOO) {
+        int n = instrs.size();
+        std::vector<MLPInstInfo> inst_infos(n);
+        for (int i = 0; i < n; ++i) {
+            const MCInst& Inst = instrs[i].Inst;
+            const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
+            MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI, MCII);
+            
+            inst_infos[i].set_is_load(mem_info.is_load());
+            inst_infos[i].set_is_store(mem_info.is_store());
+
+            inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
+            inst_infos[i].mem_info = mem_info;
+            for (unsigned j = 0; j < Inst.getNumOperands(); ++j) {
+                const MCOperand& Op = Inst.getOperand(j);
+                if (Op.isReg() && Op.getReg() != 0) {
+                    unsigned reg = Op.getReg();
+                    if (isZeroRegister(reg, MRI)) continue;
+                    if (j < MCID.getNumDefs()) inst_infos[i].io_regs.outputs.push_back(reg);
+                    else inst_infos[i].io_regs.inputs.push_back(reg);
+                }
+            }
+            for (MCPhysReg R : MCID.implicit_defs()) {
+                if (!isZeroRegister(R, MRI)) inst_infos[i].io_regs.outputs.push_back(R);
+            }
+            for (MCPhysReg R : MCID.implicit_uses()) {
+                if (!isZeroRegister(R, MRI)) inst_infos[i].io_regs.inputs.push_back(R);
+            }
+        }
+
+        RegSet seen_base_regs(MRI.getNumRegs() + 1);
+        size_t non_hit_count = 0;
+        bool first_load = true;
+
+        for (int j = 0; j < n; ++j) {
+            bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
+            unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
+            bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
+
+            if (is_load) {
+                if (is_hit && !first_load) {
+                    // Cache hit on same base register: do not count in BB_LOADS
+                } else {
+                    non_hit_count++;
+                    first_load = false;
+                }
+            }
+
+            if (is_load && base_reg != 0) {
+                for (unsigned reg : inst_infos[j].io_regs.outputs) {
+                    for (llvm::MCRegAliasIterator AI(base_reg, &MRI, true); AI.isValid(); ++AI) {
+                        if (*AI == reg) goto end_base_regs_set;
+                    }
+                }
+                set_reg(seen_base_regs, base_reg, MRI);
+            }
+          end_base_regs_set:
+            for (unsigned reg : inst_infos[j].io_regs.outputs) {
+                reset_reg(seen_base_regs, reg, MRI);
+            }
+        }
+        return non_hit_count;
+    }
+
     size_t count = 0;
     for (const auto &I : instrs) {
         const MCInst& Inst = I.Inst;

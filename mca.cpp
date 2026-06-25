@@ -335,7 +335,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
 
     McaMetrics M;
     M.RetiredInstructions = Tracker.SteadyRetired;
-    M.LoadInstructions = analyzer.countNonStackLoads(instrs, STI, MCII, MRI);
+    M.LoadInstructions = analyzer.countNonStackLoads(instrs, STI, MCII, MRI, depKind);
     M.Cycles = Tracker.SteadyCycles;
     M.MLP = analyzer.compute_mlp(instrs, windowWidth, depKind, assignKind, STI, MCII, MRI, M.MLP_R, mlpWindowLoop);
     if (M.RetiredInstructions > 0) {

@@ -168,7 +168,7 @@ TEST(MLPTest, WindowLoopOOO) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 1.0, 0.01);
+    EXPECT_NEAR(val1, 1.5, 0.01);
     EXPECT_NEAR(ratio, 0.75, 0.01);
 }
 
@@ -263,27 +263,25 @@ TEST(MLPTest, AArch64MixedDependencyProp) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    // With cache-hit logic:
-    // For i=0, steps are:
-    //  step 0 (j=0): ldr x1. first_load=true. count_indep=1.
-    //  step 1 (j=1): ldr x2. hit on x0 (since x0 was seen). Not counted.
-    //  step 2 (j=2): ldr x3. base x2 was reset in seen_base_regs and load_dep_regs. is_dep=false. count_indep=2.
-    //  step 3 (j=0): ldr x1. hit on x0. Not counted.
-    //  Total count_indep = 2.
-    // For i=1, steps are:
-    //  step 0 (j=1): ldr x2. first_load=true. count_indep=1.
-    //  step 1 (j=2): ldr x3. base x2 is in load_dep_regs (since it is loaded in this window). is_dep=true. count_dep=1.
-    //  step 2 (j=0): ldr x1. hit on x0. Not counted.
-    //  step 3 (j=1): ldr x2. hit on x0. Not counted.
-    //  Total count_indep = 1.
-    // For i=2, steps are:
-    //  step 0 (j=2): ldr x3. first_load=true. count_indep=1.
-    //  step 1 (j=0): ldr x1. hit on x0 (seen in warmup). Not counted.
-    //  step 2 (j=1): ldr x2. hit on x0. Not counted.
-    //  step 3 (j=2): ldr x3. base x2 is in load_dep_regs (loaded by ldr x2 in this window). is_dep=true. count_dep=1.
-    //  Wait, why count_indep = 2? Oh, in step 1 ldr x1 is hit, so count_indep is not incremented. So count_indep = 1?
-    //  Actually, with corrected cache-hit logic, the dependency from x0 is propagated through x2 to x3, making the whole chain serialized (MLP = 1.0).
-    EXPECT_NEAR(val, 1.0, 0.01);
+    // Without warmup, seen_base_regs is built only from within each window:
+    // For i=0 (ldr x1, [x0]):
+    //   step 0: ldr x1. first_load=true. count_indep=1. seen<-x0.
+    //   step 1: ldr x2. hit on x0 (seen). Not counted. seen<-x0. load_dep<-x2.
+    //   step 2: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
+    //   step 3: ldr x1. hit on x0. Not counted. Total: count_indep=1.
+    // For i=1 (ldr x2, [x0]):
+    //   step 0: ldr x2. first_load=true. count_indep=1. seen<-x0. load_dep<-x2.
+    //   step 1: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
+    //   step 2: ldr x1. hit on x0. Not counted.
+    //   step 3: ldr x2. hit on x0. Not counted. Total: count_indep=1.
+    // For i=2 (ldr x3, [x2]):
+    //   step 0: ldr x3. first_load=true. count_indep=1. seen<-x2. load_dep<-x3.
+    //   step 1: ldr x1. base x0 not in seen. count_indep=2. seen<-x0. load_dep<-x1.
+    //   step 2: ldr x2. hit on x0. Not counted. load_dep<-x2.
+    //   step 3: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
+    //   Total: count_indep=2.
+    // avg_mlp = (1 + 1 + 2) / 3 = 4/3 ~= 1.333
+    EXPECT_NEAR(val, 4.0f / 3.0f, 0.01);
 }
 
 TEST(MLPTest, AArch64CacheHitBaseRegister) {

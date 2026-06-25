@@ -99,7 +99,8 @@ public:
     virtual size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
                                       const llvm::MCSubtargetInfo& STI,
                                       const llvm::MCInstrInfo& MCII,
-                                      const llvm::MCRegisterInfo& MRI) const;
+                                      const llvm::MCRegisterInfo& MRI,
+                                      DependencyKind depKind = DependencyKind::None) const;
 };
 
 class RISCVMLPAnalyzer : public MLPAnalyzer {
