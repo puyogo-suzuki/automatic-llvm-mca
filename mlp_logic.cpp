@@ -115,45 +115,88 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                     int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop,
                     const llvm::MCRegisterInfo &MRI) {
     load_dep_regs.reset();
+    RegSet seen_base_regs(MRI.getNumRegs() + 1);
 
+    // Helper for register updates (shared between warmup and actual pass)
+    auto update_registers = [&](int j, bool is_valid_load, unsigned base_reg, bool is_dep) {
+        bool is_base_modified = false;
+        if (is_valid_load && base_reg != 0) {
+            for (unsigned reg : inst_infos[j].io_regs.outputs) {
+                for (llvm::MCRegAliasIterator AI(base_reg, &MRI, true); AI.isValid(); ++AI) {
+                    if (*AI == reg) goto end_base_regs_set;
+                }
+            }
+            set_reg(seen_base_regs, base_reg, MRI);
+        }
+      end_base_regs_set:
+        for (unsigned reg : inst_infos[j].io_regs.outputs) {
+            if (is_dep)
+                set_reg(load_dep_regs, reg, MRI);
+            else if (is_valid_load) {
+                if (reg == base_reg && inst_infos[j].mem_info.is_writeback())
+                    reset_reg(load_dep_regs, reg, MRI);
+                else
+                    set_reg(load_dep_regs, reg, MRI);
+            } else
+                reset_reg(load_dep_regs, reg, MRI);
+            reset_reg(seen_base_regs, reg, MRI);
+        }
+    };
+
+    // 1. Warmup pass if it's a loop to capture loop-carried dependencies and cache hits
+    /* DISABLE THIS.
+    if (mlpWindowLoop) {
+        int warmup_steps = width;
+        for (int step = 0; step < warmup_steps; ++step) {
+            int j = (i - warmup_steps + step) % n;
+            if (j < 0) j += n;
+
+            bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
+            bool is_valid_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
+            unsigned base_reg = is_valid_load ? inst_infos[j].mem_info.base_reg : 0;
+            bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
+
+            // Warmup pass does not count loads, it just updates register state
+            update_registers(j, is_valid_load, base_reg, is_dep);
+        }
+    } */
+
+    // 2. Actual pass (counting loads)
     int count_indep = 0;
     int count_dep = 0;
     int uops_sum = 0;
-    int step_limit = mlpWindowLoop ? width : (n - i);
+//    bool first_load = true;
 
-    for (int step = 0; step < step_limit; ++step) {
+    for (int step = 0;; ++step) {
+        if (!mlpWindowLoop && (i + step) >= n) break;
         int j = (i + step) % n;
-        int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
-        if (uops_sum + inst_uops > width) {
-            if (step > 0) {
-                break;
-            }
-        }
-        uops_sum += inst_uops;
+        uops_sum += std::max(1, static_cast<int>(inst_infos[j].num_uops));
+        // The instruction window is filled? If nothing is evaluated, continue.
+        if (uops_sum > width && step > 0 )  break;
 
         bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
+        bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
+        unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
+        bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
 
-        if (inst_infos[j].is_load() && inst_infos[j].mem_info.valid()) {
-            if (is_dep) {
-                ++count_dep;
+        if (is_load) {
+            if (is_hit/* && !first_load*/) {
+                // Cache hit on same base register: do not count in MLP
             } else {
-                ++count_indep;
-            }
-            for (unsigned reg : inst_infos[j].io_regs.outputs) {
-                if (reg == inst_infos[j].mem_info.base_reg && inst_infos[j].mem_info.is_writeback()) {
-                    if (is_dep) set_reg(load_dep_regs, reg, MRI);
-                    else reset_reg(load_dep_regs, reg, MRI);
-                } else {
-                    set_reg(load_dep_regs, reg, MRI);
-                }
-            }
-        } else if (!inst_infos[j].io_regs.outputs.empty()) {
-            if (is_dep) {
-                for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
-            } else {
-                for (unsigned reg : inst_infos[j].io_regs.outputs) reset_reg(load_dep_regs, reg, MRI);
+//                if (first_load) {
+//                    ++count_indep;
+//                    first_load = false;
+//                } else {
+                    if (is_dep) {
+                        ++count_dep;
+                    } else {
+                        ++count_indep;
+                    }
+//                }
             }
         }
+
+        update_registers(j, is_load, base_reg, is_dep);
     }
     int total = count_indep + count_dep;
     ratio = (total == 0) ? -1.0f : static_cast<float>(count_indep) / total;
@@ -183,6 +226,8 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
             break;
         }
         uops_sum += inst_uops;
+
+
 
         if (!barrier_hit) {
             if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
@@ -332,6 +377,15 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
     unsigned num_ops = Inst.getNumOperands();
     if (num_ops == 0) return info;
 
+    std::string Name = std::string(MCII.getName(Inst.getOpcode()));
+    std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
+    if (Name.rfind("pop", 0) == 0 || Name.rfind("push", 0) == 0) {
+        info.set_valid(true);
+        info.set_is_stack_access(true);
+        finalizeMemAccessInfo(info, MCID);
+        return info;
+    }
+
     for (unsigned i = 0; i < num_ops; ++i) {
         if (Inst.getOperand(i).isExpr()) {
             info.set_valid(true);
@@ -424,9 +478,10 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
                        Name.find("writeback") != std::string::npos);
         if (has_wb) {
             info.set_is_writeback(true);
-            if (num_ops >= 5 && Inst.getOperand(3).isReg() && Inst.getOperand(4).isImm()) {
+            if (num_ops >= 5 && Inst.getOperand(3).isReg() && 
+                (Inst.getOperand(4).isImm() || Inst.getOperand(4).isReg())) {
                 info.base_reg = Inst.getOperand(3).getReg();
-                info.offset = Inst.getOperand(4).getImm();
+                info.offset = Inst.getOperand(4).isImm() ? Inst.getOperand(4).getImm() : 0;
                 info.set_valid(true);
             }
         } else {
@@ -452,9 +507,10 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
                            Name.find("writeback") != std::string::npos);
             if (has_wb) {
                 info.set_is_writeback(true);
-                if (num_ops >= 4 && Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
+                if (num_ops >= 4 && Inst.getOperand(2).isReg() && 
+                    (Inst.getOperand(3).isImm() || Inst.getOperand(3).isReg())) {
                     info.base_reg = Inst.getOperand(2).getReg();
-                    info.offset = Inst.getOperand(3).getImm();
+                    info.offset = Inst.getOperand(3).isImm() ? Inst.getOperand(3).getImm() : 0;
                     info.set_valid(true);
                 }
             } else {
@@ -507,6 +563,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         
         inst_infos[i].set_is_load(mem_info.is_load());
         inst_infos[i].set_is_store(mem_info.is_store());
+
         inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
         inst_infos[i].mem_info = mem_info;
         if (inst_infos[i].is_load()) load_indices.push_back(i);
@@ -526,6 +583,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
             if (!isZeroRegister(R, MRI)) inst_infos[i].io_regs.inputs.push_back(R);
         }
     }
+    bool actual_window_loop = mlpWindowLoop;
     if (load_indices.empty()) {
         mlp_r = 1.0f;
         return 1.0f;
@@ -538,32 +596,32 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     switch (DepKind) {
         case DependencyKind::None:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_no_dependency(inst_infos, i, n, width, mlpWindowLoop));
-                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
+                float score = static_cast<float>(count_loads_no_dependency(inst_infos, i, n, width, actual_window_loop));
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, actual_window_loop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, actual_window_loop);
             }
             break;
         case DependencyKind::OOO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop, MRI);
-                assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, mlpWindowLoop);
+                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, actual_window_loop, MRI);
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, actual_window_loop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, actual_window_loop);
             }
             break;
         case DependencyKind::IO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, mlpWindowLoop, MRI);
-                assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, mlpWindowLoop);
+                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, actual_window_loop, MRI);
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, actual_window_loop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, actual_window_loop);
             }
             break;
         case DependencyKind::Dependency:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, mlpWindowLoop, MRI));
-                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, mlpWindowLoop);
-                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, mlpWindowLoop);
+                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, actual_window_loop, MRI));
+                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, actual_window_loop);
+                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, actual_window_loop);
             }
             break;
     }
