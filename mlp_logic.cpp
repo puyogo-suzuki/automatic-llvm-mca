@@ -227,19 +227,14 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         }
         uops_sum += inst_uops;
 
-
-
-        if (!barrier_hit) {
-            if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
-                barrier_hit = true;
-            }
-        }
-
         if (barrier_hit) {
             if (inst_infos[j].is_load()) {
                 ++count_dep;
             }
         } else {
+            if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
+                barrier_hit = true;
+            }
             if (inst_infos[j].is_load()) {
                 ++count_indep;
                 for (unsigned reg : inst_infos[j].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
@@ -289,11 +284,7 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
     for (int step = 0; step < step_limit; ++step) {
         int j = (i + step) % n;
         int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
-        if (uops_sum + inst_uops > width) {
-            if (step > 0) {
-                break;
-            }
-        }
+        if (uops_sum + inst_uops > width && step > 0) break;
         uops_sum += inst_uops;
         if (inst_infos[j].is_load()) mlp_vals[j] = std::max(mlp_vals[j], score);
     }
