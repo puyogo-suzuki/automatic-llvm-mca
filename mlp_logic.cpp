@@ -65,20 +65,50 @@ static void reset_reg(RegSet &mask, unsigned reg, const llvm::MCRegisterInfo &MR
     }
 }
 
-static void update_seen_base_regs(const MLPInstInfo &inst_info, RegSet &seen_base_regs, const llvm::MCRegisterInfo &MRI) {
+#include <set>
+#include <map>
+
+struct SeenBaseRegs {
+    std::map<unsigned, std::set<int64_t>> data;
+
+    bool test(unsigned reg, int64_t cache_line) const {
+        auto it = data.find(reg);
+        if (it == data.end()) return false;
+        return it->second.count(cache_line) > 0;
+    }
+
+    void set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI) {
+        if (reg == 0) return;
+        for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+            unsigned alias = *AI;
+            data[alias].insert(cache_line);
+        }
+    }
+
+    void reset(unsigned reg, const llvm::MCRegisterInfo &MRI) {
+        if (reg == 0) return;
+        for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+            unsigned alias = *AI;
+            data.erase(alias);
+        }
+    }
+};
+
+static void update_seen_base_regs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_regs, const llvm::MCRegisterInfo &MRI) {
     bool is_valid_load = inst_info.is_load() && inst_info.mem_info.valid();
     unsigned base_reg = is_valid_load ? inst_info.mem_info.base_reg : 0;
-    if (is_valid_load && base_reg != 0) {
+    if (is_valid_load && base_reg != 0 && inst_info.mem_info.is_constant_offset()) {
+        int64_t cache_line = inst_info.mem_info.offset / 64;
         for (unsigned reg : inst_info.io_regs.outputs) {
             for (llvm::MCRegAliasIterator AI(base_reg, &MRI, true); AI.isValid(); ++AI) {
                 if (*AI == reg) goto end_base_regs_set;
             }
         }
-        set_reg(seen_base_regs, base_reg, MRI);
+        seen_base_regs.set(base_reg, cache_line, MRI);
     }
   end_base_regs_set:
     for (unsigned reg : inst_info.io_regs.outputs) {
-        reset_reg(seen_base_regs, reg, MRI);
+        seen_base_regs.reset(reg, MRI);
     }
 }
 
@@ -132,7 +162,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                     int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop,
                     const llvm::MCRegisterInfo &MRI) {
     load_dep_regs.reset();
-    RegSet seen_base_regs(MRI.getNumRegs() + 1);
+    SeenBaseRegs seen_base_regs;
 
     // Helper: update seen_base_regs and load_dep_regs after processing instruction j.
     auto update_registers = [&](int j, bool is_valid_load, unsigned base_reg, bool is_dep) {
@@ -168,8 +198,16 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
         bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
         unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
-        // is_hit: this load uses a base register that was already seen in the window.
-        bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
+        
+        bool is_hit = false;
+        if (is_load) {
+            if (inst_infos[j].mem_info.is_stack_access()) {
+                is_hit = true;
+            } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+                int64_t cache_line = inst_infos[j].mem_info.offset / 64;
+                is_hit = seen_base_regs.test(base_reg, cache_line);
+            }
+        }
 
         if (is_load) {
             if (is_hit) {
@@ -369,6 +407,7 @@ MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCIns
         info.base_reg = Inst.getOperand(1).getReg();
         info.offset = Inst.getOperand(2).getImm();
         info.set_valid(true);
+        info.set_is_constant_offset(true);
     }
 
     if (info.valid() && info.base_reg != 0) {
@@ -397,6 +436,7 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
     if (Name.rfind("pop", 0) == 0 || Name.rfind("push", 0) == 0) {
         info.set_valid(true);
         info.set_is_stack_access(true);
+        info.set_is_constant_offset(true);
         finalizeMemAccessInfo(info, MCID);
         return info;
     }
@@ -405,6 +445,7 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
         if (Inst.getOperand(i).isExpr()) {
             info.set_valid(true);
             info.set_is_pc_relative(true);
+            info.set_is_constant_offset(true);
             finalizeMemAccessInfo(info, MCID);
             return info;
         }
@@ -418,10 +459,17 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
             Inst.getOperand(i+4).isReg()) {
             
             info.base_reg = Inst.getOperand(i).getReg();
+            unsigned index_reg = Inst.getOperand(i+2).getReg();
             if (Inst.getOperand(i+3).isImm()) {
                 info.offset = Inst.getOperand(i+3).getImm();
+                if (index_reg == 0) {
+                    info.set_is_constant_offset(true);
+                }
             } else {
                 info.set_is_pc_relative(true);
+                if (index_reg == 0) {
+                    info.set_is_constant_offset(true);
+                }
             }
             info.set_valid(true);
             break;
@@ -444,6 +492,36 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
     return info;
 }
 
+static int64_t getAArch64Scale(const std::string &Name) {
+    // Check pairs
+    if (Name.find("ldpx") != std::string::npos || Name.find("stpx") != std::string::npos ||
+        Name.find("ldnpx") != std::string::npos || Name.find("stnpx") != std::string::npos) {
+        return 8;
+    }
+    if (Name.find("ldpw") != std::string::npos || Name.find("stpw") != std::string::npos ||
+        Name.find("ldnpw") != std::string::npos || Name.find("stnpw") != std::string::npos) {
+        return 4;
+    }
+    if (Name.find("ldpd") != std::string::npos || Name.find("stpd") != std::string::npos) return 8;
+    if (Name.find("ldps") != std::string::npos || Name.find("stps") != std::string::npos) return 4;
+    if (Name.find("ldpq") != std::string::npos || Name.find("stpq") != std::string::npos) return 16;
+
+    // Check singles
+    if (Name.find("ldrx") != std::string::npos || Name.find("strx") != std::string::npos) return 8;
+    if (Name.find("ldrw") != std::string::npos || Name.find("strw") != std::string::npos || Name.find("ldrsw") != std::string::npos) return 4;
+    if (Name.find("ldrh") != std::string::npos || Name.find("strh") != std::string::npos || Name.find("ldrsh") != std::string::npos) return 2;
+    if (Name.find("ldrb") != std::string::npos || Name.find("strb") != std::string::npos || Name.find("ldrsb") != std::string::npos) return 1;
+    
+    // Floating point / SIMD singles
+    if (Name.find("ldrd") != std::string::npos || Name.find("strd") != std::string::npos) return 8;
+    if (Name.find("ldrs") != std::string::npos || Name.find("strs") != std::string::npos) return 4;
+    if (Name.find("ldrh") != std::string::npos || Name.find("strh") != std::string::npos) return 2;
+    if (Name.find("ldrb") != std::string::npos || Name.find("strb") != std::string::npos) return 1;
+    if (Name.find("ldrq") != std::string::npos || Name.find("strq") != std::string::npos) return 16;
+
+    return 1; // Default fallback
+}
+
 MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo &MCII) const {
     MemAccessInfo info;
     if (!MCID.mayLoad() && !MCID.mayStore()) return info;
@@ -454,6 +532,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
         if (Inst.getOperand(i).isExpr()) {
             info.set_valid(true);
             info.set_is_pc_relative(true);
+            info.set_is_constant_offset(true);
             finalizeMemAccessInfo(info, MCID);
             return info;
         }
@@ -466,6 +545,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
     if (Name.size() >= 4 && Name.rfind("ldr", 0) == 0 && Name.back() == 'l') {
         info.set_valid(true);
         info.set_is_pc_relative(true);
+        info.set_is_constant_offset(true);
         finalizeMemAccessInfo(info, MCID);
         return info;
     }
@@ -479,6 +559,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
             info.base_reg = Inst.getOperand(num_ops - 1).getReg();
             info.offset = 0;
             info.set_valid(true);
+            info.set_is_constant_offset(true);
             finalizeMemAccessInfo(info, MCID);
             return info;
         }
@@ -496,14 +577,19 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
             if (num_ops >= 5 && Inst.getOperand(3).isReg() && 
                 (Inst.getOperand(4).isImm() || Inst.getOperand(4).isReg())) {
                 info.base_reg = Inst.getOperand(3).getReg();
-                info.offset = Inst.getOperand(4).isImm() ? Inst.getOperand(4).getImm() : 0;
+                bool is_imm = Inst.getOperand(4).isImm();
+                info.offset = is_imm ? Inst.getOperand(4).getImm() * getAArch64Scale(Name) : 0;
                 info.set_valid(true);
+                if (is_imm) {
+                    info.set_is_constant_offset(true);
+                }
             }
         } else {
             if (num_ops >= 4 && Inst.getOperand(2).isReg() && Inst.getOperand(3).isImm()) {
                 info.base_reg = Inst.getOperand(2).getReg();
-                info.offset = Inst.getOperand(3).getImm();
+                info.offset = Inst.getOperand(3).getImm() * getAArch64Scale(Name);
                 info.set_valid(true);
+                info.set_is_constant_offset(true);
             }
         }
     }
@@ -515,6 +601,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
                 info.base_reg = Inst.getOperand(1).getReg();
                 info.offset = 0;
                 info.set_valid(true);
+                info.set_is_constant_offset(false);
             }
         } else {
             bool has_wb = (Name.find("post") != std::string::npos ||
@@ -525,14 +612,19 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
                 if (num_ops >= 4 && Inst.getOperand(2).isReg() && 
                     (Inst.getOperand(3).isImm() || Inst.getOperand(3).isReg())) {
                     info.base_reg = Inst.getOperand(2).getReg();
-                    info.offset = Inst.getOperand(3).isImm() ? Inst.getOperand(3).getImm() : 0;
+                    bool is_imm = Inst.getOperand(3).isImm();
+                    info.offset = is_imm ? Inst.getOperand(3).getImm() * getAArch64Scale(Name) : 0;
                     info.set_valid(true);
+                    if (is_imm) {
+                        info.set_is_constant_offset(true);
+                    }
                 }
             } else {
                 if (num_ops >= 3 && Inst.getOperand(1).isReg() && Inst.getOperand(2).isImm()) {
                     info.base_reg = Inst.getOperand(1).getReg();
-                    info.offset = Inst.getOperand(2).getImm();
+                    info.offset = Inst.getOperand(2).getImm() * getAArch64Scale(Name);
                     info.set_valid(true);
+                    info.set_is_constant_offset(true);
                 }
             }
         }
@@ -642,13 +734,22 @@ size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
         int n = instrs.size();
         std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
 
-        RegSet seen_base_regs(MRI.getNumRegs() + 1);
+        SeenBaseRegs seen_base_regs;
         size_t non_hit_count = 0;
 
         for (int j = 0; j < n; ++j) {
             bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
             unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
-            bool is_hit = (base_reg != 0 && base_reg < seen_base_regs.size() && seen_base_regs.test(base_reg));
+            
+            bool is_hit = false;
+            if (is_load) {
+                if (inst_infos[j].mem_info.is_stack_access()) {
+                    is_hit = true;
+                } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+                    int64_t cache_line = inst_infos[j].mem_info.offset / 64;
+                    is_hit = seen_base_regs.test(base_reg, cache_line);
+                }
+            }
 
             if (is_load) {
                 if (is_hit) {

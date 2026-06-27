@@ -294,3 +294,30 @@ TEST(MLPTest, AArch64CacheHitBaseRegister) {
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
     EXPECT_NEAR(val, 1.0, 0.01);
 }
+
+TEST(MLPTest, AArch64CacheLineBoundary) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    // Offset 8 and 72 belong to different cache lines (8/64 = 0, 72/64 = 1).
+    // Therefore, the second load should NOT be a cache hit and should be counted.
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nldr x2, [x0, #72]");
+    ASSERT_EQ(instrs.size(), 2u);
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val, 2.0, 0.01);
+}
+
+TEST(MLPTest, AArch64IndexRegisterExclusion) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    // Uses index register (x3). Index register loads should NOT be predicted as cache hits.
+    // Therefore, both loads should be counted as independent loads (since no dependency exists on x1/x2/x0/x3).
+    auto instrs = parseAsm(TC, "ldr x1, [x0, x3]\nldr x2, [x0, x3]");
+    ASSERT_EQ(instrs.size(), 2u);
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
+    EXPECT_NEAR(val, 2.0, 0.01);
+}
+

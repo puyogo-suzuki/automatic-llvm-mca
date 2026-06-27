@@ -51,7 +51,7 @@ struct McaMetrics {
 };
 
 struct MemAccessInfo {
-    std::bitset<6> flags;
+    std::bitset<7> flags;
     unsigned base_reg = 0;
     int64_t offset = 0;
 
@@ -72,6 +72,9 @@ struct MemAccessInfo {
 
     bool is_writeback() const { return flags.test(5); }
     void set_is_writeback(bool val) { flags.set(5, val); }
+
+    bool is_constant_offset() const { return flags.test(6); }
+    void set_is_constant_offset(bool val) { flags.set(6, val); }
 };
 
 class MLPAnalyzer {
