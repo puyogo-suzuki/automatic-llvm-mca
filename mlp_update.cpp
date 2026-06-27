@@ -193,8 +193,10 @@ int main(int argc, char **argv) {
 
                 float mlp_r = 0.0f;
                 float mlp = Analyzer->compute_mlp(region_instrs, windowWidth, DepKind, AssignKind, *STI, *MCII, *MRI, mlp_r, mlpLoop);
+                size_t load_instrs = Analyzer->countNonStackLoads(region_instrs, *STI, *MCII, *MRI, DepKind);
 
-                // Update MLP columns (row[7] = mlp, row[8] = mlp_r)
+                // Update MLP and load instructions columns (row[5] = load_instructions, row[7] = mlp, row[8] = mlp_r)
+                row[5] = std::to_string(load_instrs);
                 char buf_mlp[32];
                 char buf_mlp_r[32];
                 std::snprintf(buf_mlp, sizeof(buf_mlp), "%.2f", mlp);
