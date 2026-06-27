@@ -3,6 +3,7 @@
 #include <bitset>
 #include <cmath>
 #include <string>
+#include <iostream>
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCInstrInfo.h"
@@ -20,15 +21,17 @@ struct RegDeps {
 };
 
 struct MLPInstInfo {
-    std::bitset<2> flags; // bit 0: is_load, bit 1: is_store
+    std::bitset<3> flags; // bit 0: is_load, bit 1: is_store, bit 2: is_call
     short num_uops = 1;
     RegDeps io_regs;
     MemAccessInfo mem_info;
 
     bool is_load() const { return flags.test(0); }
     bool is_store() const { return flags.test(1); }
+    bool is_call() const { return flags.test(2); }
     void set_is_load(bool val) { flags.set(0, val); }
     void set_is_store(bool val) { flags.set(1, val); }
+    void set_is_call(bool val) { flags.set(2, val); }
 };
 
 static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) {
@@ -40,6 +43,60 @@ static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) 
         info.set_is_load(false);
         info.set_is_store(false);
     }
+}
+
+static std::vector<unsigned> get_return_registers(const llvm::MCRegisterInfo &MRI, const std::string &ArchName) {
+    std::vector<std::string> target_names;
+    std::string arch = ArchName;
+    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
+    if (arch.find("aarch64") != std::string::npos) {
+        // Return registers for AArch64 are generally x0-x7 (and w0-w7, v0-v7)
+        for (int i = 0; i <= 7; ++i) {
+            target_names.push_back("x" + std::to_string(i));
+            target_names.push_back("w" + std::to_string(i));
+            target_names.push_back("v" + std::to_string(i));
+            target_names.push_back("s" + std::to_string(i));
+            target_names.push_back("d" + std::to_string(i));
+            target_names.push_back("h" + std::to_string(i));
+            target_names.push_back("b" + std::to_string(i));
+            target_names.push_back("q" + std::to_string(i));
+        }
+    } else if (arch.find("x86") != std::string::npos) {
+        // Return registers for X86 are generally rax, rdx, rcx, xmm0-xmm7 etc.
+        target_names = {
+            "rax", "eax", "ax", "al", "ah",
+            "rdx", "edx", "dx", "dl", "dh",
+            "rcx", "ecx", "cx", "cl", "ch"
+        };
+        for (int i = 0; i <= 7; ++i) {
+            target_names.push_back("xmm" + std::to_string(i));
+            target_names.push_back("ymm" + std::to_string(i));
+            target_names.push_back("zmm" + std::to_string(i));
+        }
+    } else if (arch.find("riscv") != std::string::npos) {
+        // Return registers for RISC-V are generally a0, a1 (and fa0, fa1)
+        target_names = {
+            "a0", "x10", "a1", "x11",
+            "fa0", "f10", "fa1", "f11"
+        };
+    }
+
+    std::vector<unsigned> reg_ids;
+    if (target_names.empty()) return reg_ids;
+
+    std::set<std::string> target_set(target_names.begin(), target_names.end());
+
+    unsigned num_regs = MRI.getNumRegs();
+    for (unsigned r = 1; r < num_regs; ++r) {
+        if (const char* name = MRI.getName(r)) {
+            std::string name_str(name);
+            std::transform(name_str.begin(), name_str.end(), name_str.begin(), ::tolower);
+            if (target_set.count(name_str)) {
+                reg_ids.push_back(r);
+            }
+        }
+    }
+    return reg_ids;
 }
 
 static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const RegSet& mask) {
@@ -160,7 +217,7 @@ int count_loads_no_dependency(const std::vector<MLPInstInfo> &inst_infos, int i,
 
 int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                     int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop,
-                    const llvm::MCRegisterInfo &MRI) {
+                    const llvm::MCRegisterInfo &MRI, const std::vector<unsigned> &return_regs) {
     load_dep_regs.reset();
     SeenBaseRegs seen_base_regs;
 
@@ -177,6 +234,12 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                     set_reg(load_dep_regs, reg, MRI);
             } else
                 reset_reg(load_dep_regs, reg, MRI);
+        }
+        if (inst_infos[j].is_call()) {
+            for (unsigned ret_reg : return_regs) {
+                seen_base_regs.reset(ret_reg, MRI);
+                reset_reg(load_dep_regs, ret_reg, MRI);
+            }
         }
     };
 
@@ -230,7 +293,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 
 int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                    int width, RegSet &load_dep_regs, float &ratio, bool mlpWindowLoop,
-                   const llvm::MCRegisterInfo &MRI) {
+                   const llvm::MCRegisterInfo &MRI, const std::vector<unsigned> &return_regs) {
     load_dep_regs.reset();
 
     int count_indep = 0;
@@ -251,6 +314,12 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
             break;
         }
         uops_sum += inst_uops;
+
+        if (inst_infos[j].is_call()) {
+            for (unsigned ret_reg : return_regs) {
+                reset_reg(load_dep_regs, ret_reg, MRI);
+            }
+        }
 
         if (barrier_hit) {
             if (inst_infos[j].is_load()) {
@@ -280,7 +349,7 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 
 int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, int width,
                            RegSet &load_dep_regs, bool mlpWindowLoop,
-                           const llvm::MCRegisterInfo &MRI) {
+                           const llvm::MCRegisterInfo &MRI, const std::vector<unsigned> &return_regs) {
     load_dep_regs.reset();
     for (unsigned reg : inst_infos[i].io_regs.outputs) set_reg(load_dep_regs, reg, MRI);
 
@@ -292,6 +361,11 @@ int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, in
         ++count;
         for (unsigned reg : inst_infos[j].io_regs.outputs) {
             reset_reg(load_dep_regs, reg, MRI);
+        }
+        if (inst_infos[j].is_call()) {
+            for (unsigned ret_reg : return_regs) {
+                reset_reg(load_dep_regs, ret_reg, MRI);
+            }
         }
     }
     return count;
@@ -327,9 +401,9 @@ static std::vector<MLPInstInfo> buildInstInfos(
         const MCInst& Inst = instrs[i].Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
         MemAccessInfo mem_info = Analyzer->getMemAccessInfo(Inst, MCID, MRI, MCII);
-        
         inst_infos[i].set_is_load(mem_info.is_load());
         inst_infos[i].set_is_store(mem_info.is_store());
+        inst_infos[i].set_is_call(MCID.isCall());
 
         inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
         inst_infos[i].mem_info = mem_info;
@@ -662,9 +736,31 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
 
     const unsigned reg_count = MRI.getNumRegs() + 1;
     std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
+    std::vector<unsigned> return_regs = get_return_registers(MRI, STI.getTargetTriple().getArchName().str());
     std::vector<int> load_indices;
+    SeenBaseRegs global_seen_base_regs;
     for (int i = 0; i < n; ++i) {
-        if (inst_infos[i].is_load()) load_indices.push_back(i);
+        bool is_hit = false;
+        if (inst_infos[i].is_load()) {
+            if (DepKind == DependencyKind::OOO) {
+                unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
+                if (inst_infos[i].mem_info.is_stack_access()) {
+                    is_hit = true;
+                } else if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
+                    int64_t cache_line = inst_infos[i].mem_info.offset / 64;
+                    is_hit = global_seen_base_regs.test(base_reg, cache_line);
+                }
+            }
+            if (!is_hit) {
+                load_indices.push_back(i);
+            }
+        }
+        update_seen_base_regs(inst_infos[i], global_seen_base_regs, MRI);
+        if (inst_infos[i].is_call()) {
+            for (unsigned ret_reg : return_regs) {
+                global_seen_base_regs.reset(ret_reg, MRI);
+            }
+        }
     }
     bool actual_window_loop = mlpWindowLoop;
     if (load_indices.empty()) {
@@ -687,7 +783,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         case DependencyKind::OOO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, actual_window_loop, MRI);
+                int score = count_loads_ooo(inst_infos, i, n, width, load_dep_regs, score_r, actual_window_loop, MRI, return_regs);
                 assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, actual_window_loop);
                 assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, actual_window_loop);
             }
@@ -695,14 +791,14 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         case DependencyKind::IO:
             for (int i : load_indices) {
                 float score_r = 0.0f;
-                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, actual_window_loop, MRI);
+                int score = count_loads_io(inst_infos, i, n, width, load_dep_regs, score_r, actual_window_loop, MRI, return_regs);
                 assign_mlp_score(mlp_vals, inst_infos, i, n, width, static_cast<float>(score), AssignKind, actual_window_loop);
                 assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, score_r, AssignKind, actual_window_loop);
             }
             break;
         case DependencyKind::Dependency:
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, actual_window_loop, MRI));
+                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, actual_window_loop, MRI, return_regs));
                 assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, actual_window_loop);
                 assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, actual_window_loop);
             }
@@ -733,6 +829,7 @@ size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
     if (depKind == DependencyKind::OOO) {
         int n = instrs.size();
         std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
+        std::vector<unsigned> return_regs = get_return_registers(MRI, STI.getTargetTriple().getArchName().str());
 
         SeenBaseRegs seen_base_regs;
         size_t non_hit_count = 0;
@@ -760,6 +857,11 @@ size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
             }
 
             update_seen_base_regs(inst_infos[j], seen_base_regs, MRI);
+            if (inst_infos[j].is_call()) {
+                for (unsigned ret_reg : return_regs) {
+                    seen_base_regs.reset(ret_reg, MRI);
+                }
+            }
         }
         return non_hit_count;
     }

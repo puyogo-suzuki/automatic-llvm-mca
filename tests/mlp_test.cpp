@@ -280,8 +280,8 @@ TEST(MLPTest, AArch64MixedDependencyProp) {
     //   step 2: ldr x2. hit on x0. Not counted. load_dep<-x2.
     //   step 3: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
     //   Total: count_indep=2.
-    // avg_mlp = (1 + 1 + 2) / 3 = 4/3 ~= 1.333
-    EXPECT_NEAR(val, 4.0f / 3.0f, 0.01);
+    // avg_mlp = (1 + 2) / 2 = 1.5
+    EXPECT_NEAR(val, 1.5, 0.01);
 }
 
 TEST(MLPTest, AArch64CacheHitBaseRegister) {
@@ -311,8 +311,8 @@ TEST(MLPTest, AArch64CacheLineBoundary) {
 TEST(MLPTest, AArch64IndexRegisterExclusion) {
     initLLVMAArch64();
     AArch64TestContext TC;
-    // Uses index register (x3). Index register loads should NOT be predicted as cache hits.
-    // Therefore, both loads should be counted as independent loads (since no dependency exists on x1/x2/x0/x3).
+    // Uses index register (x3). Since index register loads are predicted to cache-miss,
+    // they are evaluated and not excluded from the evaluation queue.
     auto instrs = parseAsm(TC, "ldr x1, [x0, x3]\nldr x2, [x0, x3]");
     ASSERT_EQ(instrs.size(), 2u);
     float ratio = 0.0f;
@@ -320,4 +320,32 @@ TEST(MLPTest, AArch64IndexRegisterExclusion) {
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
     EXPECT_NEAR(val, 2.0, 0.01);
 }
+
+TEST(MLPTest, AArch64CallInstructionClearsDependencies) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    // Test that 'bl' clears dependency on x1.
+    // If dependency is cleared, both loads are independent.
+    // ldr x1, [x0, #8]  (load A)
+    // bl my_func        (clears dependency on x1)
+    // ldr x2, [x1, #8]  (load B) - independent of A because of 'bl'
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nbl my_func\nldr x2, [x1, #8]");
+    ASSERT_EQ(instrs.size(), 3u);
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
+    EXPECT_NEAR(val, 1.5, 0.01);
+}
+
+TEST(MLPTest, AArch64CallInstructionClearsSeenBaseRegs) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nbl my_func\nldr x2, [x0, #8]");
+    ASSERT_EQ(instrs.size(), 3u);
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
+    EXPECT_NEAR(val, 1.5, 0.01);
+}
+
 
