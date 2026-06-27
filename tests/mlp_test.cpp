@@ -251,8 +251,8 @@ TEST(MLPTest, X86PushPopStackAccess) {
     auto instrs = parseAsm(TC, "pushq %rax\npopq %rbx");
     ASSERT_FALSE(instrs.empty());
     X86MLPAnalyzer analyzer;
-    size_t loads = analyzer.countNonStackLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI);
-    EXPECT_EQ(loads, 0u);
+    size_t loads = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI);
+    EXPECT_EQ(loads, 1u);
 }
 
 TEST(MLPTest, AArch64MixedDependencyProp) {

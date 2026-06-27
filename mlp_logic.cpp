@@ -37,12 +37,6 @@ struct MLPInstInfo {
 static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) {
     info.set_is_load(MCID.mayLoad());
     info.set_is_store(MCID.mayStore());
-
-    // Ignore stack pointer-based memory operations entirely as they won't miss in cache
-    if (info.is_stack_access()) {
-        info.set_is_load(false);
-        info.set_is_store(false);
-    }
 }
 
 static std::vector<unsigned> get_return_registers(const llvm::MCRegisterInfo &MRI, const std::string &ArchName) {
@@ -264,9 +258,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         
         bool is_hit = false;
         if (is_load) {
-            if (inst_infos[j].mem_info.is_stack_access()) {
-                is_hit = true;
-            } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+            if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
                 int64_t cache_line = inst_infos[j].mem_info.offset / 64;
                 is_hit = seen_base_regs.test(base_reg, cache_line);
             }
@@ -511,6 +503,19 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
         info.set_valid(true);
         info.set_is_stack_access(true);
         info.set_is_constant_offset(true);
+        // Find RSP/ESP/SP register using MRI
+        unsigned sp_reg = 0;
+        for (unsigned r = 1; r < MRI.getNumRegs(); ++r) {
+            if (const char* rname = MRI.getName(r)) {
+                std::string rn(rname);
+                std::transform(rn.begin(), rn.end(), rn.begin(), ::tolower);
+                if (rn == "rsp" || rn == "esp" || rn == "sp") {
+                    sp_reg = r;
+                    break;
+                }
+            }
+        }
+        info.base_reg = sp_reg;
         finalizeMemAccessInfo(info, MCID);
         return info;
     }
@@ -744,9 +749,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         if (inst_infos[i].is_load()) {
             if (DepKind == DependencyKind::OOO) {
                 unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
-                if (inst_infos[i].mem_info.is_stack_access()) {
-                    is_hit = true;
-                } else if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
+                if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
                     int64_t cache_line = inst_infos[i].mem_info.offset / 64;
                     is_hit = global_seen_base_regs.test(base_reg, cache_line);
                 }
@@ -821,11 +824,11 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     return avg_mlp;
 }
 
-size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
-                                      const llvm::MCSubtargetInfo& STI,
-                                      const llvm::MCInstrInfo& MCII,
-                                      const llvm::MCRegisterInfo& MRI,
-                                      DependencyKind depKind) const {
+size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
+                                           const llvm::MCSubtargetInfo& STI,
+                                           const llvm::MCInstrInfo& MCII,
+                                           const llvm::MCRegisterInfo& MRI,
+                                           DependencyKind depKind) const {
     if (depKind == DependencyKind::OOO) {
         int n = instrs.size();
         std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
@@ -840,9 +843,7 @@ size_t MLPAnalyzer::countNonStackLoads(llvm::ArrayRef<Instr> instrs,
             
             bool is_hit = false;
             if (is_load) {
-                if (inst_infos[j].mem_info.is_stack_access()) {
-                    is_hit = true;
-                } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+                if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
                     int64_t cache_line = inst_infos[j].mem_info.offset / 64;
                     is_hit = seen_base_regs.test(base_reg, cache_line);
                 }

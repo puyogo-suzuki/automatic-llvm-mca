@@ -99,11 +99,11 @@ public:
                               float &mlp_r,
                               bool mlpWindowLoop = false) const;
 
-    virtual size_t countNonStackLoads(llvm::ArrayRef<Instr> instrs,
-                                      const llvm::MCSubtargetInfo& STI,
-                                      const llvm::MCInstrInfo& MCII,
-                                      const llvm::MCRegisterInfo& MRI,
-                                      DependencyKind depKind = DependencyKind::None) const;
+    virtual size_t countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
+                                           const llvm::MCSubtargetInfo& STI,
+                                           const llvm::MCInstrInfo& MCII,
+                                           const llvm::MCRegisterInfo& MRI,
+                                           DependencyKind depKind = DependencyKind::None) const;
 };
 
 class RISCVMLPAnalyzer : public MLPAnalyzer {
