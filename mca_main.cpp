@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
     if (STI) {
         llvm::overrideCortexA55SchedModel(*STI);
     }
-    MCContext Ctx(TT, *MAI, *MRI, *STI);
+    MCContext Ctx(TT, MAI.get(), MRI.get(), STI.get());
     std::unique_ptr<MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI, Ctx));
     std::unique_ptr<MCInstrAnalysis> MCIA(TheTarget->createMCInstrAnalysis(MCII.get()));
 

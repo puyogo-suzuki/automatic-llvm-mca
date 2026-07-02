@@ -23,14 +23,14 @@ This tool is implemented in pure C++ using LLVM 23 APIs, providing extreme perfo
 
 ### Prerequisites
 
-*   LLVM 23 development headers (`llvm-23-dev`)
+*   LLVM 22 development headers (`llvm-22-dev`)
 *   CMake 3.10+
 *   C++17 compatible compiler
 
 To compile the customized TableGen-based pipeline, you need a local copy of the LLVM AArch64 target sources. Clone `llvm-project` into a directory named `llvm-source` at the project root using a sparse checkout (to save disk space and download time):
 
 ```bash
-git clone --depth 1 --sparse https://github.com/llvm/llvm-project.git llvm-source
+git clone --depth 1 --sparse --branch llvmorg-22.1.8 https://github.com/llvm/llvm-project.git llvm-source
 cd llvm-source
 git sparse-checkout set llvm/lib/Target/AArch64 llvm/include
 cd ..

@@ -52,7 +52,7 @@ static std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
     SourceMgr SrcMgr;
     SrcMgr.AddNewSourceBuffer(MemoryBuffer::getMemBuffer(asm_code), SMLoc());
     
-    MCContext Ctx(TC.TT, *TC.MAI, *TC.MRI, *TC.STI, &SrcMgr);
+    MCContext Ctx(TC.TT, TC.MAI.get(), TC.MRI.get(), TC.STI.get(), &SrcMgr);
     MCObjectFileInfo MOFI;
     MOFI.initMCObjectFileInfo(Ctx, /*PIC=*/false);
     Ctx.setObjectFileInfo(&MOFI);
@@ -73,7 +73,7 @@ static std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
 
     TestStreamer streamer(Ctx, instrs);
     std::unique_ptr<MCAsmParser> parser(createMCAsmParser(SrcMgr, Ctx, streamer, *TC.MAI));
-    std::unique_ptr<MCTargetAsmParser> tap(TC.TheTarget->createMCAsmParser(*TC.STI, *parser, *TC.MCII));
+    std::unique_ptr<MCTargetAsmParser> tap(TC.TheTarget->createMCAsmParser(*TC.STI, *parser, *TC.MCII, MCTargetOptions()));
     parser->setTargetParser(*tap);
     parser->Run(false);
     return instrs;

@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
     std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
     std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, "generic", ""));
-    MCContext Ctx(TT, *MAI, *MRI, *STI);
+    MCContext Ctx(TT, MAI.get(), MRI.get(), STI.get());
     std::unique_ptr<MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI, Ctx));
     std::unique_ptr<MCInstrAnalysis> MCIA(TheTarget->createMCInstrAnalysis(MCII.get()));
 

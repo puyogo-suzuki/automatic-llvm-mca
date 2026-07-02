@@ -3,7 +3,7 @@ project(mca_tool)
 
 set(CMAKE_CXX_STANDARD 17)
 
-find_package(LLVM 23 REQUIRED CONFIG)
+find_package(LLVM 22.1.8 REQUIRED CONFIG)
 
 # Custom command to run llvm-tblgen and generate AArch64GenSubtargetInfo.inc
 set(A55_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedA55.td)
@@ -17,11 +17,11 @@ set(GEN_INSTR_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenInstrInfo.inc)
 
 add_custom_command(
     OUTPUT ${GEN_INC_FILE}
-    COMMAND /usr/bin/llvm-tblgen-23 -gen-subtarget
+    COMMAND /usr/bin/llvm-tblgen-22 -gen-subtarget
             -I ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64
             -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64
             -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/include
-            -I /usr/include/llvm-23
+            -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_INC_FILE}
     DEPENDS ${A55_TD_FILE} ${A76_TD_FILE} ${A78_TD_FILE} ${X1_TD_FILE} ${A76_PROC_TD_FILE}
@@ -31,11 +31,11 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT ${GEN_REG_INC_FILE}
-    COMMAND /usr/bin/llvm-tblgen-23 -gen-register-info
+    COMMAND /usr/bin/llvm-tblgen-22 -gen-register-info
             -I ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64
             -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64
             -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/include
-            -I /usr/include/llvm-23
+            -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_REG_INC_FILE}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
@@ -44,11 +44,11 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT ${GEN_INSTR_INC_FILE}
-    COMMAND /usr/bin/llvm-tblgen-23 -gen-instr-info
+    COMMAND /usr/bin/llvm-tblgen-22 -gen-instr-info
             -I ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64
             -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64
             -I ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/include
-            -I /usr/include/llvm-23
+            -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_INSTR_INC_FILE}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
