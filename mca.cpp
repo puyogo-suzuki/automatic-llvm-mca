@@ -167,12 +167,17 @@ unsigned getWarmupWindowSize(const MCSubtargetInfo &STI) {
     return std::max(1u, SM.IssueWidth);
 }
 
-unsigned computeWarmupIterations(const MCSubtargetInfo &STI, size_t regionInstrCount) {
+unsigned computeSteadyIterations(const MCSubtargetInfo &STI, size_t regionInstrCount, unsigned iterations) {
     if (regionInstrCount == 0) return 1;
     const unsigned WindowSize = std::max(1u, getWarmupWindowSize(STI));
-    return std::max(1u, (WindowSize + static_cast<unsigned>(regionInstrCount) - 1) /
+    return std::max(1u, (WindowSize * iterations + static_cast<unsigned>(regionInstrCount) - 1) /
                             static_cast<unsigned>(regionInstrCount));
 }
+
+unsigned computeWarmupIterations(const MCSubtargetInfo &STI, size_t regionInstrCount) {
+    return computeSteadyIterations(STI, regionInstrCount, 1);
+}
+
 
 } // namespace
 
@@ -308,7 +313,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     }
 
     const unsigned WarmupIterations = computeWarmupIterations(STI, instrs.size());
-    const unsigned SteadyIterations = std::max(1u, static_cast<unsigned>(iterations) * WarmupIterations);
+    const unsigned SteadyIterations = computeSteadyIterations(STI, instrs.size(), iterations);
     mca::CircularSourceMgr CSM(Sequence, WarmupIterations + SteadyIterations);
     mca::CustomBehaviour CB(STI, CSM, MCII);
     std::unique_ptr<mca::Pipeline> P;
