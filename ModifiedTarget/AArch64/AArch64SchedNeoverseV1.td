@@ -31,7 +31,7 @@ def NeoverseV1Model : SchedMachineModel {
   list<Predicate> UnsupportedFeatures = !listconcat(SVE2Unsupported.F,
                                                     SMEUnsupported.F,
                                                     [HasMTE, HasCPA,
-                                                    HasCSSC]);
+                                                    HasCSSC, HasMOPS, HasMOPS_GO]);
 }
 
 //===----------------------------------------------------------------------===//
@@ -117,8 +117,12 @@ def V1Write_3c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 3; }
 def V1Write_5c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; }
 def V1Write_12c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 12;
                                                       let ReleaseAtCycles = [5]; }
+// def V1Write_12c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; // Best latency from SOG (5 to 12 cycles)
+//                                                       let ReleaseAtCycles = [5]; }
 def V1Write_20c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 20;
                                                       let ReleaseAtCycles = [5]; }
+// def V1Write_20c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; // Best latency from SOG (5 to 20 cycles)
+//                                                       let ReleaseAtCycles = [5]; }
 def V1Write_2c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 2; }
 def V1Write_3c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 3; }
 def V1Write_4c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 4; }
@@ -129,14 +133,22 @@ def V1Write_4c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 4; }
 def V1Write_6c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 6; }
 def V1Write_10c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 10;
                                                       let ReleaseAtCycles = [7]; }
+// def V1Write_10c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 7; // Best latency from SOG (7 to 10 cycles)
+//                                                       let ReleaseAtCycles = [7]; }
 def V1Write_12c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 12;
                                                       let ReleaseAtCycles = [7]; }
 def V1Write_13c10_1V0  : SchedWriteRes<[V1UnitV0]>  { let Latency = 13;
                                                       let ReleaseAtCycles = [10]; }
+// def V1Write_13c10_1V0  : SchedWriteRes<[V1UnitV0]>  { let Latency = 10; // Best latency from SOG (10 to 13/11 to 13 cycles)
+//                                                       let ReleaseAtCycles = [10]; }
 def V1Write_15c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 15;
                                                       let ReleaseAtCycles = [7]; }
+// def V1Write_15c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 7; // Best latency from SOG (7 to 15 cycles)
+//                                                       let ReleaseAtCycles = [7]; }
 def V1Write_16c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 16;
                                                       let ReleaseAtCycles = [7]; }
+// def V1Write_16c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 7; // Best latency from SOG (7 to 17 cycles)
+//                                                       let ReleaseAtCycles = [7]; }
 def V1Write_20c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 20;
                                                       let ReleaseAtCycles = [7]; }
 def V1Write_2c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 2; }
@@ -149,14 +161,24 @@ def V1Write_7c7_1V02   : SchedWriteRes<[V1UnitV02]> { let Latency = 7;
                                                       let ReleaseAtCycles = [7]; }
 def V1Write_10c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 10;
                                                       let ReleaseAtCycles = [7]; }
+// def V1Write_10c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 7; // Best latency from SOG (7 to 10 cycles)
+//                                                       let ReleaseAtCycles = [7]; }
 def V1Write_13c5_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 13;
                                                       let ReleaseAtCycles = [5]; }
+// def V1Write_13c5_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 10; // Best latency from SOG (10 to 13/11 to 13 cycles)
+//                                                       let ReleaseAtCycles = [5]; }
 def V1Write_13c11_1V02 : SchedWriteRes<[V1UnitV02]> { let Latency = 13;
                                                       let ReleaseAtCycles = [11]; }
+// def V1Write_13c11_1V02 : SchedWriteRes<[V1UnitV02]> { let Latency = 10; // Best latency from SOG (10 to 13/11 to 13 cycles)
+//                                                       let ReleaseAtCycles = [11]; }
 def V1Write_15c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 15;
                                                       let ReleaseAtCycles = [7]; }
+// def V1Write_15c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 7; // Best latency from SOG (7 to 15 cycles)
+//                                                       let ReleaseAtCycles = [7]; }
 def V1Write_16c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 16;
                                                       let ReleaseAtCycles = [7]; }
+// def V1Write_16c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 7; // Best latency from SOG (7 to 17 cycles)
+//                                                       let ReleaseAtCycles = [7]; }
 def V1Write_2c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 2; }
 def V1Write_3c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 3; }
 def V1Write_4c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 4; }
@@ -1504,9 +1526,9 @@ def : InstRW<[V1Write_2c_1V01],
                         "^ADR_LSL_ZZZ_[SD]_[0123]$",
                         "^[SU]ABD_ZP[mZ]Z_[BHSD]",
                         "^[SU](MAX|MIN)_Z(I|P[mZ]Z)_[BHSD]",
-                        "^[SU]Q(ADD|SUB)_Z(I|ZZ)_[BHSD]$",
+                        "^[SU]Q(ADD|SUB)_Z(I|ZZ)_[BHSD]",
                         "^SUBR_Z(I|P[mZ]Z)_[BHSD]",
-                        "^(AND|EOR|ORR)_ZI$",
+                        "^(AND|EOR|ORR)_ZI",
                         "^(AND|BIC|EOR|EOR(BT|TB)?|ORR)_ZP?ZZ",
                         "^EOR(BT|TB)_ZZZ_[BHSD]$",
                         "^(AND|BIC|EOR|NOT|ORR)_ZPmZ_[BHSD]")>;

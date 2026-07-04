@@ -1429,17 +1429,17 @@ def : ProcessorModel<"cortex-a73", CortexA57Model, ProcessorFeatures.A53,
                      [TuneA73]>;
 def : ProcessorModel<"cortex-a75", CortexA57Model, ProcessorFeatures.A55,
                      [TuneA75]>;
-def : ProcessorModel<"cortex-a76", CortexA57Model, ProcessorFeatures.A76,
+def : ProcessorModel<"cortex-a76", NeoverseN1Model, ProcessorFeatures.A76,
                      [TuneA76]>;
-def : ProcessorModel<"cortex-a76ae", CortexA57Model, ProcessorFeatures.A76,
+def : ProcessorModel<"cortex-a76ae", NeoverseN1Model, ProcessorFeatures.A76,
                      [TuneA76]>;
-def : ProcessorModel<"cortex-a77", CortexA57Model, ProcessorFeatures.A77,
+def : ProcessorModel<"cortex-a77", NeoverseN1Model, ProcessorFeatures.A77,
                      [TuneA77]>;
-def : ProcessorModel<"cortex-a78", CortexA57Model, ProcessorFeatures.A78,
+def : ProcessorModel<"cortex-a78", NeoverseN2Model, ProcessorFeatures.A78,
                      [TuneA78]>;
-def : ProcessorModel<"cortex-a78ae", CortexA57Model, ProcessorFeatures.A78AE,
+def : ProcessorModel<"cortex-a78ae", NeoverseN2Model, ProcessorFeatures.A78AE,
                      [TuneA78AE]>;
-def : ProcessorModel<"cortex-a78c", CortexA57Model, ProcessorFeatures.A78C,
+def : ProcessorModel<"cortex-a78c", NeoverseN2Model, ProcessorFeatures.A78C,
                      [TuneA78C]>;
 def : ProcessorModel<"cortex-a710", NeoverseN2Model, ProcessorFeatures.A710,
                      [TuneA710]>;

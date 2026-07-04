@@ -21,10 +21,10 @@
 def CortexA55Model : SchedMachineModel {
   let MicroOpBufferSize = 0;  // The Cortex-A55 is an in-order processor
   let IssueWidth = 2;         // It dual-issues under most circumstances
-  let LoadLatency = 4;        // Cycles for loads to access the cache. The
+  let LoadLatency = 3;        // Cycles for loads to access the cache. The
                               // optimisation guide shows that most loads have
                               // a latency of 3, but some have a latency of 4
-                              // or 5. Setting it 4 looked to be good trade-off.
+                              // or 5. Setting it 3 matches standard L1 hits. (CHANGED!)
   let MispredictPenalty = 8;  // A branch direction mispredict.
   let PostRAScheduler = 1;    // Enable PostRA scheduler pass.
   let CompleteModel = 0;      // Covers instructions applicable to Cortex-A55.
@@ -63,12 +63,12 @@ let SchedModel = CortexA55Model in {
 // These latencies are modeled without taking into account forwarding paths
 // (the software optimisation guide lists latencies taking into account
 // typical forwarding paths).
-def : WriteRes<WriteImm, [CortexA55UnitALU]> { let Latency = 3; }    // MOVN, MOVZ
-def : WriteRes<WriteI, [CortexA55UnitALU]> { let Latency = 3; }      // ALU
-def : WriteRes<WriteISReg, [CortexA55UnitALU]> { let Latency = 3; }  // ALU of Shifted-Reg
-def : WriteRes<WriteIEReg, [CortexA55UnitALU]> { let Latency = 3; }  // ALU of Extended-Reg
-def : WriteRes<WriteExtr, [CortexA55UnitALU]> { let Latency = 3; }   // EXTR from a reg pair
-def : WriteRes<WriteIS, [CortexA55UnitALU]> { let Latency = 3; }     // Shift/Scale
+def : WriteRes<WriteImm, [CortexA55UnitALU]> { let Latency = 1; }    // MOVN, MOVZ (SOG: 1)
+def : WriteRes<WriteI, [CortexA55UnitALU]> { let Latency = 1; }      // ALU (SOG: 1)
+def : WriteRes<WriteISReg, [CortexA55UnitALU]> { let Latency = 2; }  // ALU of Shifted-Reg (SOG: 2)
+def : WriteRes<WriteIEReg, [CortexA55UnitALU]> { let Latency = 2; }  // ALU of Extended-Reg (SOG: 2)
+def : WriteRes<WriteExtr, [CortexA55UnitALU]> { let Latency = 2; }   // EXTR from a reg pair (SOG: 2)
+def : WriteRes<WriteIS, [CortexA55UnitALU]> { let Latency = 1; }     // Shift/Scale (SOG: 1)
 
 // MAC
 def : WriteRes<WriteIM32, [CortexA55UnitMAC]> { let Latency = 4; }   // 32-bit Multiply
@@ -77,15 +77,17 @@ def : WriteRes<WriteIM64, [CortexA55UnitMAC]> { let Latency = 4; }   // 64-bit M
 // Div
 def : WriteRes<WriteID32, [CortexA55UnitDiv]> {
   let Latency = 8; let ReleaseAtCycles = [8];
+  // let Latency = 3; let ReleaseAtCycles = [3]; // Assume best/minimum latency from SOG (early termination)
 }
 def : WriteRes<WriteID64, [CortexA55UnitDiv]> {
   let Latency = 8; let ReleaseAtCycles = [8];
+  // let Latency = 3; let ReleaseAtCycles = [3]; // Assume best/minimum latency from SOG (early termination)
 }
 
 // Load
 def : WriteRes<WriteLD, [CortexA55UnitLd]> { let Latency = 3; }
-def : WriteRes<WriteLDIdx, [CortexA55UnitLd]> { let Latency = 4; }
-def : WriteRes<WriteLDHi, [CortexA55UnitLd]> { let Latency = 5; }
+def : WriteRes<WriteLDIdx, [CortexA55UnitLd]> { let Latency = 3; }
+def : WriteRes<WriteLDHi, [CortexA55UnitLd]> { let Latency = 4; }
 
 // Vector Load - Vector loads take 1-5 cycles to issue. For the WriteVecLd
 //               below, choosing the median of 3 which makes the latency 6.
@@ -109,9 +111,9 @@ def CortexA55WriteVLD7 : SchedWriteRes<[CortexA55UnitLd]> { let Latency = 10;
 def CortexA55WriteVLD8 : SchedWriteRes<[CortexA55UnitLd]> { let Latency = 11;
                                                   let ReleaseAtCycles = [8]; }
 
-def CortexA55WriteLDP1 : SchedWriteRes<[]> { let Latency = 4; }
-def CortexA55WriteLDP2 : SchedWriteRes<[CortexA55UnitLd]> { let Latency = 5; }
-def CortexA55WriteLDP4 : SchedWriteRes<[CortexA55UnitLd, CortexA55UnitLd, CortexA55UnitLd, CortexA55UnitLd, CortexA55UnitLd]> { let Latency = 6; }
+def CortexA55WriteLDP1 : SchedWriteRes<[]> { let Latency = 3; }
+def CortexA55WriteLDP2 : SchedWriteRes<[CortexA55UnitLd]> { let Latency = 4; }
+def CortexA55WriteLDP4 : SchedWriteRes<[CortexA55UnitLd, CortexA55UnitLd, CortexA55UnitLd, CortexA55UnitLd, CortexA55UnitLd]> { let Latency = 5; }
 
 // Pre/Post Indexing - Performed as part of address generation
 def : WriteRes<WriteAdr, []> { let Latency = 0; }
@@ -216,19 +218,10 @@ def : ReadAdvance<ReadST, 1>;
 //       in say EX2 can be forwarded for consumption to ALU in EX1, thereby
 //       allowing back-to-back ALU operations such as add. If an operand requires
 //       a shift, it will, however, be required in ISS stage.
-def : ReadAdvance<ReadI, 2, [WriteImm,WriteI,
-                             WriteISReg, WriteIEReg,WriteIS,
-                             WriteID32,WriteID64,
-                             WriteIM32,WriteIM64]>;
+def : ReadAdvance<ReadI, 1>;
 // Shifted operand
-def CortexA55ReadShifted : SchedReadAdvance<1, [WriteImm,WriteI,
-                                          WriteISReg, WriteIEReg,WriteIS,
-                                          WriteID32,WriteID64,
-                                          WriteIM32,WriteIM64]>;
-def CortexA55ReadNotShifted : SchedReadAdvance<2, [WriteImm,WriteI,
-                                             WriteISReg, WriteIEReg,WriteIS,
-                                             WriteID32,WriteID64,
-                                             WriteIM32,WriteIM64]>;
+def CortexA55ReadShifted : SchedReadAdvance<0>;
+def CortexA55ReadNotShifted : SchedReadAdvance<1>;
 def CortexA55ReadISReg : SchedReadVariant<[
         SchedVar<RegShiftedPred, [CortexA55ReadShifted]>,
         SchedVar<NoSchedPred, [CortexA55ReadNotShifted]>]>;
@@ -426,7 +419,7 @@ def : InstRW<[CortexA55WriteAluVq_1], (instregex "(AND|EOR|NOT|ORN)v16i8",
   "(ORR|BIC)v(16i8|4i32|8i16)$", "MVNIv(4i32|4s|8i16)")>;
 // ASIMD max/min, basic
 def : InstRW<[CortexA55WriteAluVd_2], (instregex "[SU](MIN|MAX)P?v(2i32|4i16|8i8)")>;
-def : InstRW<[CortexA55WriteAluVq_2], (instregex "[SU](MIN|MAX)P?v(16i8|4i132|8i16)")>;
+def : InstRW<[CortexA55WriteAluVq_2], (instregex "[SU](MIN|MAX)P?v(16i8|4i32|8i16)")>;
 // SIMD max/min, reduce
 def : InstRW<[CortexA55WriteAluVq_4], (instregex "[SU](MAX|MIN)Vv")>;
 // ASIMD multiply, by element
