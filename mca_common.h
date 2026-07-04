@@ -29,7 +29,9 @@ struct Instr {
     llvm::MCInst Inst;
     bool IsBranch;
     bool EndsBB;
-    uint64_t BranchTarget; 
+    bool IsUnconditionalBranch; // unconditional branch or indirect jump (cannot fall through)
+    bool IsReturn;              // return instruction
+    uint64_t BranchTarget;
 };
 
 using RegSet = llvm::BitVector;
@@ -148,7 +150,8 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             bool ignoreLoopCarriedDep = false,
                             int overrideLoadLatency = -1, bool mlpWindowLoop = false);
 void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
-                 int bbMaxInstrs, const std::function<void(const RegionSpan &)> &onLoop,
+                 int bbMaxInstrs, int minBBSize,
+                 const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);
 
 #endif

@@ -46,9 +46,10 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
         clEnumValN(MLPWindowAssignmentKind::Forward, "forward", "Forward window"),
         clEnumValN(MLPWindowAssignmentKind::MaxContaining, "max-containing", "Max MLP of containing windows")
     ), cl::init(MLPWindowAssignmentKind::MaxContaining));
-static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(100));
+static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(2));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
+static cl::opt<int> MinBBSize("min-bb-size", cl::desc("Merge consecutive BBs until this size is reached (0 = disable)"), cl::init(16));
 static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
     cl::desc("Ignore loop-carried register dependencies mode"),
     cl::values(
@@ -205,7 +206,7 @@ int main(int argc, char **argv) {
             if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Span.Size, isLoop, Result);
         };
 
-        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs,
+        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, MinBBSize,
                     [&](const RegionSpan &Span) { emitRegion(Span, true); },
                     [&](const RegionSpan &Span) { emitRegion(Span, false); });
     }

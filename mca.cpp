@@ -88,9 +88,11 @@ struct SteadyStateTracker : mca::HWEventListener {
     bool IgnoreLoopCarriedDep = false;
     mca::RegisterFile *PRF = nullptr;
     unsigned CurrentIteration = 0;
+    bool IsA55 = false;
  
     explicit SteadyStateTracker(const MCSubtargetInfo &STI, const MCRegisterInfo &MRI, ArrayRef<Instr> Instrs, unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
-        : STI(STI), MRI(MRI), Instrs(Instrs), WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF) {}
+        : STI(STI), MRI(MRI), Instrs(Instrs), WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF),
+          IsA55(STI.getCPU() == "cortex-a55") {}
  
     void onCycleBegin() override {
         ++CurrentCycle;
@@ -115,7 +117,7 @@ struct SteadyStateTracker : mca::HWEventListener {
             mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
             
             // Break condition flags (NZCV) dependency to allow same-cycle dual issue of conditional instructions
-            if (STI.getCPU() == "cortex-a55") {
+            if (IsA55) {
                 for (mca::ReadState &RS : Inst.getUses()) {
                     if (RS.getRegisterID() > 0 && std::strcmp(MRI.getName(RS.getRegisterID()), "NZCV") == 0) {
                         RS.*get(ReadState_IsReady_Tag{}) = true;
@@ -249,8 +251,11 @@ std::vector<Instr> disassembleTextSection(const SectionRef &Section, const MCDis
         Instr I;
         I.Addr = Section.getAddress() + Index;
         I.Inst = Inst;
-        I.IsBranch = MCII.get(Inst.getOpcode()).isBranch();
-        I.EndsBB = I.IsBranch || MCII.get(Inst.getOpcode()).isTerminator();
+        const MCInstrDesc &Desc = MCII.get(Inst.getOpcode());
+        I.IsBranch = Desc.isBranch();
+        I.IsReturn = Desc.isReturn();
+        I.IsUnconditionalBranch = Desc.isUnconditionalBranch() || Desc.isIndirectBranch() || I.IsReturn;
+        I.EndsBB = I.IsBranch || Desc.isTerminator();
         I.BranchTarget = 0;
         if (I.IsBranch && MCIA) MCIA->evaluateBranch(Inst, I.Addr, Size, I.BranchTarget);
         SectionInstrs.push_back(I);
