@@ -135,6 +135,17 @@ public:
     bool isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const override;
 };
 
+struct McaRegion {
+    size_t Start;
+    size_t Size;
+    size_t SimulatedSize;
+    bool IsLoop;
+    McaMetrics Metrics;
+    bool Valid = false;
+    uint64_t StartAddr;
+    uint64_t EndAddr;
+};
+
 void initializeTargets();
 uint64_t getELFSymbolSize(const llvm::object::ObjectFile &Obj, llvm::object::SymbolRef Sym);
 FunctionBoundaries collectFunctionBoundaries(const llvm::object::ObjectFile &Obj);
@@ -150,8 +161,12 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             bool ignoreLoopCarriedDep = false,
                             int overrideLoadLatency = -1, bool mlpWindowLoop = false);
 void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
-                 int bbMaxInstrs, int minBBSize,
+                 int bbMaxInstrs,
                  const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);
+void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
+                                    const FunctionBoundaries &Boundaries,
+                                    std::vector<McaRegion> &regions,
+                                    std::map<size_t, size_t> &overwrite_map);
 
 #endif

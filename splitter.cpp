@@ -30,7 +30,6 @@ int64_t findIndex(ArrayRef<Instr> instrs, uint64_t addr) {
 } // namespace
 
 void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs, int bbMaxInstrs,
-                 int minBBSize,
                  const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock) {
     if (instrs.empty()) return;
@@ -58,110 +57,266 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
         }
     }
 
-    // --- Pass 2: emit loops and merged basic blocks ---
-    // A "hard boundary" for BB merging is any instruction where:
-    //   - it's in a loop region, OR
-    //   - it ends with an unconditional branch / return (cannot fall through)
-    //
-    // We accumulate consecutive non-loop BB segments.
-    // When we hit a hard boundary after emitting the current BB instruction,
-    // we flush the pending region.
-    //
-    // A conditional branch (EndsBB but NOT IsUnconditionalBranch) is a "soft boundary":
-    // we still end the current atomic BB at that point, but if the accumulated
-    // region is still below minBBSize we continue accumulating into the next BB.
-
-    // Helper: flush the pending accumulated region if non-empty
-    size_t pendingStart = 0;
-    size_t pendingSize  = 0;
-    bool   hasPending   = false;
-
-    auto flushPending = [&]() {
-        if (!hasPending || pendingSize == 0) return;
-        if (bbMaxInstrs <= 0 || pendingSize <= static_cast<size_t>(bbMaxInstrs)) {
-            if (onBasicBlock) onBasicBlock(RegionSpan{pendingStart, pendingSize});
+    // --- Pass 2: emit loops and basic blocks ---
+    for (size_t i = 0; i < instrs.size(); ++i) {
+        if (auto loop = getLoopSpan(i)) {
+            if (onLoop) onLoop(*loop);
         }
-        hasPending = false;
-        pendingSize = 0;
-    };
+    }
 
-    size_t atomicStart = 0;  // start of current atomic BB (since last hard/soft boundary)
-    bool   inAtomicBB  = false;
+    size_t bbStart = 0;
+    bool inBB = false;
 
     for (size_t i = 0; i < instrs.size(); ++i) {
         const auto &I = instrs[i];
 
-        // Emit loops as before
-        if (auto loop = getLoopSpan(i)) {
-            if (onLoop) onLoop(*loop);
-        }
-
         if (inLoop[i]) {
-            // We've entered a loop region — flush whatever we had and stop accumulating
-            if (inAtomicBB) {
-                // Flush the partial atomic BB accumulated so far (may be below minBBSize — emit as-is)
-                if (hasPending) {
-                    // Merge the partial segment into pending
-                    size_t segSize = i - atomicStart;
-                    if (segSize > 0) pendingSize += segSize;
+            if (inBB) {
+                size_t size = i - bbStart;
+                if (size > 0 && (bbMaxInstrs <= 0 || size <= static_cast<size_t>(bbMaxInstrs))) {
+                    if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
                 }
-                flushPending();
-                inAtomicBB = false;
-            } else {
-                flushPending();
+                inBB = false;
             }
             continue;
         }
 
-        // Non-loop instruction
-        if (!inAtomicBB) {
-            // Check function boundary: if we have a pending region from a different function, flush first
-            if (hasPending) {
-                const auto &pendingFirst = instrs[pendingStart];
-                if (!boundaries.empty() && !sameFunction(boundaries, pendingFirst.Addr, I.Addr)) {
-                    flushPending();
+        if (!inBB) {
+            bbStart = i;
+            inBB = true;
+        }
+
+        bool endBB = I.EndsBB;
+        if (i + 1 < instrs.size()) {
+            if (inLoop[i + 1]) {
+                endBB = true;
+            } else if (!boundaries.empty() && !sameFunction(boundaries, I.Addr, instrs[i + 1].Addr)) {
+                endBB = true;
+            }
+        } else {
+            endBB = true;
+        }
+
+        if (endBB) {
+            size_t size = i - bbStart + 1;
+            if (bbMaxInstrs <= 0 || size <= static_cast<size_t>(bbMaxInstrs)) {
+                if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
+            }
+            inBB = false;
+        }
+    }
+}
+
+void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
+                                    const FunctionBoundaries &Boundaries,
+                                    std::vector<McaRegion> &regions,
+                                    std::map<size_t, size_t> &overwrite_map) {
+    if (regions.size() < 2) return;
+
+    std::map<uint64_t, std::vector<size_t>> func_groups;
+    for (size_t i = 0; i < regions.size(); ++i) {
+        uint64_t startAddr = regions[i].StartAddr;
+        uint64_t func_entry = 0;
+        auto It = Boundaries.upper_bound(startAddr);
+        if (It != Boundaries.end() && It != Boundaries.begin()) {
+            --It;
+            if (startAddr >= It->first && startAddr < It->second) {
+                func_entry = It->first;
+            }
+        }
+        func_groups[func_entry].push_back(i);
+    }
+
+    for (auto &pair : func_groups) {
+        auto &group = pair.second;
+        if (group.size() < 2) continue;
+
+        std::sort(group.begin(), group.end(), [&](size_t a, size_t b) {
+            return regions[a].StartAddr < regions[b].StartAddr;
+        });
+
+        std::map<uint64_t, size_t> addr_to_node;
+        for (size_t u = 0; u < group.size(); ++u) {
+            addr_to_node[regions[group[u]].StartAddr] = u;
+        }
+
+        size_t num_nodes = group.size();
+        std::vector<std::vector<size_t>> successors(num_nodes);
+        std::vector<std::vector<size_t>> predecessors(num_nodes);
+
+        for (size_t u = 0; u < num_nodes; ++u) {
+            size_t r_idx = group[u];
+            const auto &r = regions[r_idx];
+            const auto &last_instr = SectionInstrs[r.Start + r.Size - 1];
+            std::vector<uint64_t> targets;
+            
+            if (last_instr.IsBranch) {
+                if (last_instr.BranchTarget != 0) {
+                    targets.push_back(last_instr.BranchTarget);
                 }
             }
-            atomicStart = i;
-            inAtomicBB  = true;
+            if (!last_instr.IsUnconditionalBranch) {
+                if (r.Start + r.Size < SectionInstrs.size()) {
+                    targets.push_back(SectionInstrs[r.Start + r.Size].Addr);
+                }
+            }
+
+            for (uint64_t t : targets) {
+                auto it = addr_to_node.find(t);
+                if (it != addr_to_node.end()) {
+                    successors[u].push_back(it->second);
+                } else {
+                    for (size_t v = 0; v < num_nodes; ++v) {
+                        const auto &node = regions[group[v]];
+                        if (t >= node.StartAddr && t < node.EndAddr) {
+                            successors[u].push_back(v);
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
-        if (I.EndsBB) {
-            // End of current atomic BB
-            size_t atomicSize = i - atomicStart + 1;
-            bool isHard = I.IsUnconditionalBranch; // return or unconditional/indirect branch
-
-            // Function boundary check: if the last instr of next potential BB
-            // would cross a function boundary, treat as hard
-            // (we'll check at the start of the next iteration instead)
-
-            if (!hasPending) {
-                pendingStart = atomicStart;
-                pendingSize  = 0;
-                hasPending   = true;
+        for (size_t u = 0; u < num_nodes; ++u) {
+            for (size_t v : successors[u]) {
+                predecessors[v].push_back(u);
             }
-            pendingSize += atomicSize;
-            inAtomicBB = false;
+        }
 
-            if (isHard || pendingSize >= static_cast<size_t>(minBBSize <= 0 ? 1 : minBBSize)) {
-                // Hard boundary or reached min size: flush
-                flushPending();
+        size_t num_nodes_extended = num_nodes + 1;
+        size_t virtual_exit = num_nodes;
+
+        std::vector<std::vector<size_t>> successors_rev(num_nodes_extended);
+        std::vector<std::vector<size_t>> predecessors_rev(num_nodes_extended);
+
+        for (size_t u = 0; u < num_nodes; ++u) {
+            for (size_t v : successors[u]) {
+                successors_rev[v].push_back(u);
+                predecessors_rev[u].push_back(v);
             }
-            // else: soft boundary (conditional branch) — keep accumulating
+            
+            const auto &r = regions[group[u]];
+            const auto &last_instr = SectionInstrs[r.Start + r.Size - 1];
+            bool is_exit = successors[u].empty() || last_instr.IsReturn;
+            
+            if (is_exit) {
+                successors_rev[virtual_exit].push_back(u);
+                predecessors_rev[u].push_back(virtual_exit);
+            }
+        }
+
+        std::vector<int> dfnum(num_nodes_extended, -1);
+        std::vector<int> vertex(num_nodes_extended, -1);
+        std::vector<int> parent(num_nodes_extended, -1);
+        std::vector<int> semi(num_nodes_extended, -1);
+        std::vector<int> dom(num_nodes_extended, -1);
+        std::vector<int> ancestor(num_nodes_extended, -1);
+        std::vector<int> label(num_nodes_extended, -1);
+        std::vector<std::vector<int>> bucket(num_nodes_extended);
+
+        int dfs_count = 0;
+
+        std::function<void(int)> dfs = [&](int u) {
+            dfnum[u] = dfs_count;
+            vertex[dfs_count] = u;
+            semi[u] = dfs_count;
+            label[u] = u;
+            dfs_count++;
+
+            for (size_t v : successors_rev[u]) {
+                if (dfnum[v] == -1) {
+                    parent[v] = u;
+                    dfs(v);
+                }
+            }
+        };
+
+        dfs(virtual_exit);
+
+        std::function<void(int)> compress = [&](int v) {
+            int anc = ancestor[v];
+            if (ancestor[anc] != -1) {
+                compress(anc);
+                if (semi[label[anc]] < semi[label[v]]) {
+                    label[v] = label[anc];
+                }
+                ancestor[v] = ancestor[anc];
+            }
+        };
+
+        auto eval = [&](int v) -> int {
+            if (ancestor[v] == -1) {
+                return v;
+            }
+            compress(v);
+            return label[v];
+        };
+
+        auto link = [&](int u, int v) {
+            ancestor[v] = u;
+        };
+
+        for (int i = dfs_count - 1; i >= 1; --i) {
+            int w = vertex[i];
+            for (size_t v : predecessors_rev[w]) {
+                if (dfnum[v] == -1) continue;
+                int u = eval(v);
+                if (semi[u] < semi[w]) {
+                    semi[w] = semi[u];
+                }
+            }
+            bucket[vertex[semi[w]]].push_back(w);
+            link(parent[w], w);
+            int p = parent[w];
+            for (int v : bucket[p]) {
+                int u = eval(v);
+                dom[v] = (semi[u] < semi[v]) ? u : p;
+            }
+            bucket[p].clear();
+        }
+
+        for (int i = 1; i < dfs_count; ++i) {
+            int w = vertex[i];
+            if (dom[w] != vertex[semi[w]]) {
+                dom[w] = dom[dom[w]];
+            }
+        }
+
+        for (size_t u = 0; u < num_nodes; ++u) {
+            size_t r_idx = group[u];
+            if (!regions[r_idx].IsLoop) {
+                std::vector<size_t> pdom_loops;
+                int curr = dom[u];
+                while (curr != -1 && curr != (int)virtual_exit) {
+                    size_t ancestor_r_idx = group[curr];
+                    if (regions[ancestor_r_idx].IsLoop) {
+                        pdom_loops.push_back(curr);
+                    }
+                    curr = dom[curr];
+                }
+
+                if (!pdom_loops.empty()) {
+                    std::vector<size_t> shallow_loops;
+                    for (size_t l : pdom_loops) {
+                        const auto &loop_l = regions[group[l]];
+                        bool is_contained = false;
+                        for (size_t other : pdom_loops) {
+                            if (other == l) continue;
+                            const auto &loop_o = regions[group[other]];
+                            if (loop_o.StartAddr <= loop_l.StartAddr && loop_l.EndAddr <= loop_o.EndAddr) {
+                                is_contained = true;
+                                break;
+                            }
+                        }
+                        if (!is_contained) {
+                            shallow_loops.push_back(l);
+                        }
+                    }
+                    if (shallow_loops.size() == 1) {
+                        overwrite_map[r_idx] = group[shallow_loops[0]];
+                    }
+                }
+            }
         }
     }
-
-    // Flush any remaining pending region at end of section
-    if (inAtomicBB) {
-        // Unterminated trailing instructions
-        size_t segSize = instrs.size() - atomicStart;
-        if (hasPending) {
-            pendingSize += segSize;
-        } else {
-            pendingStart = atomicStart;
-            pendingSize  = segSize;
-            hasPending   = true;
-        }
-    }
-    flushPending();
 }

@@ -49,7 +49,6 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
 static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(2));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
-static cl::opt<int> MinBBSize("min-bb-size", cl::desc("Merge consecutive BBs until this size is reached (0 = disable)"), cl::init(16));
 static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
     cl::desc("Ignore loop-carried register dependencies mode"),
     cl::values(
@@ -180,15 +179,42 @@ int main(int argc, char **argv) {
         auto SectionInstrs = disassembleTextSection(Section, *DisAsm, *MCII, MCIA.get());
         if (SectionInstrs.empty()) continue;
 
-        ScopedSilence silence;
-        auto emitRegion = [&](const RegionSpan &Span, bool isLoop) {
-            uint64_t regionAddr = SectionInstrs[Span.Start].Addr;
+        std::vector<McaRegion> regions;
+
+        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs,
+                    [&](const RegionSpan &Span) {
+                        McaRegion r;
+                        r.Start = Span.Start;
+                        r.Size = Span.Size;
+                        r.SimulatedSize = Span.Size;
+                        r.IsLoop = true;
+                        r.StartAddr = SectionInstrs[Span.Start].Addr;
+                        r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
+                        regions.push_back(r);
+                    },
+                    [&](const RegionSpan &Span) {
+                        McaRegion r;
+                        r.Start = Span.Start;
+                        r.Size = Span.Size;
+                        r.SimulatedSize = Span.Size;
+                        r.IsLoop = false;
+                        r.StartAddr = SectionInstrs[Span.Start].Addr;
+                        r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
+                        regions.push_back(r);
+                    });
+
+        // Map from region index to overwrite target loop index
+        std::map<size_t, size_t> overwrite_map;
+        computePostDominatorOverwrites(SectionInstrs, FunctionRanges, regions, overwrite_map);
+
+        auto runMca = [&](McaRegion &r) {
+            uint64_t regionAddr = r.StartAddr;
             if (TargetAddress != 0 && regionAddr != TargetAddress) return;
             bool ignore = false;
             if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
                 ignore = true;
             } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Default) {
-                ignore = !isLoop;
+                ignore = !r.IsLoop;
             } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
                 ignore = false;
             }
@@ -196,19 +222,45 @@ int main(int argc, char **argv) {
             if (MlpWindowLoop == MlpWindowLoopMode::Force) {
                 mlpLoop = true;
             } else if (MlpWindowLoop == MlpWindowLoopMode::Default) {
-                mlpLoop = isLoop;
+                mlpLoop = r.IsLoop;
             } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
                 mlpLoop = false;
             }
-            auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *STI, *MCII,
-                                           *MRI, MCIA.get(), PO, Iterations, windowWidth, DepKind, AssignKind,
-                                           *Analyzer, ignore, OverrideLoadLatency, mlpLoop);
-            if (Result.Valid) printResultCsv(SectionInstrs[Span.Start], SectionInstrs[Span.Start + Span.Size - 1], Span.Size, isLoop, Result);
+            r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size), *STI, *MCII,
+                                         *MRI, MCIA.get(), PO, Iterations, windowWidth, DepKind, AssignKind,
+                                         *Analyzer, ignore, OverrideLoadLatency, mlpLoop);
+            r.Valid = r.Metrics.Valid;
         };
 
-        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, MinBBSize,
-                    [&](const RegionSpan &Span) { emitRegion(Span, true); },
-                    [&](const RegionSpan &Span) { emitRegion(Span, false); });
+        ScopedSilence silence;
+
+        // Pass 1: Run MCA for all loops and non-overwritten BBs
+        for (size_t i = 0; i < regions.size(); ++i) {
+            if (regions[i].IsLoop || overwrite_map.find(i) == overwrite_map.end()) {
+                runMca(regions[i]);
+            }
+        }
+
+        // Pass 2: Process overwritten BBs (copy loop results, or fallback to BB run if loop was invalid)
+        for (size_t i = 0; i < regions.size(); ++i) {
+            if (!regions[i].IsLoop && overwrite_map.find(i) != overwrite_map.end()) {
+                size_t loop_idx = overwrite_map[i];
+                if (regions[loop_idx].Valid) {
+                    regions[i].Metrics = regions[loop_idx].Metrics;
+                    regions[i].SimulatedSize = regions[loop_idx].SimulatedSize;
+                    regions[i].Valid = true;
+                } else {
+                    runMca(regions[i]);
+                }
+            }
+        }
+
+        // Output all valid results
+        for (const auto &r : regions) {
+            if (r.Valid) {
+                printResultCsv(SectionInstrs[r.Start], SectionInstrs[r.Start + r.Size - 1], r.SimulatedSize, r.IsLoop, r.Metrics);
+            }
+        }
     }
 
     return 0;

@@ -236,7 +236,7 @@ int main(int argc, char **argv) {
             accumulateSpan(Span, false);
         };
 
-        walkRegions(SectionInstrs, Boundaries, LoopMaxInstrs, BBMaxInstrs,
+        walkRegions(SectionInstrs, Boundaries, LoopMaxInstrs, BBMaxInstrs, 0,
                     [&](const RegionSpan &Span) { accumulateSpan(Span, true); },
                     rememberBasicBlock);
 
