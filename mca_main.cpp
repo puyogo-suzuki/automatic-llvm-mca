@@ -46,7 +46,7 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
     cl::values(
         clEnumValN(MLPWindowAssignmentKind::Forward, "forward", "Forward window"),
         clEnumValN(MLPWindowAssignmentKind::MaxContaining, "max-containing", "Max MLP of containing windows")
-    ), cl::init(MLPWindowAssignmentKind::MaxContaining));
+    ), cl::init(MLPWindowAssignmentKind::Forward));
 static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(2));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
 static cl::opt<int> NestLimit("nest-limit", cl::desc("Maximum nesting depth of loops to analyze"), cl::init(3));
