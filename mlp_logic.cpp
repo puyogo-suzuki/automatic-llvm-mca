@@ -347,9 +347,13 @@ int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, in
 
     int count = 1;
     int limit = mlpWindowLoop ? n : (n - i);
+    bool used = false;
     for (int step = 1; step < limit; ++step) {
         int j = (i + step) % n;
-        if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) break;
+        if (has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs)) {
+            used = true;
+            break;
+        }
         ++count;
         for (unsigned reg : inst_infos[j].io_regs.outputs) {
             reset_reg(load_dep_regs, reg, MRI);
@@ -359,7 +363,9 @@ int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, in
                 reset_reg(load_dep_regs, ret_reg, MRI);
             }
         }
+        if (load_dep_regs.none()) break;
     }
+    if (!used) return -1;
     return count;
 }
 
@@ -747,6 +753,9 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     for (int i = 0; i < n; ++i) {
         bool is_hit = false;
         if (inst_infos[i].is_load()) {
+            if (inst_infos[i].mem_info.is_stack_access()) {
+                continue;
+            }
             if (DepKind == DependencyKind::OOO) {
                 unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
                 if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
@@ -800,12 +809,24 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
             }
             break;
         case DependencyKind::Dependency:
+        {
+            std::vector<int> valid_load_indices;
             for (int i : load_indices) {
-                float score = static_cast<float>(count_loads_dependency(inst_infos, i, n, width, load_dep_regs, actual_window_loop, MRI, return_regs));
-                assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, actual_window_loop);
-                assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, actual_window_loop);
+                int score_val = count_loads_dependency(inst_infos, i, n, width, load_dep_regs, actual_window_loop, MRI, return_regs);
+                if (score_val >= 0) {
+                    float score = static_cast<float>(score_val);
+                    assign_mlp_score(mlp_vals, inst_infos, i, n, width, score, AssignKind, actual_window_loop);
+                    assign_mlp_score(mlp_r_vals, inst_infos, i, n, width, 1.0f, AssignKind, actual_window_loop);
+                    valid_load_indices.push_back(i);
+                }
             }
+            load_indices = valid_load_indices;
             break;
+        }
+    }
+    if (load_indices.empty()) {
+        mlp_r = 1.0f;
+        return 1.0f;
     }
     double total_mlp = 0;
     for (int i : load_indices) total_mlp += mlp_vals[i];
