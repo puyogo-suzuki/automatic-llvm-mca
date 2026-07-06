@@ -169,4 +169,7 @@ void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
                                     std::vector<McaRegion> &regions,
                                     std::map<size_t, size_t> &overwrite_map);
 
+bool isNopInstruction(const llvm::MCInst &Inst, const llvm::MCInstrInfo &MCII);
+bool isAllNopRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCInstrInfo &MCII);
+
 #endif

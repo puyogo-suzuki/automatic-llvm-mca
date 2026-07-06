@@ -193,6 +193,14 @@ int main(int argc, char **argv) {
     for (const SectionRef &Section : Obj.sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
 
+        if (auto NameOrErr = Section.getName()) {
+            StringRef Name = *NameOrErr;
+            if (Name == ".plt" || Name == ".init" || Name == ".fini" || 
+                Name.starts_with(".plt.") || Name == ".plt.got" || Name == ".plt.sec") {
+                continue;
+            }
+        }
+
         auto SectionInstrs = disassembleTextSection(Section, *DisAsm, *MCII, MCIA.get());
         if (SectionInstrs.empty()) continue;
 
@@ -204,6 +212,10 @@ int main(int argc, char **argv) {
 
         auto accumulateSpan = [&](const RegionSpan &Span, bool isLoop) {
             if (Span.Size == 0) return;
+            
+            auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size);
+            if (isAllNopRegion(region_instrs, *MCII)) return;
+
             const SpanKey Key{Span.Start, Span.Size};
             bool ignore = false;
             if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {

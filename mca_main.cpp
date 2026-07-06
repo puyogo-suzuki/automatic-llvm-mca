@@ -179,6 +179,14 @@ int main(int argc, char **argv) {
     for (const SectionRef &Section : Obj.sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
 
+        if (auto NameOrErr = Section.getName()) {
+            StringRef Name = *NameOrErr;
+            if (Name == ".plt" || Name == ".init" || Name == ".fini" || 
+                Name.starts_with(".plt.") || Name == ".plt.got" || Name == ".plt.sec") {
+                continue;
+            }
+        }
+
         auto SectionInstrs = disassembleTextSection(Section, *DisAsm, *MCII, MCIA.get());
         if (SectionInstrs.empty()) continue;
 
@@ -211,9 +219,13 @@ int main(int argc, char **argv) {
         computePostDominatorOverwrites(SectionInstrs, FunctionRanges, regions, overwrite_map);
 
         auto runMca = [&](McaRegion &r) {
-            uint64_t regionAddr = r.StartAddr;
-            if (TargetAddress != 0 && regionAddr != TargetAddress) return;
-            bool ignore = false;
+        uint64_t regionAddr = r.StartAddr;
+        if (TargetAddress != 0 && regionAddr != TargetAddress) return;
+        
+        auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size);
+        if (isAllNopRegion(region_instrs, *MCII)) return;
+
+        bool ignore = false;
             if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
                 ignore = true;
             } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Default) {

@@ -436,3 +436,19 @@ void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
         }
     }
 }
+
+bool isNopInstruction(const llvm::MCInst &Inst, const llvm::MCInstrInfo &MCII) {
+    std::string name = std::string(MCII.getName(Inst.getOpcode()));
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    if (name.find("nop") != std::string::npos) return true;
+    if (name == "hint" && Inst.getNumOperands() > 0 && Inst.getOperand(0).isImm() && Inst.getOperand(0).getImm() == 0) return true;
+    return false;
+}
+
+bool isAllNopRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCInstrInfo &MCII) {
+    if (instrs.empty()) return false;
+    for (const auto &I : instrs) {
+        if (!isNopInstruction(I.Inst, MCII)) return false;
+    }
+    return true;
+}
