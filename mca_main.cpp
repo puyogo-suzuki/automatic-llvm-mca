@@ -266,9 +266,7 @@ int main(int argc, char **argv) {
             }
         }
         std::sort(valid_regions.begin(), valid_regions.end(), [](const McaRegion &a, const McaRegion &b) {
-            if (a.StartAddr != b.StartAddr)
-                return a.StartAddr < b.StartAddr;
-            return a.EndAddr < b.EndAddr;
+            return a.EndAddr != b.EndAddr ? a.EndAddr < b.EndAddr : a.StartAddr < b.StartAddr;
         });
 
         // Output all valid results
