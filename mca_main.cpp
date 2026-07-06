@@ -49,7 +49,8 @@ static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::
     ), cl::init(MLPWindowAssignmentKind::Forward));
 static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(2));
 static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
-static cl::opt<int> NestLimit("nest-limit", cl::desc("Maximum nesting depth of loops to analyze"), cl::init(3));
+static cl::opt<int> NestLimitOuter("nest-limit-outer", cl::desc("Maximum nesting depth of loops to analyze from outer to inner"), cl::init(2));
+static cl::opt<int> NestLimitInner("nest-limit-inner", cl::desc("Maximum nesting depth of loops to analyze from inner to outer"), cl::init(2));
 static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
 static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
     cl::desc("Ignore loop-carried register dependencies mode"),
@@ -183,7 +184,7 @@ int main(int argc, char **argv) {
 
         std::vector<McaRegion> regions;
 
-        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, NestLimit,
+        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, NestLimitOuter, NestLimitInner,
                     [&](const RegionSpan &Span) {
                         McaRegion r;
                         r.Start = Span.Start;

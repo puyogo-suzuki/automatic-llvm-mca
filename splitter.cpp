@@ -40,7 +40,7 @@ int64_t findIndex(ArrayRef<Instr> instrs, uint64_t addr) {
 
 } // namespace
 
-void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs, int bbMaxInstrs, int nestLimit,
+void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs, int bbMaxInstrs, int nestLimitOuter, int nestLimitInner,
                  const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock) {
     if (instrs.empty()) return;
@@ -101,7 +101,7 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
         }
     }
 
-    // Calculate nesting depth and filter out loops exceeding nestLimit
+    // Calculate nesting depth (from outer to inner) and height (from inner to outer)
     // Candidates are sorted by Start asc (keys of std::map)
     std::vector<RegionSpan> candidates;
     for (const auto &pair : largestLoopByStart) {
@@ -109,6 +109,7 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
     }
 
     std::vector<int> nestingDepth(candidates.size(), 0);
+    std::vector<int> parent(candidates.size(), -1);
     std::vector<size_t> active_stack; // stack of candidate indices
     for (size_t i = 0; i < candidates.size(); ++i) {
         const auto &curr = candidates[i];
@@ -118,6 +119,7 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
             // curr is nested inside top if curr.Start + curr.Size <= top.Start + top.Size.
             if (curr.Start + curr.Size <= top.Start + top.Size) {
                 nestingDepth[i] = active_stack.size();
+                parent[i] = active_stack.back();
                 break;
             } else {
                 active_stack.pop_back();
@@ -126,10 +128,22 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
         active_stack.push_back(i);
     }
 
-    // Build the final loop map: start_idx -> size, keeping only those within nestLimit (depth < nestLimit)
+    // Calculate nesting height bottom-up (height = max path from leaf loops)
+    std::vector<int> nestingHeight(candidates.size(), 0);
+    for (int i = (int)candidates.size() - 1; i >= 0; --i) {
+        int p = parent[i];
+        if (p != -1) {
+            nestingHeight[p] = std::max(nestingHeight[p], nestingHeight[i] + 1);
+        }
+    }
+
+    // Build the final loop map: start_idx -> size, keeping those allowed by
+    // either nestLimitOuter (depth < nestLimitOuter) or nestLimitInner (height < nestLimitInner)
     std::map<size_t, size_t> finalLoops;
     for (size_t i = 0; i < candidates.size(); ++i) {
-        if (nestLimit <= 0 || nestingDepth[i] < nestLimit) {
+        bool allowed_outer = (nestLimitOuter <= 0 || nestingDepth[i] < nestLimitOuter);
+        bool allowed_inner = (nestLimitInner <= 0 || nestingHeight[i] < nestLimitInner);
+        if (allowed_outer || allowed_inner) {
             finalLoops[candidates[i].Start] = candidates[i].Size;
         }
     }

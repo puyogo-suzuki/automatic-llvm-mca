@@ -115,6 +115,9 @@ static cl::opt<MlpWindowLoopMode> MlpWindowLoop("mlp-window-loop",
         clEnumValN(MlpWindowLoopMode::Disable, "disable", "Never loop back to the start")
     ), cl::init(MlpWindowLoopMode::Default));
 
+static cl::opt<int> NestLimitOuter("nest-limit-outer", cl::desc("Maximum nesting depth of loops to analyze from outer to inner"), cl::init(2));
+static cl::opt<int> NestLimitInner("nest-limit-inner", cl::desc("Maximum nesting depth of loops to analyze from inner to outer"), cl::init(2));
+
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
     initializeTargets();
@@ -236,7 +239,7 @@ int main(int argc, char **argv) {
             accumulateSpan(Span, false);
         };
 
-        walkRegions(SectionInstrs, Boundaries, LoopMaxInstrs, BBMaxInstrs,
+        walkRegions(SectionInstrs, Boundaries, LoopMaxInstrs, BBMaxInstrs, NestLimitOuter, NestLimitInner,
                     [&](const RegionSpan &Span) { accumulateSpan(Span, true); },
                     rememberBasicBlock);
 
