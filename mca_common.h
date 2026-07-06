@@ -161,7 +161,7 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             bool ignoreLoopCarriedDep = false,
                             int overrideLoadLatency = -1, bool mlpWindowLoop = false);
 void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
-                 int bbMaxInstrs,
+                 int bbMaxInstrs, int nestLimit,
                  const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);
 void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,

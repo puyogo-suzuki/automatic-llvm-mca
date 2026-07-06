@@ -40,15 +40,39 @@ int64_t findIndex(ArrayRef<Instr> instrs, uint64_t addr) {
 
 } // namespace
 
-void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs, int bbMaxInstrs,
+void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs, int bbMaxInstrs, int nestLimit,
                  const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock) {
     if (instrs.empty()) return;
 
-    // --- Pass 1: mark which instructions belong to a loop region ---
-    std::vector<bool> inLoop(instrs.size(), false);
+    // Precompute which function boundary each instruction belongs to using 2-pointer scan
+    std::vector<uint64_t> instrFuncEntry(instrs.size(), 0);
+    if (!boundaries.empty()) {
+        std::vector<std::pair<uint64_t, uint64_t>> bounds(boundaries.begin(), boundaries.end());
+        size_t b_idx = 0;
+        for (size_t i = 0; i < instrs.size(); ++i) {
+            uint64_t addr = instrs[i].Addr;
+            while (b_idx < bounds.size() && addr >= bounds[b_idx].second) {
+                b_idx++;
+            }
+            if (b_idx < bounds.size() && addr >= bounds[b_idx].first && addr < bounds[b_idx].second) {
+                instrFuncEntry[i] = bounds[b_idx].first;
+            } else {
+                instrFuncEntry[i] = 0;
+            }
+        }
+    }
 
-    auto getLoopSpan = [&](size_t idx) -> std::optional<RegionSpan> {
+    auto sameFuncIdx = [&](size_t idxA, size_t idxB) {
+        if (boundaries.empty()) return true;
+        uint64_t fA = instrFuncEntry[idxA];
+        uint64_t fB = instrFuncEntry[idxB];
+        return fA != 0 && fA == fB;
+    };
+
+    // --- Precompute and memoize getLoopSpan for each instruction ---
+    std::vector<std::optional<RegionSpan>> loopSpans(instrs.size());
+    auto getLoopSpanMemoized = [&](size_t idx) -> std::optional<RegionSpan> {
         const auto &I = instrs[idx];
         if (!I.IsBranch || I.BranchTarget == 0 || I.BranchTarget >= I.Addr) return std::nullopt;
 
@@ -58,23 +82,84 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
         const size_t start = static_cast<size_t>(startIdx);
         const size_t size = idx - start + 1;
         if (loopMaxInstrs > 0 && size > static_cast<size_t>(loopMaxInstrs)) return std::nullopt;
-        if (!sameFunction(boundaries, I.Addr, I.BranchTarget)) return std::nullopt;
+        if (!sameFuncIdx(idx, start)) return std::nullopt;
         return RegionSpan{start, size};
     };
 
     for (size_t i = 0; i < instrs.size(); ++i) {
-        if (auto loop = getLoopSpan(i)) {
-            for (size_t j = loop->Start; j < loop->Start + loop->Size; ++j) inLoop[j] = true;
-        }
+        loopSpans[i] = getLoopSpanMemoized(i);
     }
 
-    // --- Pass 2: emit loops and basic blocks ---
+    // Deduplicate: same start address -> keep only largest
+    std::map<size_t, size_t> largestLoopByStart;
     for (size_t i = 0; i < instrs.size(); ++i) {
-        if (auto loop = getLoopSpan(i)) {
-            if (onLoop) onLoop(*loop);
+        if (const auto &loop = loopSpans[i]) {
+            auto it = largestLoopByStart.find(loop->Start);
+            if (it == largestLoopByStart.end() || loop->Size > it->second) {
+                largestLoopByStart[loop->Start] = loop->Size;
+            }
         }
     }
 
+    // Calculate nesting depth and filter out loops exceeding nestLimit
+    // Candidates are sorted by Start asc (keys of std::map)
+    std::vector<RegionSpan> candidates;
+    for (const auto &pair : largestLoopByStart) {
+        candidates.push_back({pair.first, pair.second});
+    }
+
+    std::vector<int> nestingDepth(candidates.size(), 0);
+    std::vector<size_t> active_stack; // stack of candidate indices
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const auto &curr = candidates[i];
+        while (!active_stack.empty()) {
+            const auto &top = candidates[active_stack.back()];
+            // Since candidates are sorted by Start ascending, top.Start <= curr.Start.
+            // curr is nested inside top if curr.Start + curr.Size <= top.Start + top.Size.
+            if (curr.Start + curr.Size <= top.Start + top.Size) {
+                nestingDepth[i] = active_stack.size();
+                break;
+            } else {
+                active_stack.pop_back();
+            }
+        }
+        active_stack.push_back(i);
+    }
+
+    // Build the final loop map: start_idx -> size, keeping only those within nestLimit (depth < nestLimit)
+    std::map<size_t, size_t> finalLoops;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (nestLimit <= 0 || nestingDepth[i] < nestLimit) {
+            finalLoops[candidates[i].Start] = candidates[i].Size;
+        }
+    }
+
+    // --- Pass 1: mark which instructions belong to an allowed loop region ---
+    std::vector<bool> inLoop(instrs.size(), false);
+    for (size_t i = 0; i < instrs.size(); ++i) {
+        if (const auto &loop = loopSpans[i]) {
+            auto it = finalLoops.find(loop->Start);
+            if (it != finalLoops.end() && loop->Size == it->second) {
+                for (size_t j = loop->Start; j < loop->Start + loop->Size; ++j) {
+                    inLoop[j] = true;
+                }
+            }
+        }
+    }
+
+    // --- Pass 2: emit loops ---
+    for (size_t i = 0; i < instrs.size(); ++i) {
+        if (const auto &loop = loopSpans[i]) {
+            auto it = finalLoops.find(loop->Start);
+            if (it != finalLoops.end() && loop->Size == it->second) {
+                if (onLoop) onLoop(*loop);
+                // Emit once
+                finalLoops.erase(it);
+            }
+        }
+    }
+
+    // --- Emit basic blocks ---
     size_t bbStart = 0;
     bool inBB = false;
 
@@ -101,7 +186,7 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
         if (i + 1 < instrs.size()) {
             if (inLoop[i + 1]) {
                 endBB = true;
-            } else if (!boundaries.empty() && !sameFunction(boundaries, I.Addr, instrs[i + 1].Addr)) {
+            } else if (!boundaries.empty() && !sameFuncIdx(i, i + 1)) {
                 endBB = true;
             }
         } else {
@@ -177,11 +262,17 @@ void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
                 if (it != addr_to_node.end()) {
                     successors[u].push_back(it->second);
                 } else {
-                    for (size_t v = 0; v < num_nodes; ++v) {
-                        const auto &node = regions[group[v]];
+                    // Binary search in group for v where regions[group[v]].StartAddr <= t < regions[group[v]].EndAddr
+                    auto it_bound = std::upper_bound(group.begin(), group.end(), t,
+                        [&](uint64_t val, size_t idx) {
+                            return val < regions[idx].StartAddr;
+                        });
+                    if (it_bound != group.begin()) {
+                        auto prev_it = std::prev(it_bound);
+                        size_t v = std::distance(group.begin(), prev_it);
+                        const auto &node = regions[*prev_it];
                         if (t >= node.StartAddr && t < node.EndAddr) {
                             successors[u].push_back(v);
-                            break;
                         }
                     }
                 }
