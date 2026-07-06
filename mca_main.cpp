@@ -1,6 +1,7 @@
 #include "mca_common.h"
 #include "custom_a55_sched.h"
 #include <cstdio>
+#include <algorithm>
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
@@ -255,11 +256,22 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Output all valid results
+        // Sort regions by StartAddr so the output is ordered by start_address
+        std::vector<McaRegion> valid_regions;
         for (const auto &r : regions) {
             if (r.Valid) {
-                printResultCsv(SectionInstrs[r.Start], SectionInstrs[r.Start + r.Size - 1], r.SimulatedSize, r.IsLoop, r.Metrics);
+                valid_regions.push_back(r);
             }
+        }
+        std::sort(valid_regions.begin(), valid_regions.end(), [](const McaRegion &a, const McaRegion &b) {
+            if (a.StartAddr != b.StartAddr)
+                return a.StartAddr < b.StartAddr;
+            return a.EndAddr < b.EndAddr;
+        });
+
+        // Output all valid results
+        for (const auto &r : valid_regions) {
+            printResultCsv(SectionInstrs[r.Start], SectionInstrs[r.Start + r.Size - 1], r.SimulatedSize, r.IsLoop, r.Metrics);
         }
     }
 
