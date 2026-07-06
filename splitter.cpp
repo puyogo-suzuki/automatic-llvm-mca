@@ -17,7 +17,18 @@ bool containsAddress(const FunctionBoundaries &Boundaries, uint64_t Addr) {
 }
 
 bool sameFunction(const FunctionBoundaries &Boundaries, uint64_t A, uint64_t B) {
-    return Boundaries.empty() || (containsAddress(Boundaries, A) && containsAddress(Boundaries, B));
+    if (Boundaries.empty()) return true;
+    auto ItA = Boundaries.upper_bound(A);
+    if (ItA == Boundaries.begin()) return false;
+    --ItA;
+    if (A < ItA->first || A >= ItA->second) return false;
+
+    auto ItB = Boundaries.upper_bound(B);
+    if (ItB == Boundaries.begin()) return false;
+    --ItB;
+    if (B < ItB->first || B >= ItB->second) return false;
+
+    return ItA->first == ItB->first;
 }
 
 int64_t findIndex(ArrayRef<Instr> instrs, uint64_t addr) {
