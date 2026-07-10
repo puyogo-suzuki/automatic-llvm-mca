@@ -15,82 +15,9 @@ using namespace llvm;
 
 namespace {
 
-struct RegDeps {
-    llvm::SmallVector<unsigned, 4> inputs;
-    llvm::SmallVector<unsigned, 4> outputs;
-};
-
-struct MLPInstInfo {
-    std::bitset<3> flags; // bit 0: is_load, bit 1: is_store, bit 2: is_call
-    short num_uops = 1;
-    RegDeps io_regs;
-    MemAccessInfo mem_info;
-
-    bool is_load() const { return flags.test(0); }
-    bool is_store() const { return flags.test(1); }
-    bool is_call() const { return flags.test(2); }
-    void set_is_load(bool val) { flags.set(0, val); }
-    void set_is_store(bool val) { flags.set(1, val); }
-    void set_is_call(bool val) { flags.set(2, val); }
-};
-
 static void finalizeMemAccessInfo(MemAccessInfo &info, const MCInstrDesc &MCID) {
     info.set_is_load(MCID.mayLoad());
     info.set_is_store(MCID.mayStore());
-}
-
-static std::vector<unsigned> get_return_registers(const llvm::MCRegisterInfo &MRI, const std::string &ArchName) {
-    std::vector<std::string> target_names;
-    std::string arch = ArchName;
-    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
-    if (arch.find("aarch64") != std::string::npos) {
-        // Return registers for AArch64 are generally x0-x7 (and w0-w7, v0-v7)
-        for (int i = 0; i <= 7; ++i) {
-            target_names.push_back("x" + std::to_string(i));
-            target_names.push_back("w" + std::to_string(i));
-            target_names.push_back("v" + std::to_string(i));
-            target_names.push_back("s" + std::to_string(i));
-            target_names.push_back("d" + std::to_string(i));
-            target_names.push_back("h" + std::to_string(i));
-            target_names.push_back("b" + std::to_string(i));
-            target_names.push_back("q" + std::to_string(i));
-        }
-    } else if (arch.find("x86") != std::string::npos) {
-        // Return registers for X86 are generally rax, rdx, rcx, xmm0-xmm7 etc.
-        target_names = {
-            "rax", "eax", "ax", "al", "ah",
-            "rdx", "edx", "dx", "dl", "dh",
-            "rcx", "ecx", "cx", "cl", "ch"
-        };
-        for (int i = 0; i <= 7; ++i) {
-            target_names.push_back("xmm" + std::to_string(i));
-            target_names.push_back("ymm" + std::to_string(i));
-            target_names.push_back("zmm" + std::to_string(i));
-        }
-    } else if (arch.find("riscv") != std::string::npos) {
-        // Return registers for RISC-V are generally a0, a1 (and fa0, fa1)
-        target_names = {
-            "a0", "x10", "a1", "x11",
-            "fa0", "f10", "fa1", "f11"
-        };
-    }
-
-    std::vector<unsigned> reg_ids;
-    if (target_names.empty()) return reg_ids;
-
-    std::set<std::string> target_set(target_names.begin(), target_names.end());
-
-    unsigned num_regs = MRI.getNumRegs();
-    for (unsigned r = 1; r < num_regs; ++r) {
-        if (const char* name = MRI.getName(r)) {
-            std::string name_str(name);
-            std::transform(name_str.begin(), name_str.end(), name_str.begin(), ::tolower);
-            if (target_set.count(name_str)) {
-                reg_ids.push_back(r);
-            }
-        }
-    }
-    return reg_ids;
 }
 
 static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const RegSet& mask) {
@@ -116,52 +43,7 @@ static void reset_reg(RegSet &mask, unsigned reg, const llvm::MCRegisterInfo &MR
     }
 }
 
-#include <set>
-#include <map>
 
-struct SeenBaseRegs {
-    std::map<unsigned, std::set<int64_t>> data;
-
-    bool test(unsigned reg, int64_t cache_line) const {
-        auto it = data.find(reg);
-        if (it == data.end()) return false;
-        return it->second.count(cache_line) > 0;
-    }
-
-    void set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI) {
-        if (reg == 0) return;
-        for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
-            unsigned alias = *AI;
-            data[alias].insert(cache_line);
-        }
-    }
-
-    void reset(unsigned reg, const llvm::MCRegisterInfo &MRI) {
-        if (reg == 0) return;
-        for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
-            unsigned alias = *AI;
-            data.erase(alias);
-        }
-    }
-};
-
-static void update_seen_base_regs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_regs, const llvm::MCRegisterInfo &MRI) {
-    bool is_valid_load = inst_info.is_load() && inst_info.mem_info.valid();
-    unsigned base_reg = is_valid_load ? inst_info.mem_info.base_reg : 0;
-    if (is_valid_load && base_reg != 0 && inst_info.mem_info.is_constant_offset()) {
-        int64_t cache_line = inst_info.mem_info.offset / 64;
-        for (unsigned reg : inst_info.io_regs.outputs) {
-            for (llvm::MCRegAliasIterator AI(base_reg, &MRI, true); AI.isValid(); ++AI) {
-                if (*AI == reg) goto end_base_regs_set;
-            }
-        }
-        seen_base_regs.set(base_reg, cache_line, MRI);
-    }
-  end_base_regs_set:
-    for (unsigned reg : inst_info.io_regs.outputs) {
-        seen_base_regs.reset(reg, MRI);
-    }
-}
 
 int window_end(int i, int n, int width) {
     return std::min(n, i + width);
@@ -217,7 +99,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 
     // Helper: update seen_base_regs and load_dep_regs after processing instruction j.
     auto update_registers = [&](int j, bool is_valid_load, unsigned base_reg, bool is_dep) {
-        update_seen_base_regs(inst_infos[j], seen_base_regs, MRI);
+        updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
         for (unsigned reg : inst_infos[j].io_regs.outputs) {
             if (is_dep)
                 set_reg(load_dep_regs, reg, MRI);
@@ -387,7 +269,103 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
     }
 }
 
-static std::vector<MLPInstInfo> buildInstInfos(
+}  // namespace
+
+bool SeenBaseRegs::test(unsigned reg, int64_t cache_line) const {
+    auto it = data.find(reg);
+    if (it == data.end()) return false;
+    return it->second.count(cache_line) > 0;
+}
+
+void SeenBaseRegs::set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        data[alias].insert(cache_line);
+    }
+}
+
+void SeenBaseRegs::reset(unsigned reg, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        data.erase(alias);
+    }
+}
+
+void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_regs, const llvm::MCRegisterInfo &MRI) {
+    bool is_valid_load = inst_info.is_load() && inst_info.mem_info.valid();
+    unsigned base_reg = is_valid_load ? inst_info.mem_info.base_reg : 0;
+    if (is_valid_load && base_reg != 0 && inst_info.mem_info.is_constant_offset()) {
+        int64_t cache_line = inst_info.mem_info.offset / 64;
+        for (unsigned reg : inst_info.io_regs.outputs) {
+            for (llvm::MCRegAliasIterator AI(base_reg, &MRI, true); AI.isValid(); ++AI) {
+                if (*AI == reg) goto end_base_regs_set;
+            }
+        }
+        seen_base_regs.set(base_reg, cache_line, MRI);
+    }
+  end_base_regs_set:
+    for (unsigned reg : inst_info.io_regs.outputs) {
+        seen_base_regs.reset(reg, MRI);
+    }
+}
+
+std::vector<unsigned> getReturnRegisters(const llvm::MCRegisterInfo &MRI, const std::string &ArchName) {
+    std::vector<std::string> target_names;
+    std::string arch = ArchName;
+    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
+    if (arch.find("aarch64") != std::string::npos) {
+        // Return registers for AArch64 are generally x0-x7 (and w0-w7, v0-v7)
+        for (int i = 0; i <= 7; ++i) {
+            target_names.push_back("x" + std::to_string(i));
+            target_names.push_back("w" + std::to_string(i));
+            target_names.push_back("v" + std::to_string(i));
+            target_names.push_back("s" + std::to_string(i));
+            target_names.push_back("d" + std::to_string(i));
+            target_names.push_back("h" + std::to_string(i));
+            target_names.push_back("b" + std::to_string(i));
+            target_names.push_back("q" + std::to_string(i));
+        }
+    } else if (arch.find("x86") != std::string::npos) {
+        // Return registers for X86 are generally rax, rdx, rcx, xmm0-xmm7 etc.
+        target_names = {
+            "rax", "eax", "ax", "al", "ah",
+            "rdx", "edx", "dx", "dl", "dh",
+            "rcx", "ecx", "cx", "cl", "ch"
+        };
+        for (int i = 0; i <= 7; ++i) {
+            target_names.push_back("xmm" + std::to_string(i));
+            target_names.push_back("ymm" + std::to_string(i));
+            target_names.push_back("zmm" + std::to_string(i));
+        }
+    } else if (arch.find("riscv") != std::string::npos) {
+        // Return registers for RISC-V are generally a0, a1 (and fa0, fa1)
+        target_names = {
+            "a0", "x10", "a1", "x11",
+            "fa0", "f10", "fa1", "f11"
+        };
+    }
+
+    std::vector<unsigned> reg_ids;
+    if (target_names.empty()) return reg_ids;
+
+    std::set<std::string> target_set(target_names.begin(), target_names.end());
+
+    unsigned num_regs = MRI.getNumRegs();
+    for (unsigned r = 1; r < num_regs; ++r) {
+        if (const char* name = MRI.getName(r)) {
+            std::string name_str(name);
+            std::transform(name_str.begin(), name_str.end(), name_str.begin(), ::tolower);
+            if (target_set.count(name_str)) {
+                reg_ids.push_back(r);
+            }
+        }
+    }
+    return reg_ids;
+}
+
+std::vector<MLPInstInfo> buildInstInfos(
     llvm::ArrayRef<Instr> instrs,
     const llvm::MCSubtargetInfo& STI,
     const llvm::MCInstrInfo& MCII,
@@ -423,7 +401,6 @@ static std::vector<MLPInstInfo> buildInstInfos(
     }
     return inst_infos;
 }
-}  // namespace
 
 bool MLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const {
     if (reg == 0) return true;
@@ -747,7 +724,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
 
     const unsigned reg_count = MRI.getNumRegs() + 1;
     std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
-    std::vector<unsigned> return_regs = get_return_registers(MRI, STI.getTargetTriple().getArchName().str());
+    std::vector<unsigned> return_regs = getReturnRegisters(MRI, STI.getTargetTriple().getArchName().str());
     std::vector<int> load_indices;
     SeenBaseRegs global_seen_base_regs;
     for (int i = 0; i < n; ++i) {
@@ -767,7 +744,7 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                 load_indices.push_back(i);
             }
         }
-        update_seen_base_regs(inst_infos[i], global_seen_base_regs, MRI);
+        updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, MRI);
         if (inst_infos[i].is_call()) {
             for (unsigned ret_reg : return_regs) {
                 global_seen_base_regs.reset(ret_reg, MRI);
@@ -853,7 +830,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
     if (depKind == DependencyKind::OOO) {
         int n = instrs.size();
         std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
-        std::vector<unsigned> return_regs = get_return_registers(MRI, STI.getTargetTriple().getArchName().str());
+        std::vector<unsigned> return_regs = getReturnRegisters(MRI, STI.getTargetTriple().getArchName().str());
 
         SeenBaseRegs seen_base_regs;
         size_t non_hit_count = 0;
@@ -878,7 +855,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
                 }
             }
 
-            update_seen_base_regs(inst_infos[j], seen_base_regs, MRI);
+            updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
             if (inst_infos[j].is_call()) {
                 for (unsigned ret_reg : return_regs) {
                     seen_base_regs.reset(ret_reg, MRI);

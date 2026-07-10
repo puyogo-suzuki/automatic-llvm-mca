@@ -79,6 +79,42 @@ struct MemAccessInfo {
     void set_is_constant_offset(bool val) { flags.set(6, val); }
 };
 
+struct RegDeps {
+    llvm::SmallVector<unsigned, 4> inputs;
+    llvm::SmallVector<unsigned, 4> outputs;
+};
+
+struct MLPInstInfo {
+    std::bitset<3> flags; // bit 0: is_load, bit 1: is_store, bit 2: is_call
+    short num_uops = 1;
+    RegDeps io_regs;
+    MemAccessInfo mem_info;
+
+    bool is_load() const { return flags.test(0); }
+    bool is_store() const { return flags.test(1); }
+    bool is_call() const { return flags.test(2); }
+    void set_is_load(bool val) { flags.set(0, val); }
+    void set_is_store(bool val) { flags.set(1, val); }
+    void set_is_call(bool val) { flags.set(2, val); }
+};
+
+struct SeenBaseRegs {
+    std::map<unsigned, std::set<int64_t>> data;
+    bool test(unsigned reg, int64_t cache_line) const;
+    void set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI);
+    void reset(unsigned reg, const llvm::MCRegisterInfo &MRI);
+};
+
+class MLPAnalyzer;
+
+std::vector<unsigned> getReturnRegisters(const llvm::MCRegisterInfo &MRI, const std::string &ArchName);
+std::vector<MLPInstInfo> buildInstInfos(llvm::ArrayRef<Instr> instrs,
+                                        const llvm::MCSubtargetInfo& STI,
+                                        const llvm::MCInstrInfo& MCII,
+                                        const llvm::MCRegisterInfo& MRI,
+                                        const MLPAnalyzer* Analyzer);
+void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_regs, const llvm::MCRegisterInfo &MRI);
+
 class MLPAnalyzer {
 public:
     virtual ~MLPAnalyzer() = default;
