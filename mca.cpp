@@ -1,4 +1,6 @@
 #include "mca_common.h"
+#include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64AddressingModes.h"
+#include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
 #include <algorithm>
 #include <memory>
 
@@ -285,6 +287,40 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         }
         
         std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
+        if (STI.getCPU() == "cortex-a55") {
+            unsigned opc = I.Inst.getOpcode();
+            if (opc == llvm::AArch64::ADDXrs || opc == llvm::AArch64::ADDWrs ||
+                opc == llvm::AArch64::SUBXrs || opc == llvm::AArch64::SUBWrs ||
+                opc == llvm::AArch64::SUBSXrs || opc == llvm::AArch64::SUBSWrs ||
+                opc == llvm::AArch64::ADDSXrs || opc == llvm::AArch64::ADDSWrs) {
+                
+                unsigned shiftVal = 0;
+                if (I.Inst.getNumOperands() > 3 && I.Inst.getOperand(3).isImm()) {
+                    shiftVal = llvm::AArch64_AM::getShiftValue(I.Inst.getOperand(3).getImm());
+                }
+                
+                if (shiftVal == 0) {
+                    mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
+                    for (auto &W : MutableDesc.Writes) {
+                        if (W.Latency > 1) {
+                            W.Latency = 1;
+                        }
+                    }
+                    MutableDesc.MaxLatency = 1;
+                }
+            }
+            if (opc == llvm::AArch64::Bcc || opc == llvm::AArch64::B) {
+                mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
+                for (auto &W : MutableDesc.Writes) {
+                    W.Latency = 0;
+                }
+                MutableDesc.MaxLatency = 0;
+                MutableDesc.Resources.clear();
+                MutableDesc.UsedProcResUnits = 0;
+                MutableDesc.UsedProcResGroups = 0;
+                MutableDesc.UsedBuffers = 0;
+            }
+        }
         // Break condition flags (NZCV) dependency at instruction construction time
         // to allow same-cycle dual issue of conditional instructions
         if (STI.getCPU() == "cortex-a55") {
@@ -347,6 +383,15 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     M.RetiredInstructions = Tracker.SteadyRetired;
     M.LoadInstructions = analyzer.countPotentialMissLoads(instrs, STI, MCII, MRI, depKind);
     M.Cycles = Tracker.SteadyCycles;
+    if (STI.getCPU() == "cortex-a55" && instrs.size() > 0) {
+        unsigned NumSteadyIterations = Tracker.SteadyRetired / instrs.size();
+        if (NumSteadyIterations > 0) {
+            // Cortex-A55's non-blocking branch predictor overlaps about half of the 
+            // branch penalty/bubble under dual-issue (approx. 0.5 cycles per iteration).
+            double correctedCycles = static_cast<double>(M.Cycles) - (static_cast<double>(NumSteadyIterations) * 0.5);
+            M.Cycles = static_cast<unsigned>(correctedCycles + 0.5);
+        }
+    }
     M.MLP = analyzer.compute_mlp(instrs, windowWidth, depKind, assignKind, STI, MCII, MRI, M.MLP_R, mlpWindowLoop);
     if (M.RetiredInstructions > 0) {
         M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);

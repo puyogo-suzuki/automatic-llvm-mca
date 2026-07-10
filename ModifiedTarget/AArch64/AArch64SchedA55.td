@@ -65,6 +65,8 @@ let SchedModel = CortexA55Model in {
 // typical forwarding paths).
 def : WriteRes<WriteImm, [CortexA55UnitALU]> { let Latency = 1; }    // MOVN, MOVZ (SOG: 1)
 def : WriteRes<WriteI, [CortexA55UnitALU]> { let Latency = 1; }      // ALU (SOG: 1)
+def IsA55UnshiftedReg : MCSchedPredicate<CheckNumOperands<3>>;
+
 def : WriteRes<WriteISReg, [CortexA55UnitALU]> { let Latency = 2; }  // ALU of Shifted-Reg (SOG: 2)
 def : WriteRes<WriteIEReg, [CortexA55UnitALU]> { let Latency = 2; }  // ALU of Extended-Reg (SOG: 2)
 def : WriteRes<WriteExtr, [CortexA55UnitALU]> { let Latency = 2; }   // EXTR from a reg pair (SOG: 2)
