@@ -99,6 +99,13 @@ Cortex-A55 utilizes a non-blocking speculative branch predictor. When branch pre
         ```
         This brings the calculated loop CPI of tight blocks down to **`0.56`** (matching the actual hardware test loop CPI of **`0.57`**).
 
+#### 4. Flag-Transfer Penalty and A64 Low Latency Pointer Forwarding (SOG-Compliant)
+To align the C++ simulation engine exactly with the *Cortex-A55 Software Optimization Guide (v3.0)*, we added dynamic dependency checking during the instruction dispatch phase:
+*   **Flag-Transfer Penalty (SOG Section 5.11)**:
+    While integer compare-to-branch dependencies are bypassed with 0-cycle latency, flag transfers from the floating-point unit to integer status flags (e.g. `fcmp` $\to$ `b.ne` or `vmrs` flag writes) take a mandatory **1-cycle stall** on physical hardware. We intercept `NZCV` uses during dispatch; if the register definition originates from an FP comparison or flag-transfer instruction (`FCMP`, `VMRS`, `VMSR`), we retain the 1-cycle data dependency instead of clearing it.
+*   **A64 Low Latency Pointer Forwarding (SOG Section 5.10)**:
+    A dedicated forwarding path allows `adrp x0, <const>` followed by `ldr x0, [x0, #lo12]` to execute without any dependency stall. In `SteadyStateTracker::onEvent(Dispatched)`, if the current instruction is a load (`LDR`/`LDUR` family) and its base register dependency originates from an `ADRP` instruction, we dynamically bypass the register dependency (setting `IsReady = true` and `IndependentFromDef = true`), enabling 0-cycle AGU forwarding.
+
 ---
 
 ### C. Neoverse Architecture Validations (N1, N2, V1)
@@ -147,6 +154,11 @@ For basic block throughput estimation, loop-carried register dependencies (e.g.,
     ```
 *   When a new iteration starts (tracked by `readerIID / LoopSize`), we clear the history of register writes from prior iterations by resetting their `WriteRef`.
 *   We intercept the instruction dispatch phase and manually mark any pending input operands (`mca::ReadState`) as ready if their critical dependency originates from a previous loop iteration.
+
+### D. Basic Block Partitioning under Size Limits
+To prevent long instruction sequences from being completely skipped when size limits are applied:
+*   If a loop exceeds the maximum loop size limit (`loop-max-instrs`), it is excluded from the loop analysis but its instructions are fallback-evaluated as basic blocks.
+*   If a basic block exceeds the maximum basic block size limit (`bb-max-instrs`), instead of ignoring the block, the analyzer dynamically splits it into multiple contiguous sub-blocks (chunks) of size `bb-max-instrs` (with the final chunk containing the remainder). This ensures that every instruction in the binary is covered by the performance evaluation.
 
 ---
 

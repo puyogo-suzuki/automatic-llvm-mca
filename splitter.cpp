@@ -141,9 +141,10 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
     // either nestLimitOuter (depth < nestLimitOuter) or nestLimitInner (height < nestLimitInner)
     std::map<size_t, size_t> finalLoops;
     for (size_t i = 0; i < candidates.size(); ++i) {
-        bool allowed_outer = (nestLimitOuter <= 0 || nestingDepth[i] < nestLimitOuter);
-        bool allowed_inner = (nestLimitInner <= 0 || nestingHeight[i] < nestLimitInner);
-        if (allowed_outer || allowed_inner) {
+        bool ok = true;
+        if (nestLimitOuter > 0 && nestingDepth[i] >= nestLimitOuter) ok = false;
+        if (nestLimitInner > 0 && nestingHeight[i] >= nestLimitInner) ok = false;
+        if (ok) {
             finalLoops[candidates[i].Start] = candidates[i].Size;
         }
     }
@@ -186,8 +187,19 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
         if (inLoop[i]) {
             if (inBB) {
                 size_t size = i - bbStart;
-                if (size > 0 && (bbMaxInstrs <= 0 || size <= static_cast<size_t>(bbMaxInstrs))) {
-                    if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
+                if (size > 0) {
+                    if (bbMaxInstrs <= 0) {
+                        if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
+                    } else {
+                        size_t rem = size;
+                        size_t curr = bbStart;
+                        while (rem > 0) {
+                            size_t chunk = std::min(rem, static_cast<size_t>(bbMaxInstrs));
+                            if (onBasicBlock) onBasicBlock(RegionSpan{curr, chunk});
+                            curr += chunk;
+                            rem -= chunk;
+                        }
+                    }
                 }
                 inBB = false;
             }
@@ -212,8 +224,17 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
 
         if (endBB) {
             size_t size = i - bbStart + 1;
-            if (bbMaxInstrs <= 0 || size <= static_cast<size_t>(bbMaxInstrs)) {
+            if (bbMaxInstrs <= 0) {
                 if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
+            } else {
+                size_t rem = size;
+                size_t curr = bbStart;
+                while (rem > 0) {
+                    size_t chunk = std::min(rem, static_cast<size_t>(bbMaxInstrs));
+                    if (onBasicBlock) onBasicBlock(RegionSpan{curr, chunk});
+                    curr += chunk;
+                    rem -= chunk;
+                }
             }
             inBB = false;
         }
@@ -442,7 +463,7 @@ void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
 
 bool isNopInstruction(const llvm::MCInst &Inst, const llvm::MCInstrInfo &MCII) {
     StringRef Name = MCII.getName(Inst.getOpcode());
-    if (Name.contains_insensitive("nop")) return true;
+    if (Name.contains_insensitive("nop") || Name.contains_insensitive("noop")) return true;
     if (Name.equals_insensitive("hint") && Inst.getNumOperands() > 0 && Inst.getOperand(0).isImm() && Inst.getOperand(0).getImm() == 0) return true;
     return false;
 }

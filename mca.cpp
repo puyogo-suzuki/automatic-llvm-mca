@@ -78,7 +78,9 @@ uint64_t getELFSymbolSizeImpl(const ObjectFile &Obj, SymbolRef Sym) {
 struct SteadyStateTracker : mca::HWEventListener {
     const MCSubtargetInfo &STI;
     const MCRegisterInfo &MRI;
+    const MCInstrInfo &MCII;
     ArrayRef<Instr> Instrs;
+    ArrayRef<std::unique_ptr<mca::Instruction>> SimInstrs;
     unsigned WarmupRetiredLimit;
     unsigned TotalRetired = 0;
     unsigned SteadyRetired = 0;
@@ -92,8 +94,11 @@ struct SteadyStateTracker : mca::HWEventListener {
     unsigned CurrentIteration = 0;
     bool IsA55 = false;
  
-    explicit SteadyStateTracker(const MCSubtargetInfo &STI, const MCRegisterInfo &MRI, ArrayRef<Instr> Instrs, unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
-        : STI(STI), MRI(MRI), Instrs(Instrs), WarmupRetiredLimit(WarmupRetiredLimit), LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF),
+    explicit SteadyStateTracker(const MCSubtargetInfo &STI, const MCRegisterInfo &MRI, const MCInstrInfo &MCII,
+                                ArrayRef<Instr> Instrs, ArrayRef<std::unique_ptr<mca::Instruction>> SimInstrs,
+                                unsigned WarmupRetiredLimit, unsigned LoopSize, bool IgnoreLoopCarriedDep, mca::RegisterFile *PRF = nullptr)
+        : STI(STI), MRI(MRI), MCII(MCII), Instrs(Instrs), SimInstrs(SimInstrs), WarmupRetiredLimit(WarmupRetiredLimit),
+          LoopSize(LoopSize), IgnoreLoopCarriedDep(IgnoreLoopCarriedDep), PRF(PRF),
           IsA55(STI.getCPU() == "cortex-a55") {}
  
     void onCycleBegin() override {
@@ -118,12 +123,59 @@ struct SteadyStateTracker : mca::HWEventListener {
         } else if (Event.Type == mca::HWInstructionEvent::Dispatched) {
             mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
             
-            // Break condition flags (NZCV) dependency to allow same-cycle dual issue of conditional instructions
-            if (IsA55) {
+            // Custom Cortex-A55 same-cycle bypasses and stalls
+            if (IsA55 && PRF) {
+                auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
+                auto &mappings = (*PRF).*member_ptr;
+
+                // 1. Flag-transfer penalty logic for NZCV:
+                // Check if NZCV is currently defined by an FP compare or VMRS.
+                bool from_fp = false;
+                if (AArch64::NZCV < mappings.size()) {
+                    const mca::WriteRef &WR = mappings[AArch64::NZCV].first;
+                    if (WR.isValid()) {
+                        unsigned writerIID = WR.getSourceIndex();
+                        if (writerIID < SimInstrs.size()) {
+                            const mca::Instruction *DepInst = SimInstrs[writerIID].get();
+                            StringRef DepName = MCII.getName(DepInst->getOpcode());
+                            if (DepName.starts_with_insensitive("FCMP") ||
+                                DepName.starts_with_insensitive("VMRS") ||
+                                DepName.starts_with_insensitive("VMSR")) {
+                                from_fp = true;
+                            }
+                        }
+                    }
+                }
+                
                 for (mca::ReadState &RS : Inst.getUses()) {
                     if (RS.getRegisterID() == AArch64::NZCV) {
-                        RS.*get(ReadState_IsReady_Tag{}) = true;
-                        RS.setIndependentFromDef();
+                        if (!from_fp) {
+                            RS.*get(ReadState_IsReady_Tag{}) = true;
+                            RS.setIndependentFromDef();
+                        }
+                    }
+                }
+
+                // 2. A64 low latency pointer forwarding bypass logic:
+                // If current instruction is a load, check if its base register dependency is defined by an ADRP instruction.
+                StringRef CurrName = MCII.getName(Inst.getOpcode());
+                if (CurrName.starts_with_insensitive("LDR") || CurrName.starts_with_insensitive("LDUR")) {
+                    for (mca::ReadState &RS : Inst.getUses()) {
+                        unsigned baseReg = RS.getRegisterID();
+                        if (baseReg < mappings.size()) {
+                            const mca::WriteRef &WR = mappings[baseReg].first;
+                            if (WR.isValid()) {
+                                unsigned writerIID = WR.getSourceIndex();
+                                if (writerIID < SimInstrs.size()) {
+                                    const mca::Instruction *DepInst = SimInstrs[writerIID].get();
+                                    StringRef DepName = MCII.getName(DepInst->getOpcode());
+                                    if (DepName.equals_insensitive("ADRP")) {
+                                        RS.*get(ReadState_IsReady_Tag{}) = true;
+                                        RS.setIndependentFromDef();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -321,21 +373,6 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
                 MutableDesc.UsedBuffers = 0;
             }
         }
-        // Break condition flags (NZCV) dependency at instruction construction time
-        // to allow same-cycle dual issue of conditional instructions
-        if (STI.getCPU() == "cortex-a55") {
-            for (mca::WriteState &WS : Inst->getDefs()) {
-                if (WS.getRegisterID() == AArch64::NZCV) {
-                    WS.setRegisterID(0);
-                }
-            }
-            for (mca::ReadState &RS : Inst->getUses()) {
-                if (RS.getRegisterID() == AArch64::NZCV) {
-                    RS.*get(ReadState_IsReady_Tag{}) = true;
-                    RS.setIndependentFromDef();
-                }
-            }
-        }
         if (Inst->getMayLoad() && overrideLoadLatency > 0) {
             mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
             for (auto &W : MutableDesc.Writes) {
@@ -370,7 +407,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         }
     }
 
-    SteadyStateTracker Tracker(STI, MRI, instrs, instrs.size() * WarmupIterations, instrs.size(), ignoreLoopCarriedDep, PRF);
+    SteadyStateTracker Tracker(STI, MRI, MCII, instrs, CSM.getInstructions(), instrs.size() * WarmupIterations, instrs.size(), ignoreLoopCarriedDep, PRF);
     P->addEventListener(&Tracker);
 
     auto ExpectedCycles = P->run();
