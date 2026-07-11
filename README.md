@@ -44,14 +44,22 @@ cmake ..
 make
 ```
 
-This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp-objdump` and `build/mca-insts-info`, and the unit tests `build/mca_unit_tests`.
+This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp-objdump`, `build/mlp-update`, `build/mlp-check`, `build/mca-insts-info`, and the unit tests `build/mca_unit_tests`.
 
 ## Usage
 
 ```bash
+# Main tool to analyze all loops and basic blocks, outputting metrics to stdout as CSV
 ./build/mca_tool [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
 
+# Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address
 ./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
+
+# Reads a previously generated CSV of regions, re-evaluates the MLP metrics static analysis for each region, and outputs an updated CSV
+./build/mlp-update -i <input.csv> -o <output.csv> [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--mlp-window-loop <mode>] <elf-binary>
+
+# Disassembles and runs step-by-step debug logging for a specific target address to trace register dependencies and MLP window evaluation
+./build/mlp-check --target-address <hex> [--window-width <W>] [--dependency <mode>] <elf-binary>
 
 # Outputs a comprehensive table of all target machine instructions along with their TableGen internal names, assembly mnemonics, scheduling classes, execution latencies, reciprocal throughputs, and resource usages. It dynamically resolves variant scheduling classes using register-class operand matching.
 ./build/mca-insts-info --mtriple aarch64-linux-gnu --mcpu cortex-a55 [--format csv/tsv] > output.csv
