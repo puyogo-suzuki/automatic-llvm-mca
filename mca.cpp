@@ -121,7 +121,7 @@ struct SteadyStateTracker : mca::HWEventListener {
             // Break condition flags (NZCV) dependency to allow same-cycle dual issue of conditional instructions
             if (IsA55) {
                 for (mca::ReadState &RS : Inst.getUses()) {
-                    if (RS.getRegisterID() > 0 && std::strcmp(MRI.getName(RS.getRegisterID()), "NZCV") == 0) {
+                    if (RS.getRegisterID() == AArch64::NZCV) {
                         RS.*get(ReadState_IsReady_Tag{}) = true;
                         RS.setIndependentFromDef();
                     }
@@ -325,12 +325,12 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         // to allow same-cycle dual issue of conditional instructions
         if (STI.getCPU() == "cortex-a55") {
             for (mca::WriteState &WS : Inst->getDefs()) {
-                if (WS.getRegisterID() > 0 && std::strcmp(MRI.getName(WS.getRegisterID()), "NZCV") == 0) {
+                if (WS.getRegisterID() == AArch64::NZCV) {
                     WS.setRegisterID(0);
                 }
             }
             for (mca::ReadState &RS : Inst->getUses()) {
-                if (RS.getRegisterID() > 0 && std::strcmp(MRI.getName(RS.getRegisterID()), "NZCV") == 0) {
+                if (RS.getRegisterID() == AArch64::NZCV) {
                     RS.*get(ReadState_IsReady_Tag{}) = true;
                     RS.setIndependentFromDef();
                 }

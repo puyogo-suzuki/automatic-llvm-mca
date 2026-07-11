@@ -270,16 +270,28 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
 }  // namespace
 
 bool SeenBaseRegs::test(unsigned reg, int64_t cache_line) const {
-    auto it = data.find(reg);
-    if (it == data.end()) return false;
-    return it->second.count(cache_line) > 0;
+    for (const auto &pair : data) {
+        if (pair.first == reg && pair.second == cache_line) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void SeenBaseRegs::set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI) {
     if (reg == 0) return;
     for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
         unsigned alias = *AI;
-        data[alias].insert(cache_line);
+        bool found = false;
+        for (const auto &pair : data) {
+            if (pair.first == alias && pair.second == cache_line) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            data.push_back({alias, cache_line});
+        }
     }
 }
 
@@ -287,7 +299,11 @@ void SeenBaseRegs::reset(unsigned reg, const llvm::MCRegisterInfo &MRI) {
     if (reg == 0) return;
     for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
         unsigned alias = *AI;
-        data.erase(alias);
+        data.erase(std::remove_if(data.begin(), data.end(),
+                                  [alias](const std::pair<unsigned, int64_t> &p) {
+                                      return p.first == alias;
+                                  }),
+                   data.end());
     }
 }
 
@@ -310,52 +326,51 @@ void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_re
 }
 
 std::vector<unsigned> getReturnRegisters(const llvm::MCRegisterInfo &MRI, const std::string &ArchName) {
-    std::vector<std::string> target_names;
-    std::string arch = ArchName;
-    std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
-    if (arch.find("aarch64") != std::string::npos) {
-        // Return registers for AArch64 are generally x0-x7 (and w0-w7, v0-v7)
-        for (int i = 0; i <= 7; ++i) {
-            target_names.push_back("x" + std::to_string(i));
-            target_names.push_back("w" + std::to_string(i));
-            target_names.push_back("v" + std::to_string(i));
-            target_names.push_back("s" + std::to_string(i));
-            target_names.push_back("d" + std::to_string(i));
-            target_names.push_back("h" + std::to_string(i));
-            target_names.push_back("b" + std::to_string(i));
-            target_names.push_back("q" + std::to_string(i));
-        }
-    } else if (arch.find("x86") != std::string::npos) {
-        // Return registers for X86 are generally rax, rdx, rcx, xmm0-xmm7 etc.
-        target_names = {
-            "rax", "eax", "ax", "al", "ah",
-            "rdx", "edx", "dx", "dl", "dh",
-            "rcx", "ecx", "cx", "cl", "ch"
-        };
-        for (int i = 0; i <= 7; ++i) {
-            target_names.push_back("xmm" + std::to_string(i));
-            target_names.push_back("ymm" + std::to_string(i));
-            target_names.push_back("zmm" + std::to_string(i));
-        }
-    } else if (arch.find("riscv") != std::string::npos) {
-        // Return registers for RISC-V are generally a0, a1 (and fa0, fa1)
-        target_names = {
-            "a0", "x10", "a1", "x11",
-            "fa0", "f10", "fa1", "f11"
-        };
-    }
-
     std::vector<unsigned> reg_ids;
-    if (target_names.empty()) return reg_ids;
-
-    std::set<std::string> target_set(target_names.begin(), target_names.end());
-
-    unsigned num_regs = MRI.getNumRegs();
-    for (unsigned r = 1; r < num_regs; ++r) {
-        if (const char* name = MRI.getName(r)) {
-            std::string name_str(name);
-            std::transform(name_str.begin(), name_str.end(), name_str.begin(), ::tolower);
-            if (target_set.count(name_str)) {
+    StringRef arch = ArchName;
+    if (arch.contains_insensitive("aarch64")) {
+        unsigned num_regs = MRI.getNumRegs();
+        for (unsigned r = 1; r < num_regs; ++r) {
+            StringRef name = MRI.getName(r);
+            if (name.empty()) continue;
+            char first = name[0];
+            if (first >= 'A' && first <= 'Z') {
+                first = first - 'A' + 'a';
+            }
+            if (first == 'x' || first == 'w' || first == 'v' || first == 's' || first == 'd' || first == 'h' || first == 'b' || first == 'q') {
+                StringRef num_part = name.drop_front(1);
+                unsigned val;
+                if (!num_part.getAsInteger(10, val) && val <= 7) {
+                    reg_ids.push_back(r);
+                }
+            }
+        }
+    } else if (arch.contains_insensitive("x86")) {
+        unsigned num_regs = MRI.getNumRegs();
+        for (unsigned r = 1; r < num_regs; ++r) {
+            StringRef name = MRI.getName(r);
+            if (name.empty()) continue;
+            if (name.equals_insensitive("rax") || name.equals_insensitive("eax") || name.equals_insensitive("ax") || name.equals_insensitive("al") || name.equals_insensitive("ah") ||
+                name.equals_insensitive("rdx") || name.equals_insensitive("edx") || name.equals_insensitive("dx") || name.equals_insensitive("dl") || name.equals_insensitive("dh") ||
+                name.equals_insensitive("rcx") || name.equals_insensitive("ecx") || name.equals_insensitive("cx") || name.equals_insensitive("cl") || name.equals_insensitive("ch")) {
+                reg_ids.push_back(r);
+            } else if (name.starts_with_insensitive("xmm") || name.starts_with_insensitive("ymm") || name.starts_with_insensitive("zmm")) {
+                StringRef num_part = name.drop_front(3);
+                unsigned val;
+                if (!num_part.getAsInteger(10, val) && val <= 7) {
+                    reg_ids.push_back(r);
+                }
+            }
+        }
+    } else if (arch.contains_insensitive("riscv")) {
+        unsigned num_regs = MRI.getNumRegs();
+        for (unsigned r = 1; r < num_regs; ++r) {
+            StringRef name = MRI.getName(r);
+            if (name.empty()) continue;
+            if (name.equals_insensitive("a0") || name.equals_insensitive("x10") ||
+                name.equals_insensitive("a1") || name.equals_insensitive("x11") ||
+                name.equals_insensitive("fa0") || name.equals_insensitive("f10") ||
+                name.equals_insensitive("fa1") || name.equals_insensitive("f11")) {
                 reg_ids.push_back(r);
             }
         }

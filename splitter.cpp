@@ -162,13 +162,16 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
     }
 
     // --- Pass 2: emit loops ---
+    std::vector<bool> loopEmitted(instrs.size(), false);
     for (size_t i = 0; i < instrs.size(); ++i) {
         if (const auto &loop = loopSpans[i]) {
-            auto it = finalLoops.find(loop->Start);
-            if (it != finalLoops.end() && loop->Size == it->second) {
-                if (onLoop) onLoop(*loop);
-                // Emit once
-                finalLoops.erase(it);
+            if (!loopEmitted[loop->Start]) {
+                auto it = finalLoops.find(loop->Start);
+                if (it != finalLoops.end() && loop->Size == it->second) {
+                    if (onLoop) onLoop(*loop);
+                    // Emit once
+                    loopEmitted[loop->Start] = true;
+                }
             }
         }
     }
@@ -438,10 +441,9 @@ void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
 }
 
 bool isNopInstruction(const llvm::MCInst &Inst, const llvm::MCInstrInfo &MCII) {
-    std::string name = std::string(MCII.getName(Inst.getOpcode()));
-    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-    if (name.find("nop") != std::string::npos) return true;
-    if (name == "hint" && Inst.getNumOperands() > 0 && Inst.getOperand(0).isImm() && Inst.getOperand(0).getImm() == 0) return true;
+    StringRef Name = MCII.getName(Inst.getOpcode());
+    if (Name.contains_insensitive("nop")) return true;
+    if (Name.equals_insensitive("hint") && Inst.getNumOperands() > 0 && Inst.getOperand(0).isImm() && Inst.getOperand(0).getImm() == 0) return true;
     return false;
 }
 

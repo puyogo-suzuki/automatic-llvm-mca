@@ -98,8 +98,10 @@ struct MLPInstInfo {
     void set_is_call(bool val) { flags.set(2, val); }
 };
 
+#include "llvm/ADT/SmallVector.h"
+
 struct SeenBaseRegs {
-    std::map<unsigned, std::set<int64_t>> data;
+    llvm::SmallVector<std::pair<unsigned, int64_t>, 16> data;
     bool test(unsigned reg, int64_t cache_line) const;
     void set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI);
     void reset(unsigned reg, const llvm::MCRegisterInfo &MRI);
