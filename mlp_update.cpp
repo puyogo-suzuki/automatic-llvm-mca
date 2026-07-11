@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "frontend.h"
 #include "custom_a55_sched.h"
 #include <cstdio>
 #include <fstream>
@@ -10,54 +11,18 @@
 #include <algorithm>
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCDisassembler/MCDisassembler.h"
-#include "llvm/MC/MCInstrAnalysis.h"
-#include "llvm/MC/MCInstrInfo.h"
-#include "llvm/MC/MCTargetOptions.h"
-#include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSchedule.h"
-#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 using namespace llvm::object;
-
-static cl::opt<std::string> InputBinary(cl::Positional, cl::desc("<input binary>"), cl::Required);
-static cl::opt<std::string> InputCsv("i", cl::desc("Input CSV file"), cl::Required);
-static cl::opt<std::string> OutputCsv("o", cl::desc("Output CSV file"), cl::Required);
-static cl::opt<std::string> MTriple("mtriple", cl::desc("Target triple"));
-static cl::opt<std::string> MCPU("mcpu", cl::desc("Target CPU"));
-static cl::opt<int> WindowWidth("window-width", cl::desc("MLP window width"), cl::init(4));
-static cl::opt<DependencyKind> DepKind("dependency", cl::desc("Dependency mode"),
-    cl::values(
-        clEnumValN(DependencyKind::None, "none", "No dependency tracking"),
-        clEnumValN(DependencyKind::IO, "io", "In-order dependency"),
-        clEnumValN(DependencyKind::OOO, "ooo", "Out-of-order dependency"),
-        clEnumValN(DependencyKind::Dependency, "dependency", "Load-use dependency distance")
-    ), cl::init(DependencyKind::None));
-static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::desc("Per-load MLP assignment mode"),
-    cl::values(
-        clEnumValN(MLPWindowAssignmentKind::Forward, "forward", "Forward window"),
-        clEnumValN(MLPWindowAssignmentKind::MaxContaining, "max-containing", "Max MLP of containing windows")
-    ), cl::init(MLPWindowAssignmentKind::MaxContaining));
-static cl::opt<MlpWindowLoopMode> MlpWindowLoop("mlp-window-loop",
-    cl::desc("Loop back to the start of the basic block mode"),
-    cl::values(
-        clEnumValN(MlpWindowLoopMode::Default, "default", "Loop back to the start only for loops"),
-        clEnumValN(MlpWindowLoopMode::Force, "force", "Always loop back to the start (even for non-loops)"),
-        clEnumValN(MlpWindowLoopMode::Disable, "disable", "Never loop back to the start")
-    ), cl::init(MlpWindowLoopMode::Default));
 
 static uint64_t parseHex(const std::string &str) {
     return std::stoull(str, nullptr, 16);
@@ -65,61 +30,22 @@ static uint64_t parseHex(const std::string &str) {
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
-    initializeTargets();
-
-    cl::ParseCommandLineOptions(argc, argv, "mlp_update static MLP updater tool\n");
-
-    auto BinaryOrErr = ObjectFile::createObjectFile(InputBinary);
-    if (!BinaryOrErr) {
-        WithColor::error() << "Failed to open binary: " << toString(BinaryOrErr.takeError()) << "\n";
-        return 1;
-    }
-    ObjectFile &Obj = *BinaryOrErr.get().getBinary();
-
-    Triple TT = Obj.makeTriple();
-    if (!MTriple.empty()) TT = Triple(MTriple);
-    std::string Error;
-    const Target *TheTarget = TargetRegistry::lookupTarget(TT, Error);
-    if (!TheTarget) {
-        WithColor::error() << "No target for " << TT.str() << ": " << Error << "\n";
+    std::unique_ptr<ObjectFile> Obj;
+    TargetInfo TI;
+    if (!initializeFrontend(argc, argv, "mlp_update static MLP updater tool\n", Obj, TI)) {
         return 1;
     }
 
-    std::string CPU = MCPU.empty() ? "generic" : std::string(MCPU);
-    std::unique_ptr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TT));
-    MCTargetOptions MCOPT;
-    std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
-    std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
-    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, CPU, ""));
-    if (STI) {
-        llvm::overrideCortexA55SchedModel(*STI);
-    }
-    MCContext Ctx(TT, MAI.get(), MRI.get(), STI.get());
-    std::unique_ptr<MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI, Ctx));
-    std::unique_ptr<MCInstrAnalysis> MCIA(TheTarget->createMCInstrAnalysis(MCII.get()));
-
-    if (!MRI || !MAI || !MCII || !STI || !DisAsm || !MCIA) {
-        WithColor::error() << "Failed to initialize LLVM components\n";
+    if (opts::InputCsv.empty() || opts::OutputCsv.empty()) {
+        WithColor::error() << "Input and output CSV files must be specified.\n";
         return 1;
     }
-
-    const MCSchedModel &SM = STI->getSchedModel();
-    int windowWidth = WindowWidth;
-    if (WindowWidth.getNumOccurrences() == 0 && !MCPU.empty()) {
-        if (SM.MicroOpBufferSize > 0) {
-            windowWidth = SM.MicroOpBufferSize;
-        } else {
-            windowWidth = SM.IssueWidth * SM.MispredictPenalty;
-        }
-    }
-
-    std::unique_ptr<MLPAnalyzer> Analyzer = MLPAnalyzer::create(*STI);
 
     // Disassemble all text sections and keep a single instruction list sorted by address
     std::vector<Instr> AllInstrs;
-    for (const SectionRef &Section : Obj.sections()) {
+    for (const SectionRef &Section : Obj->sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
-        auto SectionInstrs = disassembleTextSection(Section, *DisAsm, *MCII, MCIA.get());
+        auto SectionInstrs = disassembleTextSection(Section, *TI.DisAsm, *TI.MCII, TI.MCIA.get());
         AllInstrs.insert(AllInstrs.end(), SectionInstrs.begin(), SectionInstrs.end());
     }
 
@@ -128,15 +54,15 @@ int main(int argc, char **argv) {
     });
 
     // Open CSV files
-    std::ifstream infile(InputCsv.c_str());
+    std::ifstream infile(opts::InputCsv.c_str());
     if (!infile.is_open()) {
-        WithColor::error() << "Failed to open input CSV: " << InputCsv << "\n";
+        WithColor::error() << "Failed to open input CSV: " << opts::InputCsv << "\n";
         return 1;
     }
 
-    std::ofstream outfile(OutputCsv.c_str());
+    std::ofstream outfile(opts::OutputCsv.c_str());
     if (!outfile.is_open()) {
-        WithColor::error() << "Failed to open output CSV: " << OutputCsv << "\n";
+        WithColor::error() << "Failed to open output CSV: " << opts::OutputCsv << "\n";
         return 1;
     }
 
@@ -183,17 +109,17 @@ int main(int argc, char **argv) {
                 auto region_instrs = ArrayRef<Instr>(AllInstrs).slice(start_idx, region_size);
 
                 bool mlpLoop = false;
-                if (MlpWindowLoop == MlpWindowLoopMode::Force) {
+                if (opts::MlpWindowLoop == MlpWindowLoopMode::Force) {
                     mlpLoop = true;
-                } else if (MlpWindowLoop == MlpWindowLoopMode::Default) {
+                } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Default) {
                     mlpLoop = is_loop;
-                } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
+                } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Disable) {
                     mlpLoop = false;
                 }
 
                 float mlp_r = 0.0f;
-                float mlp = Analyzer->compute_mlp(region_instrs, windowWidth, DepKind, AssignKind, *STI, *MCII, *MRI, mlp_r, mlpLoop);
-                size_t load_instrs = Analyzer->countPotentialMissLoads(region_instrs, *STI, *MCII, *MRI, DepKind);
+                float mlp = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, mlp_r, mlpLoop);
+                size_t load_instrs = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind);
 
                 // Update MLP and load instructions columns (row[5] = load_instructions, row[7] = mlp, row[8] = mlp_r)
                 row[5] = std::to_string(load_instrs);

@@ -43,8 +43,6 @@ static void reset_reg(RegSet &mask, unsigned reg, const llvm::MCRegisterInfo &MR
     }
 }
 
-
-
 int window_end(int i, int n, int width) {
     return std::min(n, i + width);
 }

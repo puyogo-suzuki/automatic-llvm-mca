@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "frontend.h"
 #include "custom_a55_sched.h"
 #include <cstdio>
 #include <algorithm>
@@ -9,51 +10,19 @@
 #include <iomanip>
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCDisassembler/MCDisassembler.h"
-#include "llvm/MC/MCInstrAnalysis.h"
-#include "llvm/MC/MCInstrInfo.h"
-#include "llvm/MC/MCTargetOptions.h"
-#include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCSchedule.h"
-#include "llvm/MC/TargetRegistry.h"
 #include "llvm/MC/MCInstPrinter.h"
+#include "llvm/MC/MCSchedule.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 using namespace llvm::object;
-
-static cl::opt<std::string> InputBinary(cl::Positional, cl::desc("<input binary>"), cl::Required);
-static cl::opt<std::string> TargetAddressStr("target-address", cl::desc("Only analyze region containing this target address"), cl::Required);
-static cl::opt<std::string> MTriple("mtriple", cl::desc("Target triple"));
-static cl::opt<std::string> MCPU("mcpu", cl::desc("Target CPU"));
-static cl::opt<int> WindowWidth("window-width", cl::desc("MLP window width"), cl::init(4));
-static cl::opt<DependencyKind> DepKind("dependency", cl::desc("Dependency mode"),
-    cl::values(
-        clEnumValN(DependencyKind::None, "none", "No dependency tracking"),
-        clEnumValN(DependencyKind::IO, "io", "In-order dependency"),
-        clEnumValN(DependencyKind::OOO, "ooo", "Out-of-order dependency"),
-        clEnumValN(DependencyKind::Dependency, "dependency", "Load-use dependency distance")
-    ), cl::init(DependencyKind::OOO));
-static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::desc("Per-load MLP assignment mode"),
-    cl::values(
-        clEnumValN(MLPWindowAssignmentKind::Forward, "forward", "Forward window"),
-        clEnumValN(MLPWindowAssignmentKind::MaxContaining, "max-containing", "Max MLP of containing windows")
-    ), cl::init(MLPWindowAssignmentKind::MaxContaining));
-static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
-static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
-static cl::opt<int> NestLimitOuter("nest-limit-outer", cl::desc("Maximum nesting depth of loops to analyze from outer to inner"), cl::init(2));
-static cl::opt<int> NestLimitInner("nest-limit-inner", cl::desc("Maximum nesting depth of loops to analyze from inner to outer"), cl::init(2));
 
 static bool has_intersection(const llvm::SmallVectorImpl<unsigned>& regs, const RegSet& mask) {
     for (unsigned r : regs) {
@@ -88,75 +57,37 @@ static void printInstruction(MCInstPrinter &IP, const MCInst &Inst, uint64_t Add
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
-    initializeTargets();
-
-    cl::ParseCommandLineOptions(argc, argv, "mlp-check debug tool\n");
-
-    uint64_t TargetAddress = 0;
-    if (TargetAddressStr.empty() || StringRef(TargetAddressStr).getAsInteger(0, TargetAddress)) {
-        WithColor::error() << "Invalid target address specified.\n";
+    std::unique_ptr<ObjectFile> Obj;
+    TargetInfo TI;
+    if (!initializeFrontend(argc, argv, "mlp-check debug tool\n", Obj, TI)) {
         return 1;
     }
 
-    auto BinaryOrErr = ObjectFile::createObjectFile(InputBinary);
-    if (!BinaryOrErr) {
-        WithColor::error() << "Failed to open binary: " << toString(BinaryOrErr.takeError()) << "\n";
-        return 1;
-    }
-    ObjectFile &Obj = *BinaryOrErr.get().getBinary();
-
-    Triple TT = Obj.makeTriple();
-    if (!MTriple.empty()) TT = Triple(MTriple);
-    std::string Error;
-    const Target *TheTarget = TargetRegistry::lookupTarget(TT, Error);
-    if (!TheTarget) {
-        WithColor::error() << "No target for " << TT.str() << ": " << Error << "\n";
+    if (opts::TargetAddressStr.empty()) {
+        WithColor::error() << "Target address must be specified.\n";
         return 1;
     }
 
-    std::string CPU = MCPU.empty() ? "generic" : std::string(MCPU);
-    std::unique_ptr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TT));
-    MCTargetOptions MCOPT;
-    std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
-    std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
-    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, CPU, ""));
-    if (STI) {
-        llvm::overrideCortexA55SchedModel(*STI);
-    }
-    MCContext Ctx(TT, MAI.get(), MRI.get(), STI.get());
-    std::unique_ptr<MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI, Ctx));
-    std::unique_ptr<MCInstrAnalysis> MCIA(TheTarget->createMCInstrAnalysis(MCII.get()));
-    std::unique_ptr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(TT, 0, *MAI, *MCII, *MRI));
-
-    if (!MRI || !MAI || !MCII || !STI || !DisAsm || !MCIA || !IP) {
-        WithColor::error() << "Failed to initialize LLVM components\n";
+    std::unique_ptr<MCInstPrinter> IP(TI.TheTarget->createMCInstPrinter(Triple(TI.TripleName), 0, *TI.MAI, *TI.MCII, *TI.MRI));
+    if (!IP) {
+        WithColor::error() << "Failed to create MCInstPrinter\n";
         return 1;
     }
 
     IP->setPrintImmHex(true);
     IP->setPrintBranchImmAsAddress(true);
 
-    std::unique_ptr<MLPAnalyzer> Analyzer = MLPAnalyzer::create(*STI);
-    const MCSchedModel &SM = STI->getSchedModel();
-    int windowWidth = WindowWidth;
-    if (WindowWidth.getNumOccurrences() == 0 && !MCPU.empty()) {
-        if (SM.MicroOpBufferSize > 0) {
-            windowWidth = SM.MicroOpBufferSize;
-        } else {
-            windowWidth = SM.IssueWidth * SM.MispredictPenalty;
-        }
-    }
-    FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
+    FunctionBoundaries FunctionRanges = collectFunctionBoundaries(*Obj);
 
     bool Found = false;
-    for (const SectionRef &Section : Obj.sections()) {
+    for (const SectionRef &Section : Obj->sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
 
-        auto SectionInstrs = disassembleTextSection(Section, *DisAsm, *MCII, MCIA.get());
+        auto SectionInstrs = disassembleTextSection(Section, *TI.DisAsm, *TI.MCII, TI.MCIA.get());
         if (SectionInstrs.empty()) continue;
 
         std::vector<McaRegion> regions;
-        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, NestLimitOuter, NestLimitInner,
+        walkRegions(SectionInstrs, FunctionRanges, opts::LoopMaxInstrs, opts::BBMaxInstrs, opts::NestLimitOuter, opts::NestLimitInner,
                     [&](const RegionSpan &Span) {
                         McaRegion r;
                         r.Start = Span.Start;
@@ -177,10 +108,10 @@ int main(int argc, char **argv) {
                     });
 
         for (auto &r : regions) {
-            if (TargetAddress >= r.StartAddr && TargetAddress < r.EndAddr) {
+            if (TI.TargetAddress >= r.StartAddr && TI.TargetAddress < r.EndAddr) {
                 Found = true;
                 std::cout << "\n=======================================================\n";
-                std::cout << "FOUND TARGET ADDRESS 0x" << std::hex << TargetAddress 
+                std::cout << "FOUND TARGET ADDRESS 0x" << std::hex << TI.TargetAddress 
                           << " IN REGION [0x" << r.StartAddr << " - 0x" << r.EndAddr << "]\n";
                 std::cout << "Region Type: " << (r.IsLoop ? "Loop" : "Basic Block") << "\n";
                 std::cout << "=======================================================\n\n";
@@ -193,17 +124,17 @@ int main(int argc, char **argv) {
                 for (int i = 0; i < n; ++i) {
                     const auto &I = region_instrs[i];
                     std::cout << "  [" << std::setw(2) << std::dec << i << "]  0x" << std::hex << I.Addr << ":  ";
-                    printInstruction(*IP, I.Inst, I.Addr, *STI);
+                    printInstruction(*IP, I.Inst, I.Addr, *TI.STI);
                     std::cout << "\n";
                 }
                 std::cout << "\n";
 
                 // Evaluate pre-loads and dependencies
-                const unsigned reg_count = MRI->getNumRegs() + 1;
-                std::vector<unsigned> return_regs = getReturnRegisters(*MRI, STI->getTargetTriple().getArchName().str());
+                const unsigned reg_count = TI.MRI->getNumRegs() + 1;
+                std::vector<unsigned> return_regs = getReturnRegisters(*TI.MRI, TI.STI->getTargetTriple().getArchName().str());
                 
                 // Reconstruct MLPInstInfo using common helper
-                std::vector<MLPInstInfo> inst_infos = buildInstInfos(region_instrs, *STI, *MCII, *MRI, Analyzer.get());
+                std::vector<MLPInstInfo> inst_infos = buildInstInfos(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, TI.Analyzer.get());
 
                 // Filter load indices
                 std::vector<int> load_indices;
@@ -216,12 +147,12 @@ int main(int argc, char **argv) {
                             std::cout << "  [" << i << "] Load is STACK access (ignored from MLP)\n";
                             continue;
                         }
-                        if (DepKind == DependencyKind::OOO) {
+                        if (opts::DepKind == DependencyKind::OOO) {
                             unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
                             if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
                                 int64_t cache_line = inst_infos[i].mem_info.offset / 64;
                                 is_hit = global_seen_base_regs.test(base_reg, cache_line);
-                                std::cout << "  [" << i << "] Load base reg: " << MRI->getName(base_reg) 
+                                std::cout << "  [" << i << "] Load base reg: " << TI.MRI->getName(base_reg) 
                                           << ", offset: " << inst_infos[i].mem_info.offset
                                           << " (line " << cache_line << ") -> "
                                           << (is_hit ? "CACHE MATCH (excl)" : "NO MATCH") << "\n";
@@ -234,10 +165,10 @@ int main(int argc, char **argv) {
                         }
                     }
                     // update seen base
-                    updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, *MRI);
+                    updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, *TI.MRI);
                     if (inst_infos[i].is_call()) {
                         for (unsigned ret_reg : return_regs) {
-                            global_seen_base_regs.reset(ret_reg, *MRI);
+                            global_seen_base_regs.reset(ret_reg, *TI.MRI);
                         }
                     }
                 }
@@ -248,135 +179,97 @@ int main(int argc, char **argv) {
                 std::vector<float> mlp_r_vals(n, -1.0f);
                 RegSet load_dep_regs(reg_count);
                 
-                std::cout << "--- Trace for each load instruction ---\n";
-                for (int i : load_indices) {
-                    std::cout << "Evaluating load at index [" << i << "]: ";
-                    printInstruction(*IP, region_instrs[i].Inst, region_instrs[i].Addr, *STI);
-                    std::cout << "\n";
-
+                std::cout << "--- MLP Evaluation (Forward Windows) ---\n";
+                for (int load_idx : load_indices) {
+                    std::cout << "  Evaluating window starting at load [" << load_idx << "]...\n";
+                    
+                    int current_loads = 0;
+                    int actual_loads = 0;
+                    
                     load_dep_regs.reset();
                     SeenBaseRegs window_seen_base_regs;
-
-                    int count_indep = 0;
-                    int count_dep = 0;
-                    int uops_sum = 0;
-
-                    std::cout << "  Window trace:\n";
-                    for (int step = 0;; ++step) {
-                        if (!r.IsLoop && (i + step) >= n) break;
-                        int j = (i + step) % n;
-                        uops_sum += std::max(1, static_cast<int>(inst_infos[j].num_uops));
-                        if (uops_sum > windowWidth && step > 0) {
-                            std::cout << "    [Step " << step << "] uops sum " << uops_sum 
-                                      << " exceeds window width " << windowWidth << ". Stopping.\n";
+                    
+                    for (int j = load_idx; j < n; ++j) {
+                        const auto &J = inst_infos[j];
+                        
+                        bool has_dep = false;
+                        if (opts::DepKind != DependencyKind::None) {
+                            if (has_intersection(J.io_regs.inputs, load_dep_regs)) {
+                                has_dep = true;
+                            }
+                        }
+                        
+                        if (has_dep) {
+                            std::cout << "    [" << j << "] STALL due to register dependency\n";
                             break;
                         }
-
-                        bool is_dep = has_intersection(inst_infos[j].io_regs.inputs, load_dep_regs);
-                        bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
-                        unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
                         
-                        bool is_hit = false;
-                        if (is_load) {
-                            if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
-                                int64_t cache_line = inst_infos[j].mem_info.offset / 64;
-                                is_hit = window_seen_base_regs.test(base_reg, cache_line);
-                            }
-                        }
-
-                        std::cout << "    - instr [" << j << "] 0x" << std::hex << region_instrs[j].Addr << ": ";
-                        printInstruction(*IP, region_instrs[j].Inst, region_instrs[j].Addr, *STI);
-                        std::cout << std::dec << " | uops: " << std::max(1, (int)inst_infos[j].num_uops);
-                        
-                        if (is_load) {
-                            std::cout << " | Load";
-                            if (is_hit) {
-                                std::cout << " (Window Cache Match)";
+                        if (J.is_load()) {
+                            if (J.mem_info.is_stack_access()) {
+                                std::cout << "    [" << j << "] Load is STACK access (ignored)\n";
                             } else {
-                                if (is_dep) {
-                                    std::cout << " (DEPENDENT)";
-                                    ++count_dep;
+                                bool is_hit = false;
+                                if (opts::DepKind == DependencyKind::OOO) {
+                                    unsigned base_reg = J.mem_info.valid() ? J.mem_info.base_reg : 0;
+                                    if (base_reg != 0 && J.mem_info.is_constant_offset()) {
+                                        int64_t cache_line = J.mem_info.offset / 64;
+                                        is_hit = window_seen_base_regs.test(base_reg, cache_line);
+                                    }
+                                }
+                                
+                                if (is_hit) {
+                                    std::cout << "    [" << j << "] Load hit (cache match) -> IGNORED from window count\n";
                                 } else {
-                                    std::cout << " (INDEPENDENT)";
-                                    ++count_indep;
+                                    actual_loads++;
+                                    std::cout << "    [" << j << "] Load added to window (Count: " << actual_loads << ")\n";
                                 }
                             }
-                        } else {
-                            if (is_dep) std::cout << " (Propagates Dependency)";
                         }
-                        std::cout << "\n";
-
-                        // update window dependency registers
-                        updateSeenBaseRegs(inst_infos[j], window_seen_base_regs, *MRI);
-                        for (unsigned reg : inst_infos[j].io_regs.outputs) {
-                            if (is_dep) {
-                                set_reg(load_dep_regs, reg, *MRI);
-                            } else if (is_load) {
-                                if (reg == base_reg && inst_infos[j].mem_info.is_writeback())
-                                    reset_reg(load_dep_regs, reg, *MRI);
-                                else
-                                    set_reg(load_dep_regs, reg, *MRI);
-                            } else {
-                                reset_reg(load_dep_regs, reg, *MRI);
-                            }
+                        
+                        current_loads += J.num_uops;
+                        if (current_loads > TI.WindowWidthVal) {
+                            std::cout << "    [" << j << "] window width limit reached (" << current_loads << " > " << TI.WindowWidthVal << ")\n";
+                            break;
                         }
-                        if (inst_infos[j].is_call()) {
+                        
+                        // update dependency registers
+                        for (unsigned out : J.io_regs.outputs) {
+                            set_reg(load_dep_regs, out, *TI.MRI);
+                        }
+                        for (unsigned in : J.io_regs.inputs) {
+                            reset_reg(load_dep_regs, in, *TI.MRI);
+                        }
+                        
+                        updateSeenBaseRegs(J, window_seen_base_regs, *TI.MRI);
+                        if (J.is_call()) {
                             for (unsigned ret_reg : return_regs) {
-                                window_seen_base_regs.reset(ret_reg, *MRI);
-                                reset_reg(load_dep_regs, ret_reg, *MRI);
+                                window_seen_base_regs.reset(ret_reg, *TI.MRI);
                             }
                         }
                     }
-
-                    int total = count_indep + count_dep;
-                    float score = static_cast<float>(count_indep);
-                    float score_r = (total == 0) ? -1.0f : static_cast<float>(count_indep) / total;
-                    std::cout << "  => Load Score: " << score << ", ratio (score_r): " << score_r << "\n\n";
-
-                    // Assign score
-                    if (AssignKind == MLPWindowAssignmentKind::Forward) {
-                        mlp_vals[i] = score;
-                        mlp_r_vals[i] = score_r;
-                    } else {
-                        // MaxContaining
-                        int u_sum = 0;
-                        int s_limit = r.IsLoop ? windowWidth : (n - i);
-                        for (int step = 0; step < s_limit; ++step) {
-                            int j = (i + step) % n;
-                            int inst_uops = std::max(1, static_cast<int>(inst_infos[j].num_uops));
-                            if (u_sum + inst_uops > windowWidth && step > 0) break;
-                            u_sum += inst_uops;
-                            if (inst_infos[j].is_load()) {
-                                mlp_vals[j] = std::max(mlp_vals[j], score);
-                                mlp_r_vals[j] = std::max(mlp_r_vals[j], score_r);
-                            }
-                        }
-                    }
+                    
+                    std::cout << "    Window actual MLP = " << actual_loads << "\n";
+                    mlp_vals[load_idx] = actual_loads;
+                    mlp_r_vals[load_idx] = 1.0f / actual_loads;
                 }
-
-                std::cout << "--- Final Assigned MLP per Load (Window Assignment: " 
-                          << (AssignKind == MLPWindowAssignmentKind::Forward ? "Forward" : "MaxContaining") << ") ---\n";
-                double total_mlp = 0;
-                double total_mlp_r = 0;
-                int count_r = 0;
-                for (int i : load_indices) {
-                    std::cout << "  [" << i << "] 0x" << std::hex << region_instrs[i].Addr << ":  ";
-                    printInstruction(*IP, region_instrs[i].Inst, region_instrs[i].Addr, *STI);
-                    std::cout << std::fixed << std::setprecision(2) << "  => Assigned MLP: " << mlp_vals[i] 
-                              << ", Ratio: " << mlp_r_vals[i] << "\n";
-                    total_mlp += mlp_vals[i];
-                    if (mlp_r_vals[i] >= 0.0f) {
-                        total_mlp_r += mlp_r_vals[i];
-                        count_r++;
-                    }
-                }
+                std::cout << "\n";
                 
-                float final_mlp = total_mlp / load_indices.size();
-                float final_mlp_r = (count_r == 0) ? 0.0f : total_mlp_r / count_r;
-                std::cout << "\n=======================================================\n";
-                std::cout << "REGION MLP   : " << final_mlp << "\n";
-                std::cout << "REGION MLP_R : " << final_mlp_r << "\n";
-                std::cout << "=======================================================\n";
+                std::cout << "--- Final Instruction Metrics ---\n";
+                for (int i = 0; i < n; ++i) {
+                    std::cout << "  [" << std::setw(2) << std::dec << i << "]  ";
+                    if (inst_infos[i].is_load()) {
+                        if (inst_infos[i].mem_info.is_stack_access()) {
+                            std::cout << "MLP: STACK  ";
+                        } else {
+                            std::cout << "MLP: " << std::fixed << std::setw(5) << std::setprecision(2) << mlp_vals[i] << "  ";
+                        }
+                    } else {
+                        std::cout << "            ";
+                    }
+                    std::cout << "0x" << std::hex << region_instrs[i].Addr << ": ";
+                    printInstruction(*IP, region_instrs[i].Inst, region_instrs[i].Addr, *TI.STI);
+                    std::cout << "\n";
+                }
                 break;
             }
         }
@@ -384,8 +277,7 @@ int main(int argc, char **argv) {
     }
 
     if (!Found) {
-        WithColor::error() << "Address 0x" << Twine::utohexstr(TargetAddress) << " not found in any text section.\n";
-        return 1;
+        std::cout << "Target address 0x" << std::hex << TI.TargetAddress << " not found in any disassembled code regions.\n";
     }
 
     return 0;

@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "frontend.h"
 #include "custom_a55_sched.h"
 #include <cstdio>
 #include <algorithm>
@@ -8,70 +9,18 @@
 #include <unistd.h>
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCDisassembler/MCDisassembler.h"
-#include "llvm/MC/MCInstrAnalysis.h"
-#include "llvm/MC/MCInstrInfo.h"
-#include "llvm/MC/MCTargetOptions.h"
-#include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSchedule.h"
-#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 using namespace llvm::object;
-
-static cl::opt<std::string> InputBinary(cl::Positional, cl::desc("<input binary>"), cl::Required);
-static cl::opt<std::string> MTriple("mtriple", cl::desc("Target triple"));
-static cl::opt<std::string> MCPU("mcpu", cl::desc("Target CPU"));
-static cl::opt<int> WindowWidth("window-width", cl::desc("MLP window width"), cl::init(4));
-static cl::opt<DependencyKind> DepKind("dependency", cl::desc("Dependency mode"),
-    cl::values(
-        clEnumValN(DependencyKind::None, "none", "No dependency tracking"),
-        clEnumValN(DependencyKind::IO, "io", "In-order dependency"),
-        clEnumValN(DependencyKind::OOO, "ooo", "Out-of-order dependency"),
-        clEnumValN(DependencyKind::Dependency, "dependency", "Load-use dependency distance")
-    ), cl::init(DependencyKind::None));
-static cl::opt<MLPWindowAssignmentKind> AssignKind("mlp-window-assignment", cl::desc("Per-load MLP assignment mode"),
-    cl::values(
-        clEnumValN(MLPWindowAssignmentKind::Forward, "forward", "Forward window"),
-        clEnumValN(MLPWindowAssignmentKind::MaxContaining, "max-containing", "Max MLP of containing windows")
-    ), cl::init(MLPWindowAssignmentKind::Forward));
-static cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(2));
-static cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(100));
-static cl::opt<int> NestLimitOuter("nest-limit-outer", cl::desc("Maximum nesting depth of loops to analyze from outer to inner"), cl::init(2));
-static cl::opt<int> NestLimitInner("nest-limit-inner", cl::desc("Maximum nesting depth of loops to analyze from inner to outer"), cl::init(2));
-static cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(100));
-static cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
-    cl::desc("Ignore loop-carried register dependencies mode"),
-    cl::values(
-        clEnumValN(IgnoreLoopCarriedMode::Default, "default", "Ignore in basic blocks, but not in loops"),
-        clEnumValN(IgnoreLoopCarriedMode::Force, "force", "Ignore in both loops and basic blocks"),
-        clEnumValN(IgnoreLoopCarriedMode::Disable, "disable", "Do not ignore loop-carried dependencies anywhere")
-    ), cl::init(IgnoreLoopCarriedMode::Default));
-static cl::opt<int> OverrideLoadLatency("override-load-latency",
-    cl::desc("Override load instruction latency in cycles"),
-    cl::init(-1));
-static cl::opt<MlpWindowLoopMode> MlpWindowLoop("mlp-window-loop",
-    cl::desc("Loop back to the start of the basic block mode"),
-    cl::values(
-        clEnumValN(MlpWindowLoopMode::Default, "default", "Loop back to the start only for loops"),
-        clEnumValN(MlpWindowLoopMode::Force, "force", "Always loop back to the start (even for non-loops)"),
-        clEnumValN(MlpWindowLoopMode::Disable, "disable", "Never loop back to the start")
-    ), cl::init(MlpWindowLoopMode::Default));
-static cl::opt<std::string> TargetAddressStr("target-address",
-    cl::desc("Only analyze region starting at this hex address"),
-    cl::init(""));
 
 struct ScopedSilence {
     int devNull = -1;
@@ -105,78 +54,16 @@ static void printResultCsv(const Instr &First, const Instr &Last, size_t Length,
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
-    initializeTargets();
-
-    cl::ParseCommandLineOptions(argc, argv, "automatic-llvm-mca optimized C++ tool\n");
-
-    auto BinaryOrErr = ObjectFile::createObjectFile(InputBinary);
-    if (!BinaryOrErr) {
-        WithColor::error() << "Failed to open binary: " << toString(BinaryOrErr.takeError()) << "\n";
+    std::unique_ptr<ObjectFile> Obj;
+    TargetInfo TI;
+    if (!initializeFrontend(argc, argv, "automatic-llvm-mca optimized C++ tool\n", Obj, TI)) {
         return 1;
     }
-    ObjectFile &Obj = *BinaryOrErr.get().getBinary();
-
-    Triple TT = Obj.makeTriple();
-    if (!MTriple.empty()) TT = Triple(MTriple);
-    std::string Error;
-    const Target *TheTarget = TargetRegistry::lookupTarget(TT, Error);
-    if (!TheTarget) {
-        WithColor::error() << "No target for " << TT.str() << ": " << Error << "\n";
-        return 1;
-    }
-
-    std::string CPU = MCPU.empty() ? "generic" : std::string(MCPU);
-    std::unique_ptr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TT));
-    MCTargetOptions MCOPT;
-    std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
-    std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
-    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, CPU, ""));
-    if (STI) {
-        llvm::overrideCortexA55SchedModel(*STI);
-    }
-    MCContext Ctx(TT, MAI.get(), MRI.get(), STI.get());
-    std::unique_ptr<MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI, Ctx));
-    std::unique_ptr<MCInstrAnalysis> MCIA(TheTarget->createMCInstrAnalysis(MCII.get()));
-
-    if (!MRI || !MAI || !MCII || !STI || !DisAsm || !MCIA) {
-        WithColor::error() << "Failed to initialize LLVM components\n";
-        return 1;
-    }
-
-    mca::PipelineOptions PO(0, 0, 0, 0, 0, 0, true);
-    const MCSchedModel &SM = STI->getSchedModel();
-    int windowWidth = WindowWidth;
-    if (WindowWidth.getNumOccurrences() == 0 && !MCPU.empty()) {
-        if (SM.MicroOpBufferSize > 0) {
-            windowWidth = SM.MicroOpBufferSize;
-        } else {
-            windowWidth = SM.IssueWidth * SM.MispredictPenalty;
-        }
-    }
-    PO.MicroOpQueueSize = SM.MicroOpBufferSize;
-    PO.DispatchWidth = SM.IssueWidth;
-    if (STI->getCPU() == "cortex-a76" || STI->getCPU() == "cortex-a76ae" || STI->getCPU() == "neoverse-n1") {
-        PO.DispatchWidth = 8;
-    } else if (STI->getCPU() == "cortex-a78" || STI->getCPU() == "cortex-a78ae" || STI->getCPU() == "cortex-a78c") {
-        PO.DispatchWidth = 12;
-    } else if (STI->getCPU() == "cortex-a710" || STI->getCPU() == "cortex-a715" || STI->getCPU() == "cortex-a720" || STI->getCPU() == "cortex-a720ae" || STI->getCPU() == "neoverse-n2") {
-        PO.DispatchWidth = 10;
-    } else if (STI->getCPU() == "cortex-x1" || STI->getCPU() == "cortex-x1c" || STI->getCPU() == "neoverse-v1") {
-        PO.DispatchWidth = 16;
-    }
-    PO.AssumeNoAlias = true;
-
-    uint64_t TargetAddress = 0;
-    if (!TargetAddressStr.empty()) {
-        TargetAddress = std::stoull(TargetAddressStr, nullptr, 16);
-    }
-
-    std::unique_ptr<MLPAnalyzer> Analyzer = MLPAnalyzer::create(*STI);
 
     std::printf("start_address,end_address,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
-    FunctionBoundaries FunctionRanges = collectFunctionBoundaries(Obj);
+    FunctionBoundaries FunctionRanges = collectFunctionBoundaries(*Obj);
 
-    for (const SectionRef &Section : Obj.sections()) {
+    for (const SectionRef &Section : Obj->sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
 
         if (auto NameOrErr = Section.getName()) {
@@ -187,12 +74,12 @@ int main(int argc, char **argv) {
             }
         }
 
-        auto SectionInstrs = disassembleTextSection(Section, *DisAsm, *MCII, MCIA.get());
+        auto SectionInstrs = disassembleTextSection(Section, *TI.DisAsm, *TI.MCII, TI.MCIA.get());
         if (SectionInstrs.empty()) continue;
 
         std::vector<McaRegion> regions;
 
-        walkRegions(SectionInstrs, FunctionRanges, LoopMaxInstrs, BBMaxInstrs, NestLimitOuter, NestLimitInner,
+        walkRegions(SectionInstrs, FunctionRanges, opts::LoopMaxInstrs, opts::BBMaxInstrs, opts::NestLimitOuter, opts::NestLimitInner,
                     [&](const RegionSpan &Span) {
                         McaRegion r;
                         r.Start = Span.Start;
@@ -219,31 +106,31 @@ int main(int argc, char **argv) {
         computePostDominatorOverwrites(SectionInstrs, FunctionRanges, regions, overwrite_map);
 
         auto runMca = [&](McaRegion &r) {
-        uint64_t regionAddr = r.StartAddr;
-        if (TargetAddress != 0 && regionAddr != TargetAddress) return;
-        
-        auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size);
-        if (isAllNopRegion(region_instrs, *MCII)) return;
+            uint64_t regionAddr = r.StartAddr;
+            if (TI.TargetAddress != 0 && regionAddr != TI.TargetAddress) return;
+            
+            auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size);
+            if (isAllNopRegion(region_instrs, *TI.MCII)) return;
 
-        bool ignore = false;
-            if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
+            bool ignore = false;
+            if (opts::IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
                 ignore = true;
-            } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Default) {
+            } else if (opts::IgnoreLoopCarried == IgnoreLoopCarriedMode::Default) {
                 ignore = !r.IsLoop;
-            } else if (IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
+            } else if (opts::IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
                 ignore = false;
             }
             bool mlpLoop = false;
-            if (MlpWindowLoop == MlpWindowLoopMode::Force) {
+            if (opts::MlpWindowLoop == MlpWindowLoopMode::Force) {
                 mlpLoop = true;
-            } else if (MlpWindowLoop == MlpWindowLoopMode::Default) {
+            } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Default) {
                 mlpLoop = r.IsLoop;
-            } else if (MlpWindowLoop == MlpWindowLoopMode::Disable) {
+            } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Disable) {
                 mlpLoop = false;
             }
-            r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size), *STI, *MCII,
-                                         *MRI, MCIA.get(), PO, Iterations, windowWidth, DepKind, AssignKind,
-                                         *Analyzer, ignore, OverrideLoadLatency, mlpLoop);
+            r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size), *TI.STI, *TI.MCII,
+                                         *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
+                                         *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
             r.Valid = r.Metrics.Valid;
         };
 
