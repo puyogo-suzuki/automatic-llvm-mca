@@ -22,26 +22,7 @@
 using namespace llvm;
 using namespace llvm::object;
 
-struct ScopedSilence {
-    int devNull = -1;
-    int oldStderr = -1;
-    bool active = false;
-    ScopedSilence() {
-        devNull = open("/dev/null", O_WRONLY);
-        if (devNull != -1) {
-            oldStderr = dup(STDERR_FILENO);
-            if (dup2(devNull, STDERR_FILENO) != -1) active = true;
-        }
-    }
-    ~ScopedSilence() {
-        if (active) {
-            errs().flush();
-            dup2(oldStderr, STDERR_FILENO);
-        }
-        if (oldStderr != -1) close(oldStderr);
-        if (devNull != -1) close(devNull);
-    }
-};
+
 
 static void printResultCsv(const Instr &First, const Instr &Last, size_t Length, bool isLoop, const McaMetrics &M) {
     std::printf("0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f\n", First.Addr, Last.Addr,

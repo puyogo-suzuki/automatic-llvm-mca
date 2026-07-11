@@ -136,6 +136,8 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
         bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
         unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
         
+
+
         bool is_hit = false;
         if (is_load) {
             if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
@@ -392,7 +394,23 @@ std::vector<MLPInstInfo> buildInstInfos(
         MemAccessInfo mem_info = Analyzer->getMemAccessInfo(Inst, MCID, MRI, MCII);
         inst_infos[i].set_is_load(mem_info.is_load());
         inst_infos[i].set_is_store(mem_info.is_store());
-        inst_infos[i].set_is_call(MCID.isCall());
+        bool is_call = MCID.isCall();
+        if (!is_call) {
+            StringRef name = MCII.getName(Inst.getOpcode());
+            if (name.equals_insensitive("JAL") || name.equals_insensitive("JALR")) {
+                if (Inst.getNumOperands() > 0 && Inst.getOperand(0).isReg()) {
+                    unsigned rd = Inst.getOperand(0).getReg();
+                    if (const char* rd_name = MRI.getName(rd)) {
+                        StringRef rdn(rd_name);
+                        if (rdn.equals_insensitive("x1") || rdn.equals_insensitive("x5") ||
+                            rdn.equals_insensitive("ra") || rdn.equals_insensitive("t0")) {
+                            is_call = true;
+                        }
+                    }
+                }
+            }
+        }
+        inst_infos[i].set_is_call(is_call);
 
         inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
         inst_infos[i].mem_info = mem_info;
@@ -537,14 +555,10 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
             unsigned index_reg = Inst.getOperand(i+2).getReg();
             if (Inst.getOperand(i+3).isImm()) {
                 info.offset = Inst.getOperand(i+3).getImm();
-                if (index_reg == 0) {
-                    info.set_is_constant_offset(true);
-                }
+                info.set_is_constant_offset(true);
             } else {
                 info.set_is_pc_relative(true);
-                if (index_reg == 0) {
-                    info.set_is_constant_offset(true);
-                }
+                info.set_is_constant_offset(true);
             }
             info.set_valid(true);
             break;

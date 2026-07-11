@@ -183,3 +183,5 @@ Not all memory loads translate to concurrent outstanding memory requests. The an
         $$\text{CacheLine} = \frac{\text{Offset}}{64}$$
     *   If a base register and cache line pair `(base_reg, cache_line)` has already been seen in the current window, the load is classified as a spatial cache hit and excluded from the outstanding MLP load count.
     *   **Call-Instruction Invalidation**: If a function call instruction (`bl`) is encountered in the window, we assume all register dependencies and active cache line tracking states are invalidated (since the callee may modify return registers and memory states).
+3.  **No-Load Default Specification**:
+    If a basic block or loop region contains no eligible memory load instructions (or is an empty instruction sequence), both $MLP$ and $MLP_R$ values default to $1.0$ (representing the sequential memory baseline).

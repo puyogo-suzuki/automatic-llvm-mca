@@ -129,6 +129,7 @@ int main(int argc, char **argv) {
             } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Disable) {
                 mlpLoop = false;
             }
+            ScopedSilence silence;
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *TI.STI, *TI.MCII,
                                            *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
                                            *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);

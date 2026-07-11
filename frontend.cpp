@@ -65,7 +65,9 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
         WithColor::error() << "Failed to open binary: " << toString(BinaryOrErr.takeError()) << "\n";
         return false;
     }
-    Obj = std::move(BinaryOrErr.get().takeBinary().first);
+    auto Pair = BinaryOrErr.get().takeBinary();
+    Obj = std::move(Pair.first);
+    TI.BinaryBuffer = std::move(Pair.second);
 
     Triple TT = Obj->makeTriple();
     if (!opts::MTriple.empty()) TT = Triple(opts::MTriple);
@@ -128,4 +130,25 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     TI.Analyzer = MLPAnalyzer::create(*TI.STI);
 
     return true;
+}
+
+#include <fcntl.h>
+#include <unistd.h>
+#include "llvm/Support/raw_ostream.h"
+
+ScopedSilence::ScopedSilence() {
+    devNull = ::open("/dev/null", O_WRONLY);
+    if (devNull != -1) {
+        oldStderr = dup(STDERR_FILENO);
+        if (dup2(devNull, STDERR_FILENO) != -1) active = true;
+    }
+}
+
+ScopedSilence::~ScopedSilence() {
+    if (active) {
+        llvm::errs().flush();
+        dup2(oldStderr, STDERR_FILENO);
+    }
+    if (oldStderr != -1) ::close(oldStderr);
+    if (devNull != -1) ::close(devNull);
 }

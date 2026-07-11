@@ -15,6 +15,8 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/MC/TargetRegistry.h"
 
+#include "llvm/Support/MemoryBuffer.h"
+
 struct TargetInfo {
     std::string TripleName;
     std::string CPU;
@@ -31,6 +33,7 @@ struct TargetInfo {
     int WindowWidthVal = 4;
     uint64_t TargetAddress = 0;
     std::unique_ptr<MLPAnalyzer> Analyzer;
+    std::unique_ptr<llvm::MemoryBuffer> BinaryBuffer;
     
     TargetInfo() : PO(0, 0, 0, 0, 0, 0, true) {}
 };
@@ -60,5 +63,13 @@ namespace opts {
 bool initializeFrontend(int argc, char **argv, const char *Overview,
                         std::unique_ptr<llvm::object::ObjectFile> &Obj,
                         TargetInfo &TI);
+
+struct ScopedSilence {
+    int devNull = -1;
+    int oldStderr = -1;
+    bool active = false;
+    ScopedSilence();
+    ~ScopedSilence();
+};
 
 #endif
