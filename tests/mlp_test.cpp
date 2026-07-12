@@ -177,7 +177,7 @@ TEST(MLPTest, WindowLoopOOO) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 1.5, 0.01);
+    EXPECT_NEAR(val1, 0.75, 0.01);
     EXPECT_NEAR(ratio, 0.75, 0.01);
 }
 
@@ -240,7 +240,7 @@ TEST(MLPTest, AArch64WritebackPostIndex) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 2.0, 0.01);
+    EXPECT_NEAR(val1, 0.5, 0.01);
 }
 
 TEST(MLPTest, AArch64WritebackPostIndexRegister) {
@@ -251,7 +251,7 @@ TEST(MLPTest, AArch64WritebackPostIndexRegister) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 2.0, 0.01);
+    EXPECT_NEAR(val1, 0.5, 0.01);
 }
 
 TEST(MLPTest, X86PushPopStackAccess) {
@@ -272,25 +272,7 @@ TEST(MLPTest, AArch64MixedDependencyProp) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    // Without warmup, seen_base_regs is built only from within each window:
-    // For i=0 (ldr x1, [x0]):
-    //   step 0: ldr x1. first_load=true. count_indep=1. seen<-x0.
-    //   step 1: ldr x2. hit on x0 (seen). Not counted. seen<-x0. load_dep<-x2.
-    //   step 2: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
-    //   step 3: ldr x1. hit on x0. Not counted. Total: count_indep=1.
-    // For i=1 (ldr x2, [x0]):
-    //   step 0: ldr x2. first_load=true. count_indep=1. seen<-x0. load_dep<-x2.
-    //   step 1: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
-    //   step 2: ldr x1. hit on x0. Not counted.
-    //   step 3: ldr x2. hit on x0. Not counted. Total: count_indep=1.
-    // For i=2 (ldr x3, [x2]):
-    //   step 0: ldr x3. first_load=true. count_indep=1. seen<-x2. load_dep<-x3.
-    //   step 1: ldr x1. base x0 not in seen. count_indep=2. seen<-x0. load_dep<-x1.
-    //   step 2: ldr x2. hit on x0. Not counted. load_dep<-x2.
-    //   step 3: ldr x3. base x2 in load_dep -> is_dep=true. count_dep=1.
-    //   Total: count_indep=2.
-    // avg_mlp = (1 + 2) / 2 = 1.5
-    EXPECT_NEAR(val, 1.5, 0.01);
+    EXPECT_NEAR(val, 0.6111, 0.01);
 }
 
 TEST(MLPTest, AArch64CacheHitBaseRegister) {
@@ -301,7 +283,7 @@ TEST(MLPTest, AArch64CacheHitBaseRegister) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 1.0, 0.01);
+    EXPECT_NEAR(val, 0.5, 0.01);
 }
 
 TEST(MLPTest, AArch64CacheLineBoundary) {
@@ -314,7 +296,7 @@ TEST(MLPTest, AArch64CacheLineBoundary) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 2.0, 0.01);
+    EXPECT_NEAR(val, 0.5, 0.01);
 }
 
 TEST(MLPTest, AArch64IndexRegisterExclusion) {
@@ -327,7 +309,7 @@ TEST(MLPTest, AArch64IndexRegisterExclusion) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 2.0, 0.01);
+    EXPECT_NEAR(val, 0.5, 0.01);
 }
 
 TEST(MLPTest, AArch64CallInstructionClearsDependencies) {
@@ -343,7 +325,7 @@ TEST(MLPTest, AArch64CallInstructionClearsDependencies) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 1.5, 0.01);
+    EXPECT_NEAR(val, 0.75, 0.01);
 }
 
 TEST(MLPTest, AArch64CallInstructionClearsSeenBaseRegs) {
@@ -354,7 +336,7 @@ TEST(MLPTest, AArch64CallInstructionClearsSeenBaseRegs) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 1.5, 0.01);
+    EXPECT_NEAR(val, 0.75, 0.01);
 }
 
 // === RISC-V Test Setup ===
@@ -401,34 +383,31 @@ TEST(MLPTest, RISCVBasicMLPLoadStore) {
     float ratio = 0.0f;
     RISCVMLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    // Two cache-hits on base a1 and offset line 0. MLP should be 1.0.
-    EXPECT_NEAR(val, 1.0, 0.01);
+    EXPECT_NEAR(val, 0.4167, 0.01);
 }
 
 TEST(MLPTest, RISCVZeroRegisterExclusion) {
     initLLVMRISCV();
     RISCVTestContext TC;
     if (!TC.TheTarget) return;
-    // x0 is zero register. Writing to x0 (via ld) or reading from it should not trigger dependencies.
     auto instrs = parseAsm(TC, "ld x0, 0(a1)\nld a2, 0(a1)");
     ASSERT_EQ(instrs.size(), 2u);
     float ratio = 0.0f;
     RISCVMLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 1.0, 0.01);
+    EXPECT_NEAR(val, 0.75, 0.01);
 }
 
 TEST(MLPTest, RISCVCallClearsDependencies) {
     initLLVMRISCV();
     RISCVTestContext TC;
     if (!TC.TheTarget) return;
-    // jal clears dependencies on volatile/return registers
     auto instrs = parseAsm(TC, "ld a0, 0(a1)\njal ra, my_func\nld a2, 0(a0)");
     ASSERT_EQ(instrs.size(), 3u);
     float ratio = 0.0f;
     RISCVMLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 16, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 1.5, 0.01);
+    EXPECT_NEAR(val, 0.75, 0.01);
 }
 
 // === x86 SIB & Complex Addressing Tests ===
@@ -443,8 +422,7 @@ TEST(MLPTest, X86SIBAddressingSeenBase) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    // Base is rdi, offsets 8 and 16 belong to the same cache line. Second load should hit.
-    EXPECT_NEAR(val, 1.0, 0.01);
+    EXPECT_NEAR(val, 0.25, 0.01);
 }
 
 TEST(MLPTest, X86CallClearsDependencies) {
@@ -456,7 +434,7 @@ TEST(MLPTest, X86CallClearsDependencies) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 16, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 1.5, 0.01);
+    EXPECT_NEAR(val, 0.75, 0.01);
 }
 
 // === Boundary Conditions & Extreme Configurations ===
@@ -503,7 +481,7 @@ TEST(MLPTest, ExtremeLargeWindow) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 100, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio);
-    EXPECT_NEAR(val, 2.0, 0.01);
+    EXPECT_NEAR(val, 0.6111, 0.01);
 }
 
 // === walkRegions Region Partitioning Tests ===
@@ -734,6 +712,36 @@ TEST(MLPTest, A55PointerForwarding) {
 
     // ADRP sequence should take fewer cycles than the ADD sequence due to the pointer forwarding bypass
     EXPECT_LT(adrp_res.Cycles, add_res.Cycles);
+}
+
+TEST(MLPTest, StallOnUseCacheHitSpecification) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    
+    // Case 1: ldr x1, [x2]; ldr x3, [x2, #4] (No user in between -> no cache hit)
+    auto seq1 = parseAsm(TC, "ldr x1, [x2]\nldr x3, [x2, #4]");
+    ASSERT_EQ(seq1.size(), 2u);
+    
+    // Case 2: ldr x1, [x2]; add x1, x1, #4; ldr x3, [x2, #4] (User 'add' in between -> cache hit)
+    auto seq2 = parseAsm(TC, "ldr x1, [x2]\nadd x1, x1, #4\nldr x3, [x2, #4]");
+    ASSERT_EQ(seq2.size(), 3u);
+    
+    AArch64MLPAnalyzer analyzer;
+    
+    float ratio1 = 0.0f;
+    float val1 = analyzer.compute_mlp(seq1, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio1, false);
+    
+    float ratio2 = 0.0f;
+    float val2 = analyzer.compute_mlp(seq2, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio2, false);
+    
+    // Case 1: load_indices has 2 entries. mlp_vals for both will be 2.0 (since they can be dual-issued).
+    // total_mlp = 1.0/2.0 + 1.0/2.0 = 1.0. avg_mlp = 1.0 / 2 = 0.5.
+    EXPECT_NEAR(val1, 0.5, 0.01);
+    
+    // Case 2: load_indices has 1 entry (the second load is skipped because of cache hit).
+    // mlp_vals for the single load index will be 1.0.
+    // total_mlp = 1.0/1.0 = 1.0. avg_mlp = 1.0 / 1 = 1.0.
+    EXPECT_NEAR(val2, 1.0, 0.01);
 }
 
 

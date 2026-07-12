@@ -272,10 +272,9 @@ void assign_mlp_score(std::vector<float> &mlp_vals, const std::vector<MLPInstInf
 }  // namespace
 
 bool SeenBaseRegs::test(unsigned reg, int64_t cache_line) const {
-    for (const auto &pair : data) {
-        if (pair.first == reg && pair.second == cache_line) {
+    for (const auto &el : data) {
+        if (el.base_reg == reg && el.cache_line == cache_line && el.is_completed)
             return true;
-        }
     }
     return false;
 }
@@ -285,14 +284,19 @@ void SeenBaseRegs::set(unsigned reg, int64_t cache_line, const llvm::MCRegisterI
     for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
         unsigned alias = *AI;
         bool found = false;
-        for (const auto &pair : data) {
-            if (pair.first == alias && pair.second == cache_line) {
+        for (auto &el : data) {
+            if (el.base_reg == alias && el.cache_line == cache_line) {
+                el.is_completed = true;
                 found = true;
                 break;
             }
         }
         if (!found) {
-            data.push_back({alias, cache_line});
+            Element el;
+            el.base_reg = alias;
+            el.cache_line = cache_line;
+            el.is_completed = true;
+            data.push_back(el);
         }
     }
 }
@@ -302,14 +306,66 @@ void SeenBaseRegs::reset(unsigned reg, const llvm::MCRegisterInfo &MRI) {
     for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
         unsigned alias = *AI;
         data.erase(std::remove_if(data.begin(), data.end(),
-                                  [alias](const std::pair<unsigned, int64_t> &p) {
-                                      return p.first == alias;
+                                  [alias](const Element &el) {
+                                      return el.base_reg == alias;
                                   }),
                    data.end());
     }
 }
 
+void SeenBaseRegs::add_load(unsigned reg, int64_t cache_line, const llvm::SmallVectorImpl<unsigned> &dests, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        bool found = false;
+        for (auto &el : data) {
+            if (el.base_reg == alias && el.cache_line == cache_line) {
+                for (unsigned dest : dests) {
+                    for (llvm::MCRegAliasIterator DAI(dest, &MRI, true); DAI.isValid(); ++DAI) {
+                        unsigned d_alias = *DAI;
+                        if (std::find(el.pending_dest_regs.begin(), el.pending_dest_regs.end(), d_alias) == el.pending_dest_regs.end()) {
+                            el.pending_dest_regs.push_back(d_alias);
+                        }
+                    }
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            Element el;
+            el.base_reg = alias;
+            el.cache_line = cache_line;
+            el.is_completed = false;
+            for (unsigned dest : dests) {
+                for (llvm::MCRegAliasIterator DAI(dest, &MRI, true); DAI.isValid(); ++DAI) {
+                    el.pending_dest_regs.push_back(*DAI);
+                }
+            }
+            data.push_back(el);
+        }
+    }
+}
+
+void SeenBaseRegs::check_uses(const llvm::SmallVectorImpl<unsigned> &uses, const llvm::MCRegisterInfo &MRI) {
+    if (uses.empty()) return;
+    for (unsigned use : uses) {
+        for (llvm::MCRegAliasIterator AI(use, &MRI, true); AI.isValid(); ++AI) {
+            unsigned alias = *AI;
+            for (auto &el : data) {
+                if (el.is_completed) continue;
+                if (std::find(el.pending_dest_regs.begin(), el.pending_dest_regs.end(), alias) != el.pending_dest_regs.end()) {
+                    el.is_completed = true;
+                    el.pending_dest_regs.clear();
+                }
+            }
+        }
+    }
+}
+
 void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_regs, const llvm::MCRegisterInfo &MRI) {
+    seen_base_regs.check_uses(inst_info.io_regs.inputs, MRI);
+
     bool is_valid_load = inst_info.is_load() && inst_info.mem_info.valid();
     unsigned base_reg = is_valid_load ? inst_info.mem_info.base_reg : 0;
     if (is_valid_load && base_reg != 0 && inst_info.mem_info.is_constant_offset()) {
@@ -319,7 +375,7 @@ void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_re
                 if (*AI == reg) goto end_base_regs_set;
             }
         }
-        seen_base_regs.set(base_reg, cache_line, MRI);
+        seen_base_regs.add_load(base_reg, cache_line, inst_info.io_regs.outputs, MRI);
     }
   end_base_regs_set:
     for (unsigned reg : inst_info.io_regs.outputs) {
@@ -833,7 +889,10 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         return 1.0f;
     }
     double total_mlp = 0;
-    for (int i : load_indices) total_mlp += mlp_vals[i];
+    if(DepKind == DependencyKind::OOO)
+        for (int i : load_indices) total_mlp += 1.0 / mlp_vals[i];
+    else
+        for (int i : load_indices) total_mlp += mlp_vals[i];
     float avg_mlp = (float)(total_mlp / load_indices.size());
 
     double total_mlp_r = 0;

@@ -101,10 +101,18 @@ struct MLPInstInfo {
 #include "llvm/ADT/SmallVector.h"
 
 struct SeenBaseRegs {
-    llvm::SmallVector<std::pair<unsigned, int64_t>, 16> data;
+    struct Element {
+        unsigned base_reg;
+        int64_t cache_line;
+        bool is_completed;
+        llvm::SmallVector<unsigned, 4> pending_dest_regs;
+    };
+    llvm::SmallVector<Element, 16> data;
     bool test(unsigned reg, int64_t cache_line) const;
     void set(unsigned reg, int64_t cache_line, const llvm::MCRegisterInfo &MRI);
     void reset(unsigned reg, const llvm::MCRegisterInfo &MRI);
+    void add_load(unsigned reg, int64_t cache_line, const llvm::SmallVectorImpl<unsigned> &dests, const llvm::MCRegisterInfo &MRI);
+    void check_uses(const llvm::SmallVectorImpl<unsigned> &uses, const llvm::MCRegisterInfo &MRI);
 };
 
 class MLPAnalyzer;
