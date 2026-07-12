@@ -160,6 +160,13 @@ To prevent long instruction sequences from being completely skipped when size li
 *   If a loop exceeds the maximum loop size limit (`loop-max-instrs`), it is excluded from the loop analysis but its instructions are fallback-evaluated as basic blocks.
 *   If a basic block exceeds the maximum basic block size limit (`bb-max-instrs`), instead of ignoring the block, the analyzer dynamically splits it into multiple contiguous sub-blocks (chunks) of size `bb-max-instrs` (with the final chunk containing the remainder). This ensures that every instruction in the binary is covered by the performance evaluation.
 
+### E. CFG and Post-Dominator Based Region Splitting
+Instead of simple linear scanning, we build a Control Flow Graph (CFG) of each function to perform precise analysis:
+1.  **CFG Construction**: We divide the instruction vector into disjoint Basic Blocks (BBs) based on branch targets and terminators (e.g. conditional branches, returns, size limits). We then add directed edges between BBs to construct the CFG.
+2.  **Natural Loop Detection**: We run DFS to find back-edges. For each back-edge `U -> V` where `V` is an active ancestor, we collect all nodes reachable from `U` to `V` without going through `V` to identify the Natural Loop nodes. We build a Loop Nest Tree to filter loops by nesting depth (`depth < nestLimitOuter`) and height (`height < nestLimitInner`).
+3.  **Post-Dominator Analysis**: We compute the Immediate Post-dominator (`ipdom`) relation for all CFG nodes using the Lengauer-Tarjan algorithm on the reverse CFG (starting from a virtual exit node).
+4.  **Loop Merging**: If a basic block node `U` is not part of a valid loop but is post-dominated by a loop's header, it is classified as a pre-header or post-exit block that will always execute in tandem with the loop. Rather than processing it independently, `U` is merged into the loop, and is not emitted as a standalone basic block. This eliminates redundant basic block simulations.
+
 ---
 
 ## 3. Memory Level Parallelism (MLP) Calculation Method

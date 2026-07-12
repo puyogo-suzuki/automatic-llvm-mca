@@ -889,11 +889,8 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
         return 1.0f;
     }
     double total_mlp = 0;
-    if(DepKind == DependencyKind::OOO)
-        for (int i : load_indices) total_mlp += 1.0 / mlp_vals[i];
-    else
-        for (int i : load_indices) total_mlp += mlp_vals[i];
-    float avg_mlp = (float)(total_mlp / load_indices.size());
+    for (int i : load_indices) total_mlp += 1.0 / mlp_vals[i];
+    float avg_mlp = (float)(1 / (total_mlp / load_indices.size()));
 
     double total_mlp_r = 0;
     int count_r = 0;

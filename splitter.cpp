@@ -2,40 +2,466 @@
 #include <algorithm>
 #include <optional>
 #include <vector>
-
+#include <set>
+#include <map>
+#include <functional>
 #include "llvm/ADT/ArrayRef.h"
 
 using namespace llvm;
 
 namespace {
 
-bool containsAddress(const FunctionBoundaries &Boundaries, uint64_t Addr) {
-    auto It = Boundaries.upper_bound(Addr);
-    if (It == Boundaries.begin()) return false;
-    --It;
-    return Addr >= It->first && Addr < It->second;
-}
+// コントロールフローエッジ用の構造体
+struct CFGNode {
+    size_t id;
+    size_t start_idx;
+    size_t size;
+    uint64_t start_addr;
+    uint64_t end_addr;
+    std::vector<size_t> succs;
+    std::vector<size_t> preds;
+};
 
-bool sameFunction(const FunctionBoundaries &Boundaries, uint64_t A, uint64_t B) {
-    if (Boundaries.empty()) return true;
-    auto ItA = Boundaries.upper_bound(A);
-    if (ItA == Boundaries.begin()) return false;
-    --ItA;
-    if (A < ItA->first || A >= ItA->second) return false;
+void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMaxInstrs, int bbMaxInstrs, int nestLimitOuter, int nestLimitInner,
+                     const std::function<void(const RegionSpan &)> &onLoop,
+                     const std::function<void(const RegionSpan &)> &onBasicBlock) {
+    size_t n = funcInstrs.size();
+    if (n == 0) return;
 
-    auto ItB = Boundaries.upper_bound(B);
-    if (ItB == Boundaries.begin()) return false;
-    --ItB;
-    if (B < ItB->first || B >= ItB->second) return false;
+    // 1. 各命令がBBの境界（カットポイント）であるかを判定する
+    std::vector<bool> cuts(n, false);
+    cuts[0] = true; // 関数の開始は必ずBBの開始
 
-    return ItA->first == ItB->first;
-}
+    // 分岐ターゲットアドレスの集合を特定する
+    std::set<uint64_t> targets;
+    for (size_t i = 0; i < n; ++i) {
+        const auto &I = funcInstrs[i];
+        if (I.IsBranch && I.BranchTarget != 0) {
+            targets.insert(I.BranchTarget);
+        }
+    }
 
-int64_t findIndex(ArrayRef<Instr> instrs, uint64_t addr) {
-    auto it = std::lower_bound(instrs.begin(), instrs.end(), addr,
-                               [](const Instr &a, uint64_t val) { return a.Addr < val; });
-    if (it != instrs.end() && it->Addr == addr) return std::distance(instrs.begin(), it);
-    return -1;
+    // ターゲットに一致する命令インデックスをカットポイントにする
+    for (size_t i = 0; i < n; ++i) {
+        if (targets.count(funcInstrs[i].Addr)) {
+            cuts[i] = true;
+        }
+        // 分岐、コール、リターン命令の直後はBBの切れ目
+        if (funcInstrs[i].IsBranch || funcInstrs[i].IsReturn || funcInstrs[i].EndsBB) {
+            if (i + 1 < n) {
+                cuts[i + 1] = true;
+            }
+        }
+    }
+
+    // BBの切り出しと、必要に応じた bbMaxInstrs 分割
+    std::vector<CFGNode> nodes;
+    size_t start = 0;
+    auto addNode = [&](size_t s, size_t sz) {
+        CFGNode node;
+        node.id = nodes.size();
+        node.start_idx = s;
+        node.size = sz;
+        node.start_addr = funcInstrs[s].Addr;
+        node.end_addr = funcInstrs[s + sz - 1].Addr + 4;
+        nodes.push_back(node);
+    };
+
+    for (size_t i = 1; i < n; ++i) {
+        if (cuts[i]) {
+            size_t sz = i - start;
+            if (bbMaxInstrs > 0 && sz > static_cast<size_t>(bbMaxInstrs)) {
+                size_t rem = sz;
+                size_t curr = start;
+                while (rem > 0) {
+                    size_t chunk = std::min(rem, static_cast<size_t>(bbMaxInstrs));
+                    addNode(curr, chunk);
+                    curr += chunk;
+                    rem -= chunk;
+                }
+            } else {
+                addNode(start, sz);
+            }
+            start = i;
+        }
+    }
+    // 最後のBB
+    size_t sz = n - start;
+    if (bbMaxInstrs > 0 && sz > static_cast<size_t>(bbMaxInstrs)) {
+        size_t rem = sz;
+        size_t curr = start;
+        while (rem > 0) {
+            size_t chunk = std::min(rem, static_cast<size_t>(bbMaxInstrs));
+            addNode(curr, chunk);
+            curr += chunk;
+            rem -= chunk;
+        }
+    } else {
+        addNode(start, sz);
+    }
+
+    size_t num_nodes = nodes.size();
+    if (num_nodes == 0) return;
+
+    // 2. CFGエッジの構築
+    std::map<uint64_t, size_t> addr_to_node;
+    for (size_t i = 0; i < num_nodes; ++i) {
+        addr_to_node[nodes[i].start_addr] = i;
+    }
+
+    auto get_node_by_addr = [&](uint64_t addr) -> std::optional<size_t> {
+        auto it = addr_to_node.find(addr);
+        if (it != addr_to_node.end()) return it->second;
+        auto it_upper = addr_to_node.upper_bound(addr);
+        if (it_upper != addr_to_node.begin()) {
+            --it_upper;
+            size_t idx = it_upper->second;
+            if (addr >= nodes[idx].start_addr && addr < nodes[idx].end_addr) {
+                return idx;
+            }
+        }
+        return std::nullopt;
+    };
+
+    for (size_t u = 0; u < num_nodes; ++u) {
+        const auto &last_instr = funcInstrs[nodes[u].start_idx + nodes[u].size - 1];
+        std::vector<size_t> succs;
+        if (last_instr.IsBranch) {
+            if (last_instr.BranchTarget != 0) {
+                if (auto target_id = get_node_by_addr(last_instr.BranchTarget)) {
+                    succs.push_back(*target_id);
+                }
+            }
+        }
+        if (!last_instr.IsUnconditionalBranch && !last_instr.IsReturn) {
+            if (u + 1 < num_nodes) {
+                succs.push_back(u + 1);
+            }
+        }
+        std::sort(succs.begin(), succs.end());
+        succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
+        nodes[u].succs = succs;
+        for (size_t v : succs) {
+            nodes[v].preds.push_back(u);
+        }
+    }
+
+    // 3. EXITノードの作成 (ID = num_nodes)
+    size_t virtual_exit = num_nodes;
+    std::vector<std::vector<size_t>> successors_rev(num_nodes + 1);
+    std::vector<std::vector<size_t>> predecessors_rev(num_nodes + 1);
+
+    for (size_t u = 0; u < num_nodes; ++u) {
+        for (size_t v : nodes[u].succs) {
+            successors_rev[v].push_back(u);
+            predecessors_rev[u].push_back(v);
+        }
+        const auto &last_instr = funcInstrs[nodes[u].start_idx + nodes[u].size - 1];
+        if (nodes[u].succs.empty() || last_instr.IsReturn) {
+            successors_rev[virtual_exit].push_back(u);
+            predecessors_rev[u].push_back(virtual_exit);
+        }
+    }
+
+    // 4. Natural Loop の検出 (DFS)
+    std::vector<std::pair<size_t, size_t>> back_edges; // (latch, header)
+    std::vector<int> dfnum(num_nodes + 1, -1);
+    std::vector<bool> active(num_nodes + 1, false);
+    int dfs_count = 0;
+
+    std::function<void(size_t)> find_loops_dfs = [&](size_t u) {
+        dfnum[u] = dfs_count++;
+        active[u] = true;
+        for (size_t v : nodes[u].succs) {
+            if (dfnum[v] == -1) {
+                find_loops_dfs(v);
+            } else if (active[v]) {
+                back_edges.push_back({u, v});
+            }
+        }
+        active[u] = false;
+    };
+
+    find_loops_dfs(0);
+
+    struct LoopInfo {
+        size_t header;
+        std::vector<size_t> member_nodes;
+        size_t total_instrs;
+        size_t min_idx;
+        size_t max_idx;
+        bool valid;
+        int depth;
+        int height;
+    };
+    std::vector<LoopInfo> loops;
+
+    for (const auto &edge : back_edges) {
+        size_t latch = edge.first;
+        size_t header = edge.second;
+
+        std::vector<size_t> loop_nodes;
+        std::vector<size_t> stack;
+        std::set<size_t> visited;
+
+        loop_nodes.push_back(header);
+        visited.insert(header);
+
+        stack.push_back(latch);
+        loop_nodes.push_back(latch);
+        visited.insert(latch);
+
+        while (!stack.empty()) {
+            size_t curr = stack.back();
+            stack.pop_back();
+            if (curr == header) continue;
+            for (size_t p : nodes[curr].preds) {
+                if (visited.find(p) == visited.end()) {
+                    visited.insert(p);
+                    loop_nodes.push_back(p);
+                    stack.push_back(p);
+                }
+            }
+        }
+
+
+        size_t total_instrs = 0;
+        size_t min_idx = -1;
+        size_t max_idx = 0;
+        for (size_t node : loop_nodes) {
+            total_instrs += nodes[node].size;
+            min_idx = std::min(min_idx, nodes[node].start_idx);
+            max_idx = std::max(max_idx, nodes[node].start_idx + nodes[node].size - 1);
+        }
+
+        bool valid = true;
+        if (loopMaxInstrs > 0 && total_instrs > static_cast<size_t>(loopMaxInstrs)) {
+            valid = false;
+        }
+
+        LoopInfo loop;
+        loop.header = header;
+        loop.member_nodes = loop_nodes;
+        loop.total_instrs = total_instrs;
+        loop.min_idx = min_idx;
+        loop.max_idx = max_idx;
+        loop.valid = valid;
+        loop.depth = 0;
+        loop.height = 0;
+        loops.push_back(loop);
+    }
+
+    std::map<size_t, size_t> header_to_max_loop;
+    for (size_t i = 0; i < loops.size(); ++i) {
+        if (!loops[i].valid) continue;
+        size_t h = loops[i].header;
+        if (header_to_max_loop.find(h) == header_to_max_loop.end() || loops[i].total_instrs > loops[header_to_max_loop[h]].total_instrs) {
+            header_to_max_loop[h] = i;
+        }
+    }
+
+    std::vector<LoopInfo> valid_loops;
+    for (const auto &pair : header_to_max_loop) {
+        valid_loops.push_back(loops[pair.second]);
+    }
+
+    size_t num_loops = valid_loops.size();
+    std::vector<int> parent(num_loops, -1);
+    std::vector<std::vector<size_t>> children(num_loops);
+
+    auto is_subset = [](const std::vector<size_t> &a, const std::vector<size_t> &b) {
+        for (size_t x : a) {
+            if (std::find(b.begin(), b.end(), x) == b.end()) return false;
+        }
+        return true;
+    };
+
+    for (size_t i = 0; i < num_loops; ++i) {
+        int best_p = -1;
+        size_t best_p_size = -1;
+        for (size_t j = 0; j < num_loops; ++j) {
+            if (i == j) continue;
+            if (is_subset(valid_loops[i].member_nodes, valid_loops[j].member_nodes)) {
+                if (valid_loops[j].member_nodes.size() < best_p_size) {
+                    best_p = j;
+                    best_p_size = valid_loops[j].member_nodes.size();
+                }
+            }
+        }
+        parent[i] = best_p;
+        if (best_p != -1) {
+            children[best_p].push_back(i);
+        }
+    }
+
+    std::function<void(size_t, int)> calc_depth = [&](size_t idx, int d) {
+        valid_loops[idx].depth = d;
+        for (size_t child : children[idx]) {
+            calc_depth(child, d + 1);
+        }
+    };
+    for (size_t i = 0; i < num_loops; ++i) {
+        if (parent[i] == -1) {
+            calc_depth(i, 0);
+        }
+    }
+
+    std::function<int(size_t)> calc_height = [&](size_t idx) {
+        int h = 0;
+        for (size_t child : children[idx]) {
+            h = std::max(h, calc_height(child) + 1);
+        }
+        valid_loops[idx].height = h;
+        return h;
+    };
+    for (size_t i = 0; i < num_loops; ++i) {
+        if (parent[i] == -1) {
+            calc_height(i);
+        }
+    }
+
+    for (size_t i = 0; i < num_loops; ++i) {
+        if (nestLimitOuter > 0 && valid_loops[i].depth >= nestLimitOuter) {
+            valid_loops[i].valid = false;
+        }
+        if (nestLimitInner > 0 && valid_loops[i].height >= nestLimitInner) {
+            valid_loops[i].valid = false;
+        }
+    }
+
+    // 5. Post-dominator の算出 (Lengauer-Tarjan on reverse CFG)
+    std::vector<int> dfnum_rev(num_nodes + 1, -1);
+    std::vector<int> vertex_rev(num_nodes + 1, -1);
+    std::vector<int> parent_rev(num_nodes + 1, -1);
+    std::vector<int> semi_rev(num_nodes + 1, -1);
+    std::vector<int> dom_rev(num_nodes + 1, -1);
+    std::vector<int> ancestor_rev(num_nodes + 1, -1);
+    std::vector<int> label_rev(num_nodes + 1, -1);
+    std::vector<std::vector<int>> bucket_rev(num_nodes + 1);
+    int dfs_count_rev = 0;
+
+    std::function<void(int)> dfs_rev = [&](int u) {
+        dfnum_rev[u] = dfs_count_rev;
+        vertex_rev[dfs_count_rev] = u;
+        semi_rev[u] = dfs_count_rev;
+        label_rev[u] = u;
+        dfs_count_rev++;
+
+        for (size_t v : successors_rev[u]) {
+            if (dfnum_rev[v] == -1) {
+                parent_rev[v] = u;
+                dfs_rev(v);
+            }
+        }
+    };
+
+    dfs_rev(virtual_exit);
+
+    std::function<void(int)> compress_rev = [&](int v) {
+        int anc = ancestor_rev[v];
+        if (ancestor_rev[anc] != -1) {
+            compress_rev(anc);
+            if (semi_rev[label_rev[anc]] < semi_rev[label_rev[v]]) {
+                label_rev[v] = label_rev[anc];
+            }
+            ancestor_rev[v] = ancestor_rev[anc];
+        }
+    };
+
+    auto eval_rev = [&](int v) -> int {
+        if (ancestor_rev[v] == -1) {
+            return v;
+        }
+        compress_rev(v);
+        return label_rev[v];
+    };
+
+    auto link_rev = [&](int u, int v) {
+        ancestor_rev[v] = u;
+    };
+
+    for (int i = dfs_count_rev - 1; i >= 1; --i) {
+        int w = vertex_rev[i];
+        for (size_t v : predecessors_rev[w]) {
+            if (dfnum_rev[v] == -1) continue;
+            int u = eval_rev(v);
+            if (semi_rev[u] < semi_rev[w]) {
+                semi_rev[w] = semi_rev[u];
+            }
+        }
+        bucket_rev[vertex_rev[semi_rev[w]]].push_back(w);
+        link_rev(parent_rev[w], w);
+        int p = parent_rev[w];
+        for (int v : bucket_rev[p]) {
+            int u = eval_rev(v);
+            dom_rev[v] = (semi_rev[u] < semi_rev[v]) ? u : p;
+        }
+        bucket_rev[p].clear();
+    }
+
+    for (int i = 1; i < dfs_count_rev; ++i) {
+        int w = vertex_rev[i];
+        if (dom_rev[w] != vertex_rev[semi_rev[w]]) {
+            dom_rev[w] = dom_rev[dom_rev[w]];
+        }
+    }
+
+    // 6. 各基本ブロックがループに後支配（pdom）されてマージされるかの判定
+    std::vector<int> node_merged_to_loop(num_nodes, -1);
+    for (size_t u = 0; u < num_nodes; ++u) {
+        bool directly_in_loop = false;
+        for (size_t l = 0; l < num_loops; ++l) {
+            if (!valid_loops[l].valid) continue;
+            const auto &nodes_list = valid_loops[l].member_nodes;
+            if (std::find(nodes_list.begin(), nodes_list.end(), u) != nodes_list.end()) {
+                directly_in_loop = true;
+                break;
+            }
+        }
+        if (directly_in_loop) {
+            node_merged_to_loop[u] = -2;
+            continue;
+        }
+
+        int curr = dom_rev[u];
+        std::vector<size_t> pdom_loop_headers;
+        while (curr != -1 && curr != (int)virtual_exit) {
+            for (size_t l = 0; l < num_loops; ++l) {
+                if (valid_loops[l].valid && valid_loops[l].header == static_cast<size_t>(curr)) {
+                    pdom_loop_headers.push_back(curr);
+                }
+            }
+            curr = dom_rev[curr];
+        }
+
+        if (!pdom_loop_headers.empty()) {
+            int best_header = -1;
+            size_t min_loop_nodes_size = -1;
+            for (size_t h : pdom_loop_headers) {
+                for (size_t l = 0; l < num_loops; ++l) {
+                    if (valid_loops[l].valid && valid_loops[l].header == h) {
+                        if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
+                            min_loop_nodes_size = valid_loops[l].member_nodes.size();
+                            best_header = h;
+                        }
+                    }
+                }
+            }
+            node_merged_to_loop[u] = best_header;
+        }
+    }
+
+    // 7. 出力 (onLoop と onBasicBlock)
+    for (size_t i = 0; i < num_loops; ++i) {
+        if (!valid_loops[i].valid) continue;
+        onLoop(RegionSpan{globalOffset + valid_loops[i].min_idx, valid_loops[i].max_idx - valid_loops[i].min_idx + 1});
+    }
+
+    for (size_t u = 0; u < num_nodes; ++u) {
+        if (node_merged_to_loop[u] == -1) {
+            onBasicBlock(RegionSpan{globalOffset + nodes[u].start_idx, nodes[u].size});
+        }
+    }
 }
 
 } // namespace
@@ -45,7 +471,6 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
                  const std::function<void(const RegionSpan &)> &onBasicBlock) {
     if (instrs.empty()) return;
 
-    // Precompute which function boundary each instruction belongs to using 2-pointer scan
     std::vector<uint64_t> instrFuncEntry(instrs.size(), 0);
     if (!boundaries.empty()) {
         std::vector<std::pair<uint64_t, uint64_t>> bounds(boundaries.begin(), boundaries.end());
@@ -57,407 +482,33 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, i
             }
             if (b_idx < bounds.size() && addr >= bounds[b_idx].first && addr < bounds[b_idx].second) {
                 instrFuncEntry[i] = bounds[b_idx].first;
-            } else {
-                instrFuncEntry[i] = 0;
             }
         }
     }
 
-    auto sameFuncIdx = [&](size_t idxA, size_t idxB) {
-        if (boundaries.empty()) return true;
-        uint64_t fA = instrFuncEntry[idxA];
-        uint64_t fB = instrFuncEntry[idxB];
-        return fA != 0 && fA == fB;
-    };
-
-    // --- Precompute and memoize getLoopSpan for each instruction ---
-    std::vector<std::optional<RegionSpan>> loopSpans(instrs.size());
-    auto getLoopSpanMemoized = [&](size_t idx) -> std::optional<RegionSpan> {
-        const auto &I = instrs[idx];
-        if (!I.IsBranch || I.BranchTarget == 0 || I.BranchTarget >= I.Addr) return std::nullopt;
-
-        int64_t startIdx = findIndex(instrs, I.BranchTarget);
-        if (startIdx == -1) return std::nullopt;
-
-        const size_t start = static_cast<size_t>(startIdx);
-        const size_t size = idx - start + 1;
-        if (loopMaxInstrs > 0 && size > static_cast<size_t>(loopMaxInstrs)) return std::nullopt;
-        if (!sameFuncIdx(idx, start)) return std::nullopt;
-        return RegionSpan{start, size};
-    };
-
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        loopSpans[i] = getLoopSpanMemoized(i);
-    }
-
-    // Deduplicate: same start address -> keep only largest
-    std::map<size_t, size_t> largestLoopByStart;
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        if (const auto &loop = loopSpans[i]) {
-            auto it = largestLoopByStart.find(loop->Start);
-            if (it == largestLoopByStart.end() || loop->Size > it->second) {
-                largestLoopByStart[loop->Start] = loop->Size;
+    std::vector<std::pair<size_t, size_t>> funcSpans;
+    if (boundaries.empty()) {
+        funcSpans.push_back({0, instrs.size()});
+    } else {
+        size_t start = 0;
+        for (size_t i = 1; i < instrs.size(); ++i) {
+            if (instrFuncEntry[i] != instrFuncEntry[start]) {
+                if (instrFuncEntry[start] != 0) {
+                    funcSpans.push_back({start, i - start});
+                }
+                start = i;
             }
+        }
+        if (instrFuncEntry[start] != 0) {
+            funcSpans.push_back({start, instrs.size() - start});
         }
     }
 
-    // Calculate nesting depth (from outer to inner) and height (from inner to outer)
-    // Candidates are sorted by Start asc (keys of std::map)
-    std::vector<RegionSpan> candidates;
-    for (const auto &pair : largestLoopByStart) {
-        candidates.push_back({pair.first, pair.second});
-    }
-
-    std::vector<int> nestingDepth(candidates.size(), 0);
-    std::vector<int> parent(candidates.size(), -1);
-    std::vector<size_t> active_stack; // stack of candidate indices
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        const auto &curr = candidates[i];
-        while (!active_stack.empty()) {
-            const auto &top = candidates[active_stack.back()];
-            // Since candidates are sorted by Start ascending, top.Start <= curr.Start.
-            // curr is nested inside top if curr.Start + curr.Size <= top.Start + top.Size.
-            if (curr.Start + curr.Size <= top.Start + top.Size) {
-                nestingDepth[i] = active_stack.size();
-                parent[i] = active_stack.back();
-                break;
-            } else {
-                active_stack.pop_back();
-            }
-        }
-        active_stack.push_back(i);
-    }
-
-    // Calculate nesting height bottom-up (height = max path from leaf loops)
-    std::vector<int> nestingHeight(candidates.size(), 0);
-    for (int i = (int)candidates.size() - 1; i >= 0; --i) {
-        int p = parent[i];
-        if (p != -1) {
-            nestingHeight[p] = std::max(nestingHeight[p], nestingHeight[i] + 1);
-        }
-    }
-
-    // Build the final loop map: start_idx -> size, keeping those allowed by
-    // either nestLimitOuter (depth < nestLimitOuter) or nestLimitInner (height < nestLimitInner)
-    std::map<size_t, size_t> finalLoops;
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        bool ok = true;
-        if (nestLimitOuter > 0 && nestingDepth[i] >= nestLimitOuter) ok = false;
-        if (nestLimitInner > 0 && nestingHeight[i] >= nestLimitInner) ok = false;
-        if (ok) {
-            finalLoops[candidates[i].Start] = candidates[i].Size;
-        }
-    }
-
-    // --- Pass 1: mark which instructions belong to an allowed loop region ---
-    std::vector<bool> inLoop(instrs.size(), false);
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        if (const auto &loop = loopSpans[i]) {
-            auto it = finalLoops.find(loop->Start);
-            if (it != finalLoops.end() && loop->Size == it->second) {
-                for (size_t j = loop->Start; j < loop->Start + loop->Size; ++j) {
-                    inLoop[j] = true;
-                }
-            }
-        }
-    }
-
-    // --- Pass 2: emit loops ---
-    std::vector<bool> loopEmitted(instrs.size(), false);
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        if (const auto &loop = loopSpans[i]) {
-            if (!loopEmitted[loop->Start]) {
-                auto it = finalLoops.find(loop->Start);
-                if (it != finalLoops.end() && loop->Size == it->second) {
-                    if (onLoop) onLoop(*loop);
-                    // Emit once
-                    loopEmitted[loop->Start] = true;
-                }
-            }
-        }
-    }
-
-    // --- Emit basic blocks ---
-    size_t bbStart = 0;
-    bool inBB = false;
-
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        const auto &I = instrs[i];
-
-        if (inLoop[i]) {
-            if (inBB) {
-                size_t size = i - bbStart;
-                if (size > 0) {
-                    if (bbMaxInstrs <= 0) {
-                        if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
-                    } else {
-                        size_t rem = size;
-                        size_t curr = bbStart;
-                        while (rem > 0) {
-                            size_t chunk = std::min(rem, static_cast<size_t>(bbMaxInstrs));
-                            if (onBasicBlock) onBasicBlock(RegionSpan{curr, chunk});
-                            curr += chunk;
-                            rem -= chunk;
-                        }
-                    }
-                }
-                inBB = false;
-            }
-            continue;
-        }
-
-        if (!inBB) {
-            bbStart = i;
-            inBB = true;
-        }
-
-        bool endBB = I.EndsBB;
-        if (i + 1 < instrs.size()) {
-            if (inLoop[i + 1]) {
-                endBB = true;
-            } else if (!boundaries.empty() && !sameFuncIdx(i, i + 1)) {
-                endBB = true;
-            }
-        } else {
-            endBB = true;
-        }
-
-        if (endBB) {
-            size_t size = i - bbStart + 1;
-            if (bbMaxInstrs <= 0) {
-                if (onBasicBlock) onBasicBlock(RegionSpan{bbStart, size});
-            } else {
-                size_t rem = size;
-                size_t curr = bbStart;
-                while (rem > 0) {
-                    size_t chunk = std::min(rem, static_cast<size_t>(bbMaxInstrs));
-                    if (onBasicBlock) onBasicBlock(RegionSpan{curr, chunk});
-                    curr += chunk;
-                    rem -= chunk;
-                }
-            }
-            inBB = false;
-        }
-    }
-}
-
-void computePostDominatorOverwrites(llvm::ArrayRef<Instr> SectionInstrs,
-                                    const FunctionBoundaries &Boundaries,
-                                    std::vector<McaRegion> &regions,
-                                    std::map<size_t, size_t> &overwrite_map) {
-    if (regions.size() < 2) return;
-
-    std::map<uint64_t, std::vector<size_t>> func_groups;
-    for (size_t i = 0; i < regions.size(); ++i) {
-        uint64_t startAddr = regions[i].StartAddr;
-        uint64_t func_entry = 0;
-        auto It = Boundaries.upper_bound(startAddr);
-        if (It != Boundaries.end() && It != Boundaries.begin()) {
-            --It;
-            if (startAddr >= It->first && startAddr < It->second) {
-                func_entry = It->first;
-            }
-        }
-        func_groups[func_entry].push_back(i);
-    }
-
-    for (auto &pair : func_groups) {
-        auto &group = pair.second;
-        if (group.size() < 2) continue;
-
-        std::sort(group.begin(), group.end(), [&](size_t a, size_t b) {
-            return regions[a].StartAddr < regions[b].StartAddr;
-        });
-
-        std::map<uint64_t, size_t> addr_to_node;
-        for (size_t u = 0; u < group.size(); ++u) {
-            addr_to_node[regions[group[u]].StartAddr] = u;
-        }
-
-        size_t num_nodes = group.size();
-        std::vector<std::vector<size_t>> successors(num_nodes);
-        std::vector<std::vector<size_t>> predecessors(num_nodes);
-
-        for (size_t u = 0; u < num_nodes; ++u) {
-            size_t r_idx = group[u];
-            const auto &r = regions[r_idx];
-            const auto &last_instr = SectionInstrs[r.Start + r.Size - 1];
-            std::vector<uint64_t> targets;
-            
-            if (last_instr.IsBranch) {
-                if (last_instr.BranchTarget != 0) {
-                    targets.push_back(last_instr.BranchTarget);
-                }
-            }
-            if (!last_instr.IsUnconditionalBranch) {
-                if (r.Start + r.Size < SectionInstrs.size()) {
-                    targets.push_back(SectionInstrs[r.Start + r.Size].Addr);
-                }
-            }
-
-            for (uint64_t t : targets) {
-                auto it = addr_to_node.find(t);
-                if (it != addr_to_node.end()) {
-                    successors[u].push_back(it->second);
-                } else {
-                    // Binary search in group for v where regions[group[v]].StartAddr <= t < regions[group[v]].EndAddr
-                    auto it_bound = std::upper_bound(group.begin(), group.end(), t,
-                        [&](uint64_t val, size_t idx) {
-                            return val < regions[idx].StartAddr;
-                        });
-                    if (it_bound != group.begin()) {
-                        auto prev_it = std::prev(it_bound);
-                        size_t v = std::distance(group.begin(), prev_it);
-                        const auto &node = regions[*prev_it];
-                        if (t >= node.StartAddr && t < node.EndAddr) {
-                            successors[u].push_back(v);
-                        }
-                    }
-                }
-            }
-        }
-
-        for (size_t u = 0; u < num_nodes; ++u) {
-            for (size_t v : successors[u]) {
-                predecessors[v].push_back(u);
-            }
-        }
-
-        size_t num_nodes_extended = num_nodes + 1;
-        size_t virtual_exit = num_nodes;
-
-        std::vector<std::vector<size_t>> successors_rev(num_nodes_extended);
-        std::vector<std::vector<size_t>> predecessors_rev(num_nodes_extended);
-
-        for (size_t u = 0; u < num_nodes; ++u) {
-            for (size_t v : successors[u]) {
-                successors_rev[v].push_back(u);
-                predecessors_rev[u].push_back(v);
-            }
-            
-            const auto &r = regions[group[u]];
-            const auto &last_instr = SectionInstrs[r.Start + r.Size - 1];
-            bool is_exit = successors[u].empty() || last_instr.IsReturn;
-            
-            if (is_exit) {
-                successors_rev[virtual_exit].push_back(u);
-                predecessors_rev[u].push_back(virtual_exit);
-            }
-        }
-
-        std::vector<int> dfnum(num_nodes_extended, -1);
-        std::vector<int> vertex(num_nodes_extended, -1);
-        std::vector<int> parent(num_nodes_extended, -1);
-        std::vector<int> semi(num_nodes_extended, -1);
-        std::vector<int> dom(num_nodes_extended, -1);
-        std::vector<int> ancestor(num_nodes_extended, -1);
-        std::vector<int> label(num_nodes_extended, -1);
-        std::vector<std::vector<int>> bucket(num_nodes_extended);
-
-        int dfs_count = 0;
-
-        std::function<void(int)> dfs = [&](int u) {
-            dfnum[u] = dfs_count;
-            vertex[dfs_count] = u;
-            semi[u] = dfs_count;
-            label[u] = u;
-            dfs_count++;
-
-            for (size_t v : successors_rev[u]) {
-                if (dfnum[v] == -1) {
-                    parent[v] = u;
-                    dfs(v);
-                }
-            }
-        };
-
-        dfs(virtual_exit);
-
-        std::function<void(int)> compress = [&](int v) {
-            int anc = ancestor[v];
-            if (ancestor[anc] != -1) {
-                compress(anc);
-                if (semi[label[anc]] < semi[label[v]]) {
-                    label[v] = label[anc];
-                }
-                ancestor[v] = ancestor[anc];
-            }
-        };
-
-        auto eval = [&](int v) -> int {
-            if (ancestor[v] == -1) {
-                return v;
-            }
-            compress(v);
-            return label[v];
-        };
-
-        auto link = [&](int u, int v) {
-            ancestor[v] = u;
-        };
-
-        for (int i = dfs_count - 1; i >= 1; --i) {
-            int w = vertex[i];
-            for (size_t v : predecessors_rev[w]) {
-                if (dfnum[v] == -1) continue;
-                int u = eval(v);
-                if (semi[u] < semi[w]) {
-                    semi[w] = semi[u];
-                }
-            }
-            bucket[vertex[semi[w]]].push_back(w);
-            link(parent[w], w);
-            int p = parent[w];
-            for (int v : bucket[p]) {
-                int u = eval(v);
-                dom[v] = (semi[u] < semi[v]) ? u : p;
-            }
-            bucket[p].clear();
-        }
-
-        for (int i = 1; i < dfs_count; ++i) {
-            int w = vertex[i];
-            if (dom[w] != vertex[semi[w]]) {
-                dom[w] = dom[dom[w]];
-            }
-        }
-
-        for (size_t u = 0; u < num_nodes; ++u) {
-            size_t r_idx = group[u];
-            if (!regions[r_idx].IsLoop) {
-                std::vector<size_t> pdom_loops;
-                int curr = dom[u];
-                while (curr != -1 && curr != (int)virtual_exit) {
-                    size_t ancestor_r_idx = group[curr];
-                    if (regions[ancestor_r_idx].IsLoop) {
-                        pdom_loops.push_back(curr);
-                    }
-                    curr = dom[curr];
-                }
-
-                if (!pdom_loops.empty()) {
-                    std::vector<size_t> shallow_loops;
-                    for (size_t l : pdom_loops) {
-                        const auto &loop_l = regions[group[l]];
-                        bool is_contained = false;
-                        for (size_t other : pdom_loops) {
-                            if (other == l) continue;
-                            const auto &loop_o = regions[group[other]];
-                            if (loop_o.StartAddr <= loop_l.StartAddr && loop_l.EndAddr <= loop_o.EndAddr) {
-                                is_contained = true;
-                                break;
-                            }
-                        }
-                        if (!is_contained) {
-                            shallow_loops.push_back(l);
-                        }
-                    }
-                    if (shallow_loops.size() == 1) {
-                        overwrite_map[r_idx] = group[shallow_loops[0]];
-                    }
-                }
-            }
-        }
+    for (const auto &span : funcSpans) {
+        size_t f_start = span.first;
+        size_t f_size = span.second;
+        auto funcInstrs = instrs.slice(f_start, f_size);
+        processFunction(funcInstrs, f_start, loopMaxInstrs, bbMaxInstrs, nestLimitOuter, nestLimitInner, onLoop, onBasicBlock);
     }
 }
 

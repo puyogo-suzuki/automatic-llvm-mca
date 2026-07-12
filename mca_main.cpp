@@ -119,9 +119,6 @@ int main(int argc, char **argv) {
                         regions.push_back(r);
                     });
 
-        // Map from region index to overwrite target loop index
-        std::map<size_t, size_t> overwrite_map;
-        computePostDominatorOverwrites(SectionInstrs, FunctionRanges, regions, overwrite_map);
 
         auto runMca = [&](McaRegion &r) {
             uint64_t regionAddr = r.StartAddr;
@@ -176,25 +173,9 @@ int main(int argc, char **argv) {
 
         ScopedSilence silence;
 
-        // Pass 1: Run MCA for all loops and non-overwritten BBs
+        // Run MCA for all regions
         for (size_t i = 0; i < regions.size(); ++i) {
-            if (regions[i].IsLoop || overwrite_map.find(i) == overwrite_map.end()) {
-                runMca(regions[i]);
-            }
-        }
-
-        // Pass 2: Process overwritten BBs (copy loop results, or fallback to BB run if loop was invalid)
-        for (size_t i = 0; i < regions.size(); ++i) {
-            if (!regions[i].IsLoop && overwrite_map.find(i) != overwrite_map.end()) {
-                size_t loop_idx = overwrite_map[i];
-                if (regions[loop_idx].Valid) {
-                    regions[i].Metrics = regions[loop_idx].Metrics;
-                    regions[i].SimulatedSize = regions[loop_idx].SimulatedSize;
-                    regions[i].Valid = true;
-                } else {
-                    runMca(regions[i]);
-                }
-            }
+            runMca(regions[i]);
         }
 
         // Sort regions by StartAddr so the output is ordered by start_address
