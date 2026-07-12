@@ -599,6 +599,9 @@ TEST(MLPTest, SplitterNestedLoopNestingLimits) {
     ASSERT_EQ(instrs.size(), 6u);
 
     // Resolve branch targets explicitly for the test framework parser
+    for (size_t i = 0; i < instrs.size(); ++i) {
+        instrs[i].Addr = i * 4;
+    }
     instrs[3].BranchTarget = 8;
     instrs[5].BranchTarget = 4;
 
@@ -742,6 +745,81 @@ TEST(MLPTest, StallOnUseCacheHitSpecification) {
     // mlp_vals for the single load index will be 1.0.
     // total_mlp = 1.0/1.0 = 1.0. avg_mlp = 1.0 / 1 = 1.0.
     EXPECT_NEAR(val2, 1.0, 0.01);
+}
+
+TEST(MLPTest, SplitterPostDominatorLoopMerging) {
+    initLLVMX86();
+    TestContext TC;
+    // 0: nop (addr = 0)
+    // 1: addq $1, %rax (addr = 4)   <-- BB post-dominated by loop 2-3 (pre-header)
+    // 2: subq $1, %rbx (addr = 8)   <-- Loop Header
+    // 3: jne -8 (addr = 12)         <-- Loop Latch
+    // 4: movq %rax, %rcx (addr = 16) <-- BB post-dominated by loop (fall-through after loop exit)
+    // 5: retq (addr = 20)           <-- Function EXIT
+    auto instrs = parseAsm(TC, "nop\naddq $1, %rax\nsubq $1, %rbx\njne -8\nmovq %rax, %rcx\nretq");
+    ASSERT_EQ(instrs.size(), 6u);
+
+    // Normalize addresses and set target
+    for (size_t i = 0; i < instrs.size(); ++i) {
+        instrs[i].Addr = i * 4;
+    }
+    instrs[3].BranchTarget = 8; // target = 2 (subq)
+
+    FunctionBoundaries empty_bounds;
+    std::vector<RegionSpan> loops;
+    std::vector<RegionSpan> bbs;
+
+    walkRegions(instrs, empty_bounds, 100, 100, 0, 0,
+                [&](const RegionSpan &Span) { loops.push_back(Span); },
+                [&](const RegionSpan &Span) { bbs.push_back(Span); });
+
+    // Loop should be detected (IID 2 to 3, size = 2)
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_EQ(loops[0].Start, 2u);
+    EXPECT_EQ(loops[0].Size, 2u);
+
+    // Only IID 0 (nop) is NOT post-dominated by the loop exit/header.
+    // IID 1 (pre-header) and IID 4 (post-exit) are post-dominated by the loop and thus merged.
+    // retq (IID 5) is also post-dominated and merged (or part of EXIT connection).
+    // Therefore, only 1 basic block (IID 0, size = 1) should be emitted.
+    ASSERT_EQ(bbs.size(), 1u);
+    EXPECT_EQ(bbs[0].Start, 0u);
+    EXPECT_EQ(bbs[0].Size, 1u);
+}
+
+TEST(MLPTest, AArch64ExplicitSPCacheHit) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    // Load instruction using SP as base register: ldr x1, [sp, #8]
+    auto instrs = parseAsm(TC, "ldr x1, [sp, #8]");
+    ASSERT_EQ(instrs.size(), 1u);
+
+    AArch64MLPAnalyzer analyzer;
+    size_t loads = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI);
+    // Should be treated as guaranteed cache hit -> 0 potential miss loads
+    EXPECT_EQ(loads, 0u);
+
+    float ratio = 0.0f;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    // Since there are 0 potential miss loads, MLP defaults to 1.0
+    EXPECT_EQ(val, 1.0f);
+}
+
+TEST(MLPTest, RISCVExplicitSPCacheHit) {
+    initLLVMRISCV();
+    RISCVTestContext TC;
+    // Load instruction using sp (x2) as base register: ld a0, 8(sp)
+    auto instrs = parseAsm(TC, "ld a0, 8(sp)");
+    ASSERT_EQ(instrs.size(), 1u);
+
+    RISCVMLPAnalyzer analyzer;
+    size_t loads = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI);
+    // Should be treated as guaranteed cache hit -> 0 potential miss loads
+    EXPECT_EQ(loads, 0u);
+
+    float ratio = 0.0f;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    EXPECT_EQ(val, 1.0f);
 }
 
 

@@ -225,13 +225,15 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         }
 
 
+        size_t min_idx = std::min(nodes[header].start_idx, nodes[latch].start_idx);
+        size_t max_idx = std::max(nodes[header].start_idx + nodes[header].size - 1,
+                                  nodes[latch].start_idx + nodes[latch].size - 1);
+
         size_t total_instrs = 0;
-        size_t min_idx = -1;
-        size_t max_idx = 0;
-        for (size_t node : loop_nodes) {
-            total_instrs += nodes[node].size;
-            min_idx = std::min(min_idx, nodes[node].start_idx);
-            max_idx = std::max(max_idx, nodes[node].start_idx + nodes[node].size - 1);
+        for (size_t node = 0; node < num_nodes; ++node) {
+            if (nodes[node].start_idx >= min_idx && (nodes[node].start_idx + nodes[node].size - 1) <= max_idx) {
+                total_instrs += nodes[node].size;
+            }
         }
 
         bool valid = true;
@@ -412,8 +414,8 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         bool directly_in_loop = false;
         for (size_t l = 0; l < num_loops; ++l) {
             if (!valid_loops[l].valid) continue;
-            const auto &nodes_list = valid_loops[l].member_nodes;
-            if (std::find(nodes_list.begin(), nodes_list.end(), u) != nodes_list.end()) {
+            if (nodes[u].start_idx >= valid_loops[l].min_idx && 
+                (nodes[u].start_idx + nodes[u].size - 1) <= valid_loops[l].max_idx) {
                 directly_in_loop = true;
                 break;
             }
@@ -440,9 +442,11 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             for (size_t h : pdom_loop_headers) {
                 for (size_t l = 0; l < num_loops; ++l) {
                     if (valid_loops[l].valid && valid_loops[l].header == h) {
-                        if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
-                            min_loop_nodes_size = valid_loops[l].member_nodes.size();
-                            best_header = h;
+                        if (nodes[u].start_idx < valid_loops[l].min_idx) {
+                            if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
+                                min_loop_nodes_size = valid_loops[l].member_nodes.size();
+                                best_header = h;
+                            }
                         }
                     }
                 }

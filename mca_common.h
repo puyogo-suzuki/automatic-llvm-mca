@@ -102,9 +102,9 @@ struct MLPInstInfo {
 
 struct SeenBaseRegs {
     struct Element {
-        unsigned base_reg;
-        int64_t cache_line;
-        bool is_completed;
+        unsigned base_reg = 0;
+        int64_t cache_line = 0;
+        bool is_completed = false;
         llvm::SmallVector<unsigned, 4> pending_dest_regs;
     };
     llvm::SmallVector<Element, 16> data;
