@@ -8,6 +8,9 @@
 #include <memory>
 #include <unistd.h>
 
+#include <fstream>
+#include <sstream>
+#include <map>
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSchedule.h"
@@ -39,6 +42,40 @@ int main(int argc, char **argv) {
     TargetInfo TI;
     if (!initializeFrontend(argc, argv, "automatic-llvm-mca optimized C++ tool\n", Obj, TI)) {
         return 1;
+    }
+
+
+    std::map<uint64_t, McaMetrics> csv_cache;
+    if (!opts::UpdateMlp.empty()) {
+        std::ifstream infile(opts::UpdateMlp.c_str());
+        if (!infile.is_open()) {
+            WithColor::error() << "Failed to open --update-mlp CSV: " << opts::UpdateMlp << "\n";
+            return 1;
+        }
+        std::string line;
+        if (std::getline(infile, line)) {
+            // skip header
+        }
+        while (std::getline(infile, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string cell;
+            std::vector<std::string> row;
+            while (std::getline(ss, cell, ',')) {
+                row.push_back(cell);
+            }
+            if (row.size() < 7) continue;
+            try {
+                uint64_t start_addr = std::stoull(row[0], nullptr, 16);
+                McaMetrics M;
+                M.RetiredInstructions = std::stoull(row[4]);
+                M.Cycles = std::stoul(row[6]);
+                M.Valid = true;
+                csv_cache[start_addr] = M;
+            } catch (...) {
+                // ignore parse errors
+            }
+        }
     }
 
     std::printf("start_address,end_address,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
@@ -109,9 +146,31 @@ int main(int argc, char **argv) {
             } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Disable) {
                 mlpLoop = false;
             }
-            r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size), *TI.STI, *TI.MCII,
-                                         *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
-                                         *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
+            bool reused = false;
+            if (!opts::UpdateMlp.empty()) {
+                auto it = csv_cache.find(regionAddr);
+                if (it != csv_cache.end()) {
+                    McaMetrics M;
+                    M.RetiredInstructions = it->second.RetiredInstructions;
+                    M.Cycles = it->second.Cycles;
+                    M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind);
+                    float mlp_r = 0.0f;
+                    M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, mlp_r, mlpLoop);
+                    M.MLP_R = mlp_r;
+                    if (M.RetiredInstructions > 0) {
+                        M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);
+                    }
+                    M.Valid = true;
+                    r.Metrics = M;
+                    reused = true;
+                }
+            }
+
+            if (!reused) {
+                r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size), *TI.STI, *TI.MCII,
+                                             *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
+                                             *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
+            }
             r.Valid = r.Metrics.Valid;
         };
 

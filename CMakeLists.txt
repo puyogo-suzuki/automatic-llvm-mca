@@ -106,9 +106,6 @@ add_executable(mca_insts_info mca_insts_info.cpp)
 target_link_libraries(mca_insts_info PRIVATE mca_common_lib ${llvm_libs})
 set_target_properties(mca_insts_info PROPERTIES OUTPUT_NAME "mca-insts-info")
 
-add_executable(mlp_update mlp_update.cpp)
-target_link_libraries(mlp_update PRIVATE mca_common_lib ${llvm_libs})
-set_target_properties(mlp_update PROPERTIES OUTPUT_NAME "mlp-update")
 
 add_executable(mlp_check mlp_check.cpp)
 target_link_libraries(mlp_check PRIVATE mca_common_lib ${llvm_libs})

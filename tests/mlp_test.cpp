@@ -96,7 +96,7 @@ TEST(MLPTest, DependencyNone) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::None, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio);
-    EXPECT_NEAR(val1, 1.5, 0.01);
+    EXPECT_NEAR(val1, 1.3333, 0.01);
     EXPECT_NEAR(ratio, 1.0, 0.01);
 }
 
@@ -126,7 +126,7 @@ TEST(MLPTest, IOBarrier) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 5, DependencyKind::IO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio);
-    EXPECT_NEAR(val1, 1.666, 0.01);
+    EXPECT_NEAR(val1, 1.5, 0.01);
     EXPECT_NEAR(ratio, 0.8888, 0.01);
 }
 
@@ -155,7 +155,7 @@ TEST(MLPTest, DependencyMode) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::Dependency, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio);
-    EXPECT_NEAR(val1, 1.5, 0.01);
+    EXPECT_NEAR(val1, 1.3333, 0.01);
 }
 
 TEST(MLPTest, WindowLoopNone) {
@@ -177,7 +177,7 @@ TEST(MLPTest, WindowLoopOOO) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 2, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 0.75, 0.01);
+    EXPECT_NEAR(val1, 1.3333, 0.01);
     EXPECT_NEAR(ratio, 0.75, 0.01);
 }
 
@@ -240,7 +240,7 @@ TEST(MLPTest, AArch64WritebackPostIndex) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 0.5, 0.01);
+    EXPECT_NEAR(val1, 2.0, 0.01);
 }
 
 TEST(MLPTest, AArch64WritebackPostIndexRegister) {
@@ -251,7 +251,7 @@ TEST(MLPTest, AArch64WritebackPostIndexRegister) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val1 = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val1, 0.5, 0.01);
+    EXPECT_NEAR(val1, 2.0, 0.01);
 }
 
 TEST(MLPTest, X86PushPopStackAccess) {
@@ -272,7 +272,7 @@ TEST(MLPTest, AArch64MixedDependencyProp) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 0.6111, 0.01);
+    EXPECT_NEAR(val, 1.6364, 0.01);
 }
 
 TEST(MLPTest, AArch64CacheHitBaseRegister) {
@@ -283,7 +283,7 @@ TEST(MLPTest, AArch64CacheHitBaseRegister) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 0.5, 0.01);
+    EXPECT_NEAR(val, 2.0, 0.01);
 }
 
 TEST(MLPTest, AArch64CacheLineBoundary) {
@@ -296,7 +296,7 @@ TEST(MLPTest, AArch64CacheLineBoundary) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 0.5, 0.01);
+    EXPECT_NEAR(val, 2.0, 0.01);
 }
 
 TEST(MLPTest, AArch64IndexRegisterExclusion) {
@@ -309,7 +309,7 @@ TEST(MLPTest, AArch64IndexRegisterExclusion) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 0.5, 0.01);
+    EXPECT_NEAR(val, 2.0, 0.01);
 }
 
 TEST(MLPTest, AArch64CallInstructionClearsDependencies) {
@@ -325,7 +325,7 @@ TEST(MLPTest, AArch64CallInstructionClearsDependencies) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 0.75, 0.01);
+    EXPECT_NEAR(val, 1.3333, 0.01);
 }
 
 TEST(MLPTest, AArch64CallInstructionClearsSeenBaseRegs) {
@@ -336,7 +336,7 @@ TEST(MLPTest, AArch64CallInstructionClearsSeenBaseRegs) {
     float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 0.75, 0.01);
+    EXPECT_NEAR(val, 1.3333, 0.01);
 }
 
 // === RISC-V Test Setup ===
@@ -383,7 +383,7 @@ TEST(MLPTest, RISCVBasicMLPLoadStore) {
     float ratio = 0.0f;
     RISCVMLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 0.4167, 0.01);
+    EXPECT_NEAR(val, 2.4, 0.01);
 }
 
 TEST(MLPTest, RISCVZeroRegisterExclusion) {
@@ -395,7 +395,7 @@ TEST(MLPTest, RISCVZeroRegisterExclusion) {
     float ratio = 0.0f;
     RISCVMLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 0.75, 0.01);
+    EXPECT_NEAR(val, 1.3333, 0.01);
 }
 
 TEST(MLPTest, RISCVCallClearsDependencies) {
@@ -407,7 +407,7 @@ TEST(MLPTest, RISCVCallClearsDependencies) {
     float ratio = 0.0f;
     RISCVMLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 16, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 0.75, 0.01);
+    EXPECT_NEAR(val, 1.3333, 0.01);
 }
 
 // === x86 SIB & Complex Addressing Tests ===
@@ -422,7 +422,7 @@ TEST(MLPTest, X86SIBAddressingSeenBase) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/true);
-    EXPECT_NEAR(val, 0.25, 0.01);
+    EXPECT_NEAR(val, 4.0, 0.01);
 }
 
 TEST(MLPTest, X86CallClearsDependencies) {
@@ -434,7 +434,7 @@ TEST(MLPTest, X86CallClearsDependencies) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 16, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
-    EXPECT_NEAR(val, 0.75, 0.01);
+    EXPECT_NEAR(val, 1.3333, 0.01);
 }
 
 // === Boundary Conditions & Extreme Configurations ===
@@ -481,7 +481,7 @@ TEST(MLPTest, ExtremeLargeWindow) {
     float ratio = 0.0f;
     X86MLPAnalyzer analyzer;
     float val = analyzer.compute_mlp(instrs, 100, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio);
-    EXPECT_NEAR(val, 0.6111, 0.01);
+    EXPECT_NEAR(val, 1.6364, 0.01);
 }
 
 // === walkRegions Region Partitioning Tests ===

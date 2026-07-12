@@ -50,8 +50,7 @@ namespace opts {
     cl::opt<std::string> TargetAddressStr("target-address",
         cl::desc("Target address to analyze (hex)"), cl::init(""));
 
-    cl::opt<std::string> InputCsv("i", cl::desc("Input CSV file"), cl::init(""));
-    cl::opt<std::string> OutputCsv("o", cl::desc("Output CSV file"), cl::init(""));
+    cl::opt<std::string> UpdateMlp("update-mlp", cl::desc("CSV file containing previous MCA results to reuse"), cl::init(""));
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

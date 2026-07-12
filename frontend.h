@@ -55,9 +55,7 @@ namespace opts {
     extern llvm::cl::opt<MlpWindowLoopMode> MlpWindowLoop;
     extern llvm::cl::opt<std::string> TargetAddressStr;
     
-    // Specific to mlp_update.cpp but declared globally for simplicity
-    extern llvm::cl::opt<std::string> InputCsv;
-    extern llvm::cl::opt<std::string> OutputCsv;
+    extern llvm::cl::opt<std::string> UpdateMlp;
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,
