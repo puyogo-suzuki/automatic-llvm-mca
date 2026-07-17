@@ -1,6 +1,10 @@
 #ifndef MCA_COMMON_H
 #define MCA_COMMON_H
 
+#ifndef OPT_MERGE_BB
+#define OPT_MERGE_BB 1
+#endif
+
 #include <functional>
 #include <map>
 #include <vector>

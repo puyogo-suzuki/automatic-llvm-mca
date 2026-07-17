@@ -347,6 +347,42 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         }
     }
 
+#if OPT_MERGE_BB
+    // 5. 出力 (onLoop と onBasicBlock) - マージモード
+    for (size_t i = 0; i < num_loops; ++i) {
+        if (!valid_loops[i].valid) continue;
+        onLoop(RegionSpan{globalOffset + valid_loops[i].min_idx, valid_loops[i].max_idx - valid_loops[i].min_idx + 1});
+    }
+
+    std::vector<size_t> loop_cuts;
+    loop_cuts.push_back(0);
+    loop_cuts.push_back(n);
+    for (size_t i = 0; i < num_loops; ++i) {
+        if (!valid_loops[i].valid) continue;
+        loop_cuts.push_back(valid_loops[i].min_idx);
+        loop_cuts.push_back(valid_loops[i].max_idx + 1);
+    }
+    std::sort(loop_cuts.begin(), loop_cuts.end());
+    loop_cuts.erase(std::unique(loop_cuts.begin(), loop_cuts.end()), loop_cuts.end());
+
+    for (size_t i = 0; i + 1 < loop_cuts.size(); ++i) {
+        size_t c_start = loop_cuts[i];
+        size_t c_end = loop_cuts[i + 1];
+        if (c_start >= c_end) continue;
+
+        bool inside_loop = false;
+        for (size_t j = 0; j < num_loops; ++j) {
+            if (!valid_loops[j].valid) continue;
+            if (c_start >= valid_loops[j].min_idx && c_end <= valid_loops[j].max_idx + 1) {
+                inside_loop = true;
+                break;
+            }
+        }
+        if (!inside_loop) {
+            onBasicBlock(RegionSpan{globalOffset + c_start, c_end - c_start});
+        }
+    }
+#else
     std::vector<int> node_merged_to_loop(num_nodes, -1);
 
     bool has_valid_loops = false;
@@ -496,6 +532,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             onBasicBlock(RegionSpan{globalOffset + nodes[u].start_idx, nodes[u].size});
         }
     }
+#endif
 }
 
 } // namespace
