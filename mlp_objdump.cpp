@@ -133,6 +133,7 @@ int main(int argc, char **argv) {
             auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *TI.STI, *TI.MCII,
                                            *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
                                            *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
+
             mergeMetrics(MetricsBySpan[Key], Result);
             for (size_t i = Span.Start; i < Span.Start + Span.Size; ++i) {
                 if (SpanForInstr[i].second == 0) {

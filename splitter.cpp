@@ -347,127 +347,141 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         }
     }
 
-    // 5. Post-dominator の算出 (Lengauer-Tarjan on reverse CFG)
-    std::vector<int> dfnum_rev(num_nodes + 1, -1);
-    std::vector<int> vertex_rev(num_nodes + 1, -1);
-    std::vector<int> parent_rev(num_nodes + 1, -1);
-    std::vector<int> semi_rev(num_nodes + 1, -1);
-    std::vector<int> dom_rev(num_nodes + 1, -1);
-    std::vector<int> ancestor_rev(num_nodes + 1, -1);
-    std::vector<int> label_rev(num_nodes + 1, -1);
-    std::vector<std::vector<int>> bucket_rev(num_nodes + 1);
-    int dfs_count_rev = 0;
-
-    std::function<void(int)> dfs_rev = [&](int u) {
-        dfnum_rev[u] = dfs_count_rev;
-        vertex_rev[dfs_count_rev] = u;
-        semi_rev[u] = dfs_count_rev;
-        label_rev[u] = u;
-        dfs_count_rev++;
-
-        for (size_t v : rev_succs[u]) {  // 逆CFGの後続（= 元CFGの前駆）を辿る
-            if (dfnum_rev[v] == -1) {
-                parent_rev[v] = u;
-                dfs_rev(v);
-            }
-        }
-    };
-
-    dfs_rev(virtual_exit);
-
-    std::function<void(int)> compress_rev = [&](int v) {
-        int anc = ancestor_rev[v];
-        if (ancestor_rev[anc] != -1) {
-            compress_rev(anc);
-            if (semi_rev[label_rev[anc]] < semi_rev[label_rev[v]]) {
-                label_rev[v] = label_rev[anc];
-            }
-            ancestor_rev[v] = ancestor_rev[anc];
-        }
-    };
-
-    auto eval_rev = [&](int v) -> int {
-        if (ancestor_rev[v] == -1) {
-            return v;
-        }
-        compress_rev(v);
-        return label_rev[v];
-    };
-
-    auto link_rev = [&](int u, int v) {
-        ancestor_rev[v] = u;
-    };
-
-    for (int i = dfs_count_rev - 1; i >= 1; --i) {
-        int w = vertex_rev[i];
-        for (size_t v : rev_preds[w]) {  // 逆CFGの先行（= 元CFGの後続）を参照
-            if (dfnum_rev[v] == -1) continue;
-            int u = eval_rev(v);
-            if (semi_rev[u] < semi_rev[w]) {
-                semi_rev[w] = semi_rev[u];
-            }
-        }
-        bucket_rev[vertex_rev[semi_rev[w]]].push_back(w);
-        link_rev(parent_rev[w], w);
-        int p = parent_rev[w];
-        for (int v : bucket_rev[p]) {
-            int u = eval_rev(v);
-            dom_rev[v] = (semi_rev[u] < semi_rev[v]) ? u : p;
-        }
-        bucket_rev[p].clear();
-    }
-
-    for (int i = 1; i < dfs_count_rev; ++i) {
-        int w = vertex_rev[i];
-        if (dom_rev[w] != vertex_rev[semi_rev[w]]) {
-            dom_rev[w] = dom_rev[dom_rev[w]];
-        }
-    }
-
-    // 6. 各基本ブロックがループに後支配（pdom）されてマージされるかの判定
     std::vector<int> node_merged_to_loop(num_nodes, -1);
-    for (size_t u = 0; u < num_nodes; ++u) {
-        bool directly_in_loop = false;
-        for (size_t l = 0; l < num_loops; ++l) {
-            if (!valid_loops[l].valid) continue;
-            if (nodes[u].start_idx >= valid_loops[l].min_idx && 
-                (nodes[u].start_idx + nodes[u].size - 1) <= valid_loops[l].max_idx) {
-                directly_in_loop = true;
-                break;
-            }
+
+    bool has_valid_loops = false;
+    for (size_t l = 0; l < num_loops; ++l) {
+        if (valid_loops[l].valid) {
+            has_valid_loops = true;
+            break;
         }
-        if (directly_in_loop) {
-            node_merged_to_loop[u] = -2;
-            continue;
+    }
+
+    if (has_valid_loops) {
+        // 5. Post-dominator の算出 (Lengauer-Tarjan on reverse CFG)
+        std::vector<int> dfnum_rev(num_nodes + 1, -1);
+        std::vector<int> vertex_rev(num_nodes + 1, -1);
+        std::vector<int> parent_rev(num_nodes + 1, -1);
+        std::vector<int> semi_rev(num_nodes + 1, -1);
+        std::vector<int> dom_rev(num_nodes + 1, -1);
+        std::vector<int> ancestor_rev(num_nodes + 1, -1);
+        std::vector<int> label_rev(num_nodes + 1, -1);
+        std::vector<std::vector<int>> bucket_rev(num_nodes + 1);
+        int dfs_count_rev = 0;
+
+        std::function<void(int)> dfs_rev = [&](int u) {
+            dfnum_rev[u] = dfs_count_rev;
+            vertex_rev[dfs_count_rev] = u;
+            semi_rev[u] = dfs_count_rev;
+            label_rev[u] = u;
+            dfs_count_rev++;
+
+            for (size_t v : rev_succs[u]) {  // 逆CFGの後続（= 元CFGの前駆）を辿る
+                if (dfnum_rev[v] == -1) {
+                    parent_rev[v] = u;
+                    dfs_rev(v);
+                }
+            }
+        };
+
+        dfs_rev(virtual_exit);
+
+        std::function<void(int)> compress_rev = [&](int v) {
+            int anc = ancestor_rev[v];
+            if (ancestor_rev[anc] != -1) {
+                compress_rev(anc);
+                if (semi_rev[label_rev[anc]] < semi_rev[label_rev[v]]) {
+                    label_rev[v] = label_rev[anc];
+                }
+                ancestor_rev[v] = ancestor_rev[anc];
+            }
+        };
+
+        auto eval_rev = [&](int v) -> int {
+            if (ancestor_rev[v] == -1) {
+                return v;
+            }
+            compress_rev(v);
+            return label_rev[v];
+        };
+
+        auto link_rev = [&](int u, int v) {
+            ancestor_rev[v] = u;
+        };
+
+        for (int i = dfs_count_rev - 1; i >= 1; --i) {
+            int w = vertex_rev[i];
+            for (size_t v : rev_preds[w]) {  // 逆CFGの先行（= 元CFGの後続）を参照
+                if (dfnum_rev[v] == -1) continue;
+                int u = eval_rev(v);
+                if (semi_rev[u] < semi_rev[w]) {
+                    semi_rev[w] = semi_rev[u];
+                }
+            }
+            bucket_rev[vertex_rev[semi_rev[w]]].push_back(w);
+            link_rev(parent_rev[w], w);
+            int p = parent_rev[w];
+            for (int v : bucket_rev[p]) {
+                int u = eval_rev(v);
+                dom_rev[v] = (semi_rev[u] < semi_rev[v]) ? u : p;
+            }
+            bucket_rev[p].clear();
         }
 
-        int curr = dom_rev[u];
-        std::vector<size_t> pdom_loop_headers;
-        while (curr != -1 && curr != (int)virtual_exit) {
+        for (int i = 1; i < dfs_count_rev; ++i) {
+            int w = vertex_rev[i];
+            if (dom_rev[w] != vertex_rev[semi_rev[w]]) {
+                dom_rev[w] = dom_rev[dom_rev[w]];
+            }
+        }
+
+        // 6. 各基本ブロックがループに後支配（pdom）されてマージされるかの判定
+        // ループヘッダからループインデックスへの高速ルックアップテーブルを構築
+        std::vector<int> header_to_loop_idx(num_nodes, -1);
+        for (size_t l = 0; l < num_loops; ++l) {
+            if (valid_loops[l].valid) {
+                header_to_loop_idx[valid_loops[l].header] = l;
+            }
+        }
+
+        for (size_t u = 0; u < num_nodes; ++u) {
+            bool directly_in_loop = false;
             for (size_t l = 0; l < num_loops; ++l) {
-                if (valid_loops[l].valid && valid_loops[l].header == static_cast<size_t>(curr)) {
+                if (!valid_loops[l].valid) continue;
+                if (nodes[u].start_idx >= valid_loops[l].min_idx && 
+                    (nodes[u].start_idx + nodes[u].size - 1) <= valid_loops[l].max_idx) {
+                    directly_in_loop = true;
+                    break;
+                }
+            }
+            if (directly_in_loop) {
+                node_merged_to_loop[u] = -2;
+                continue;
+            }
+
+            int curr = dom_rev[u];
+            std::vector<size_t> pdom_loop_headers;
+            while (curr != -1 && curr != (int)virtual_exit) {
+                if (curr < (int)num_nodes && header_to_loop_idx[curr] != -1) {
                     pdom_loop_headers.push_back(curr);
                 }
+                curr = dom_rev[curr];
             }
-            curr = dom_rev[curr];
-        }
 
-        if (!pdom_loop_headers.empty()) {
-            int best_header = -1;
-            size_t min_loop_nodes_size = SIZE_MAX;
-            for (size_t h : pdom_loop_headers) {
-                for (size_t l = 0; l < num_loops; ++l) {
-                    if (valid_loops[l].valid && valid_loops[l].header == h) {
-                        // ループの前方・後方を問わず post-dominate されているBBをマージする。
-                        // 最小サイズのループ（最も内側）を選ぶ。
-                        if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
-                            min_loop_nodes_size = valid_loops[l].member_nodes.size();
-                            best_header = h;
-                        }
+            if (!pdom_loop_headers.empty()) {
+                int best_header = -1;
+                size_t min_loop_nodes_size = SIZE_MAX;
+                for (size_t h : pdom_loop_headers) {
+                    size_t l = header_to_loop_idx[h];
+                    // ループの前方・後方を問わず post-dominate されているBBをマージする。
+                    // 最小サイズのループ（最も内側）を選ぶ。
+                    if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
+                        min_loop_nodes_size = valid_loops[l].member_nodes.size();
+                        best_header = h;
                     }
                 }
+                node_merged_to_loop[u] = best_header;
             }
-            node_merged_to_loop[u] = best_header;
         }
     }
 
