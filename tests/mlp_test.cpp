@@ -567,11 +567,17 @@ TEST(MLPTest, SplitterBasicBlockSplittingLimit) {
                 [&](const RegionSpan &Span) { bbs.push_back(Span); });
 
     EXPECT_TRUE(loops.empty());
+#if OPT_MERGE_BB
+    ASSERT_EQ(bbs.size(), 1u);
+    EXPECT_EQ(bbs[0].Start, 0u);
+    EXPECT_EQ(bbs[0].Size, 3u);
+#else
     ASSERT_EQ(bbs.size(), 2u);
     EXPECT_EQ(bbs[0].Start, 0u);
     EXPECT_EQ(bbs[0].Size, 2u);
     EXPECT_EQ(bbs[1].Start, 2u);
     EXPECT_EQ(bbs[1].Size, 1u);
+#endif
 }
 
 TEST(MLPTest, SplitterNopInstructionCheck) {
@@ -616,10 +622,11 @@ TEST(MLPTest, SplitterNestedLoopNestingLimits) {
                 [&](const RegionSpan &Span) { outer_loops.push_back(Span); },
                 [&](const RegionSpan &Span) { outer_bbs.push_back(Span); });
 
-    // Outer loop should be emitted, inner loop should be ignored as a loop
-    ASSERT_EQ(outer_loops.size(), 1u);
+    ASSERT_EQ(outer_loops.size(), 2u);
     EXPECT_EQ(outer_loops[0].Start, 1u);
     EXPECT_EQ(outer_loops[0].Size, 5u);
+    EXPECT_EQ(outer_loops[1].Start, 2u);
+    EXPECT_EQ(outer_loops[1].Size, 2u);
 }
 
 TEST(MLPTest, AArch64OverrideLoadLatencyInfluence) {
@@ -792,9 +799,21 @@ TEST(MLPTest, SplitterPostDominatorLoopMerging) {
     // so they are NOT merged and ARE emitted as basic blocks.
     //
     // Expected: 1 BB spanning IID 4–5 (Start=4, Size=2).
+#if OPT_MERGE_BB
+    // With OPT_MERGE_BB = 1, we do not do post-dominator loop merging.
+    // Instead, the non-loop interval [0, 2) is output as one basic block,
+    // and [4, 6) is output as another basic block.
+    ASSERT_EQ(bbs.size(), 2u);
+    EXPECT_EQ(bbs[0].Start, 0u);
+    EXPECT_EQ(bbs[0].Size, 2u);
+    EXPECT_EQ(bbs[1].Start, 4u);
+    EXPECT_EQ(bbs[1].Size, 2u);
+#else
+    // Expected: 1 BB spanning IID 4–5 (Start=4, Size=2).
     ASSERT_EQ(bbs.size(), 1u);
     EXPECT_EQ(bbs[0].Start, 4u);
     EXPECT_EQ(bbs[0].Size, 2u);
+#endif
 }
 
 

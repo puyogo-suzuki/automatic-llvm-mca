@@ -339,10 +339,9 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
     }
 
     for (size_t i = 0; i < num_loops; ++i) {
-        if (nestLimitOuter > 0 && valid_loops[i].depth >= nestLimitOuter) {
-            valid_loops[i].valid = false;
-        }
-        if (nestLimitInner > 0 && valid_loops[i].height >= nestLimitInner) {
+        bool fail_outer = (nestLimitOuter > 0 && valid_loops[i].depth >= nestLimitOuter);
+        bool fail_inner = (nestLimitInner > 0 && valid_loops[i].height >= nestLimitInner);
+        if (fail_outer && fail_inner) {
             valid_loops[i].valid = false;
         }
     }
