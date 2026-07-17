@@ -924,7 +924,9 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
             
             bool is_hit = false;
             if (is_load) {
-                if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+                if (inst_infos[j].mem_info.is_stack_access()) {
+                    is_hit = true;
+                } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
                     int64_t cache_line = inst_infos[j].mem_info.offset / 64;
                     is_hit = seen_base_regs.test(base_reg, cache_line);
                 }
@@ -953,7 +955,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
         const MCInst& Inst = I.Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
         MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI, MCII);
-        if (mem_info.is_load()) {
+        if (mem_info.is_load() && !mem_info.is_stack_access()) {
             count++;
         }
     }

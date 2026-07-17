@@ -135,8 +135,9 @@ struct SteadyStateTracker : mca::HWEventListener {
                     const mca::WriteRef &WR = mappings[AArch64::NZCV].first;
                     if (WR.isValid()) {
                         unsigned writerIID = WR.getSourceIndex();
-                        if (writerIID < SimInstrs.size()) {
-                            const mca::Instruction *DepInst = SimInstrs[writerIID].get();
+                        if (!SimInstrs.empty()) {
+                            unsigned staticIID = writerIID % SimInstrs.size();
+                            const mca::Instruction *DepInst = SimInstrs[staticIID].get();
                             StringRef DepName = MCII.getName(DepInst->getOpcode());
                             if (DepName.starts_with_insensitive("FCMP") ||
                                 DepName.starts_with_insensitive("VMRS") ||
@@ -166,8 +167,9 @@ struct SteadyStateTracker : mca::HWEventListener {
                             const mca::WriteRef &WR = mappings[baseReg].first;
                             if (WR.isValid()) {
                                 unsigned writerIID = WR.getSourceIndex();
-                                if (writerIID < SimInstrs.size()) {
-                                    const mca::Instruction *DepInst = SimInstrs[writerIID].get();
+                                if (!SimInstrs.empty()) {
+                                    unsigned staticIID = writerIID % SimInstrs.size();
+                                    const mca::Instruction *DepInst = SimInstrs[staticIID].get();
                                     StringRef DepName = MCII.getName(DepInst->getOpcode());
                                     if (DepName.equals_insensitive("ADRP")) {
                                         RS.*get(ReadState_IsReady_Tag{}) = true;
