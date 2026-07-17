@@ -28,8 +28,8 @@ namespace opts {
     cl::opt<int> Iterations("iterations", cl::desc("Steady-state iteration multiplier"), cl::init(3));
     cl::opt<int> LoopMaxInstrs("loop-max-instrs", cl::desc("Maximum instructions in a loop to analyze"), cl::init(3000));
     cl::opt<int> BBMaxInstrs("bb-max-instrs", cl::desc("Maximum instructions in a basic block to analyze"), cl::init(3000));
-    cl::opt<int> NestLimitOuter("nest-limit-outer", cl::desc("Maximum nesting depth of loops to analyze from outer to inner"), cl::init(2));
-    cl::opt<int> NestLimitInner("nest-limit-inner", cl::desc("Maximum nesting depth of loops to analyze from inner to outer"), cl::init(2));
+    cl::opt<int> NestLimitOuter("nest-limit-outer", cl::desc("Maximum nesting depth of loops to analyze from outer to inner"), cl::init(1));
+    cl::opt<int> NestLimitInner("nest-limit-inner", cl::desc("Maximum nesting depth of loops to analyze from inner to outer"), cl::init(1));
     cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried("ignore-loop-carried",
         cl::desc("Ignore loop-carried register dependencies mode"),
         cl::values(
