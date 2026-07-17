@@ -147,19 +147,28 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
     }
 
     // 3. EXITノードの作成 (ID = num_nodes)
+    // 逆CFGを構築する（post-dominator 算出のため）。
+    // 元CFGの辺 u→v に対して、逆CFGでは v→u の辺となる。
+    //   rev_succs[v]  : 逆CFGにおける v の後続ノード群（元CFGで v へ入ってくる辺の始点）
+    //   rev_preds[u]  : 逆CFGにおける u の先行ノード群（元CFGで u から出ていく辺の終点）
+    // Lengauer-Tarjan アルゴリズムは rev_succs を DFS で辿り、
+    // semi-dominator の計算で rev_preds を参照する。
     size_t virtual_exit = num_nodes;
-    std::vector<std::vector<size_t>> successors_rev(num_nodes + 1);
-    std::vector<std::vector<size_t>> predecessors_rev(num_nodes + 1);
+    std::vector<std::vector<size_t>> rev_succs(num_nodes + 1);  // 逆CFGの後続（= 元CFGの前駆）
+    std::vector<std::vector<size_t>> rev_preds(num_nodes + 1);  // 逆CFGの先行（= 元CFGの後続）
 
     for (size_t u = 0; u < num_nodes; ++u) {
         for (size_t v : nodes[u].succs) {
-            successors_rev[v].push_back(u);
-            predecessors_rev[u].push_back(v);
+            // 元CFG: u→v  ⇒  逆CFG: v→u
+            rev_succs[v].push_back(u);   // 逆CFGで v の後続に u を追加
+            rev_preds[u].push_back(v);   // 逆CFGで u の先行に v を追加
         }
         const auto &last_instr = funcInstrs[nodes[u].start_idx + nodes[u].size - 1];
         if (nodes[u].succs.empty() || last_instr.IsReturn) {
-            successors_rev[virtual_exit].push_back(u);
-            predecessors_rev[u].push_back(virtual_exit);
+            // u は virtual_exit へ繋がる（リターンまたは後続なし）
+            // 逆CFG: virtual_exit→u
+            rev_succs[virtual_exit].push_back(u);
+            rev_preds[u].push_back(virtual_exit);
         }
     }
 
@@ -225,15 +234,17 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         }
 
 
-        size_t min_idx = std::min(nodes[header].start_idx, nodes[latch].start_idx);
-        size_t max_idx = std::max(nodes[header].start_idx + nodes[header].size - 1,
-                                  nodes[latch].start_idx + nodes[latch].size - 1);
-
+        // min_idx/max_idx/total_instrs を member_nodes 全体から算出する。
+        // header と latch のみでは、ループボディ内の全ノードを網羅できない。
+        size_t min_idx = SIZE_MAX;
+        size_t max_idx = 0;
         size_t total_instrs = 0;
-        for (size_t node = 0; node < num_nodes; ++node) {
-            if (nodes[node].start_idx >= min_idx && (nodes[node].start_idx + nodes[node].size - 1) <= max_idx) {
-                total_instrs += nodes[node].size;
-            }
+        for (size_t m : loop_nodes) {
+            size_t m_start = nodes[m].start_idx;
+            size_t m_end   = nodes[m].start_idx + nodes[m].size - 1;
+            if (m_start < min_idx) min_idx = m_start;
+            if (m_end   > max_idx) max_idx = m_end;
+            total_instrs += nodes[m].size;
         }
 
         bool valid = true;
@@ -349,7 +360,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         label_rev[u] = u;
         dfs_count_rev++;
 
-        for (size_t v : successors_rev[u]) {
+        for (size_t v : rev_succs[u]) {  // 逆CFGの後続（= 元CFGの前駆）を辿る
             if (dfnum_rev[v] == -1) {
                 parent_rev[v] = u;
                 dfs_rev(v);
@@ -384,7 +395,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
 
     for (int i = dfs_count_rev - 1; i >= 1; --i) {
         int w = vertex_rev[i];
-        for (size_t v : predecessors_rev[w]) {
+        for (size_t v : rev_preds[w]) {  // 逆CFGの先行（= 元CFGの後続）を参照
             if (dfnum_rev[v] == -1) continue;
             int u = eval_rev(v);
             if (semi_rev[u] < semi_rev[w]) {
@@ -438,15 +449,15 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
 
         if (!pdom_loop_headers.empty()) {
             int best_header = -1;
-            size_t min_loop_nodes_size = -1;
+            size_t min_loop_nodes_size = SIZE_MAX;
             for (size_t h : pdom_loop_headers) {
                 for (size_t l = 0; l < num_loops; ++l) {
                     if (valid_loops[l].valid && valid_loops[l].header == h) {
-                        if (nodes[u].start_idx < valid_loops[l].min_idx) {
-                            if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
-                                min_loop_nodes_size = valid_loops[l].member_nodes.size();
-                                best_header = h;
-                            }
+                        // ループの前方・後方を問わず post-dominate されているBBをマージする。
+                        // 最小サイズのループ（最も内側）を選ぶ。
+                        if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
+                            min_loop_nodes_size = valid_loops[l].member_nodes.size();
+                            best_header = h;
                         }
                     }
                 }

@@ -751,10 +751,10 @@ TEST(MLPTest, SplitterPostDominatorLoopMerging) {
     initLLVMX86();
     TestContext TC;
     // 0: nop (addr = 0)
-    // 1: addq $1, %rax (addr = 4)   <-- BB post-dominated by loop 2-3 (pre-header)
+    // 1: addq $1, %rax (addr = 4)   <-- Loop pre-header (post-dominated by loop header 2)
     // 2: subq $1, %rbx (addr = 8)   <-- Loop Header
-    // 3: jne -8 (addr = 12)         <-- Loop Latch
-    // 4: movq %rax, %rcx (addr = 16) <-- BB post-dominated by loop (fall-through after loop exit)
+    // 3: jne -8 (addr = 12)         <-- Loop Latch (back-edge to 2)
+    // 4: movq %rax, %rcx (addr = 16) <-- Post-loop BB (NOT post-dominated by loop)
     // 5: retq (addr = 20)           <-- Function EXIT
     auto instrs = parseAsm(TC, "nop\naddq $1, %rax\nsubq $1, %rbx\njne -8\nmovq %rax, %rcx\nretq");
     ASSERT_EQ(instrs.size(), 6u);
@@ -778,14 +778,20 @@ TEST(MLPTest, SplitterPostDominatorLoopMerging) {
     EXPECT_EQ(loops[0].Start, 2u);
     EXPECT_EQ(loops[0].Size, 2u);
 
-    // Only IID 0 (nop) is NOT post-dominated by the loop exit/header.
-    // IID 1 (pre-header) and IID 4 (post-exit) are post-dominated by the loop and thus merged.
-    // retq (IID 5) is also post-dominated and merged (or part of EXIT connection).
-    // Therefore, only 1 basic block (IID 0, size = 1) should be emitted.
+    // IID 0 (nop) and IID 1 (pre-header) are post-dominated by loop header (IID 2)
+    // because all paths from them must pass through the loop.  They are merged
+    // into the loop region and NOT emitted as basic blocks.
+    //
+    // IID 4 (movq) and IID 5 (retq) are post-loop BBs.  Their post-dominator
+    // chain goes directly to virtual_exit without passing through the loop header,
+    // so they are NOT merged and ARE emitted as basic blocks.
+    //
+    // Expected: 1 BB spanning IID 4–5 (Start=4, Size=2).
     ASSERT_EQ(bbs.size(), 1u);
-    EXPECT_EQ(bbs[0].Start, 0u);
-    EXPECT_EQ(bbs[0].Size, 1u);
+    EXPECT_EQ(bbs[0].Start, 4u);
+    EXPECT_EQ(bbs[0].Size, 2u);
 }
+
 
 TEST(MLPTest, AArch64ExplicitSPCacheHit) {
     initLLVMAArch64();
