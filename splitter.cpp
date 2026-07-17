@@ -320,10 +320,15 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
     }
 
     std::function<int(size_t)> calc_height = [&](size_t idx) {
-        int h = 0;
-        for (size_t child : children[idx]) {
-            h = std::max(h, calc_height(child) + 1);
+        if (children[idx].empty()) {
+            valid_loops[idx].height = 0;
+            return 0;
         }
+        int min_child_h = calc_height(children[idx][0]);
+        for (size_t i = 1; i < children[idx].size(); ++i) {
+            min_child_h = std::min(min_child_h, calc_height(children[idx][i]));
+        }
+        int h = min_child_h + 1;
         valid_loops[idx].height = h;
         return h;
     };
