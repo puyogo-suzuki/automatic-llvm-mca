@@ -25,6 +25,7 @@ struct TestContext {
     std::unique_ptr<MCAsmInfo> MAI;
     std::unique_ptr<MCInstrInfo> MCII;
     std::unique_ptr<MCSubtargetInfo> STI;
+    std::unique_ptr<MCInstrAnalysis> MCIA;
 
     TestContext() : TT("x86_64-unknown-linux-gnu") {
         std::string Error;
@@ -33,6 +34,7 @@ struct TestContext {
         MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT, MCTargetOptions()));
         MCII.reset(TheTarget->createMCInstrInfo());
         STI.reset(TheTarget->createMCSubtargetInfo(TT, "haswell", ""));
+        MCIA.reset(TheTarget->createMCInstrAnalysis(MCII.get()));
     }
 };
 
@@ -664,6 +666,7 @@ TEST(MLPTest, A55FlagTransferPenalty) {
     initLLVMAArch64();
     AArch64TestContext TC;
     TC.STI.reset(TC.TheTarget->createMCSubtargetInfo(TC.TT, "cortex-a55", ""));
+
     // 1. Integer comparison with loop-carried dependency:
     // add x0, x0, #1
     // cmp x0, #1

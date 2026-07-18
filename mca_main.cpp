@@ -93,6 +93,7 @@ int main(int argc, char **argv) {
         }
 
         auto SectionInstrs = disassembleTextSection(Section, *TI.DisAsm, *TI.MCII, TI.MCIA.get());
+
         if (SectionInstrs.empty()) continue;
 
         std::vector<McaRegion> regions;

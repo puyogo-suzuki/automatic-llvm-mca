@@ -217,5 +217,4 @@ void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundar
 
 bool isNopInstruction(const llvm::MCInst &Inst, const llvm::MCInstrInfo &MCII);
 bool isAllNopRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCInstrInfo &MCII);
-
 #endif
