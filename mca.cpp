@@ -136,7 +136,14 @@ struct A55SteadyStateTracker : public BaseSteadyStateTracker {
         auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
         auto &mappings = (*PRF).*member_ptr;
 
-        // 1. Flag-transfer penalty logic for NZCV:
+        applyFlagTransferPenalty(Inst, mappings);
+        applyPointerForwarding(Inst, mappings);
+    }
+
+private:
+    template <typename MappingsType>
+    void applyFlagTransferPenalty(mca::Instruction &Inst, const MappingsType &mappings) {
+        // Flag-transfer penalty logic for NZCV:
         bool from_fp = false;
         if (AArch64::NZCV < mappings.size()) {
             const mca::WriteRef &WR = mappings[AArch64::NZCV].first;
@@ -162,8 +169,11 @@ struct A55SteadyStateTracker : public BaseSteadyStateTracker {
                 }
             }
         }
+    }
 
-        // 2. A64 low latency pointer forwarding bypass logic:
+    template <typename MappingsType>
+    void applyPointerForwarding(mca::Instruction &Inst, const MappingsType &mappings) {
+        // A64 low latency pointer forwarding bypass logic:
         StringRef CurrName = MCII.getName(Inst.getOpcode());
         if (CurrName.starts_with_insensitive("LDR") || CurrName.starts_with_insensitive("LDUR")) {
             for (mca::ReadState &RS : Inst.getUses()) {
