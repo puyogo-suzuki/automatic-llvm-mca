@@ -10,6 +10,8 @@ set(A55_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedA
 set(A76_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedNeoverseN1.td)
 set(A78_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedNeoverseN2.td)
 set(X1_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedNeoverseV1.td)
+set(ICESTORM_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedIcestorm.td)
+set(FIRESTORM_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedFirestorm.td)
 set(A76_PROC_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64Processors.td)
 set(GEN_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenSubtargetInfo.inc)
 set(GEN_REG_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenRegisterInfo.inc)
@@ -24,7 +26,7 @@ add_custom_command(
             -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_INC_FILE}
-    DEPENDS ${A55_TD_FILE} ${A76_TD_FILE} ${A78_TD_FILE} ${X1_TD_FILE} ${A76_PROC_TD_FILE}
+    DEPENDS ${A55_TD_FILE} ${A76_TD_FILE} ${A78_TD_FILE} ${X1_TD_FILE} ${ICESTORM_TD_FILE} ${FIRESTORM_TD_FILE} ${A76_PROC_TD_FILE}
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
     COMMENT "Generating AArch64GenSubtargetInfo.inc using llvm-tblgen"
 )

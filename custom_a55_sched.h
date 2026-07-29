@@ -1,9 +1,11 @@
 #ifndef CUSTOM_A55_SCHED_H
 #define CUSTOM_A55_SCHED_H
 
+#include "llvm/ADT/StringRef.h"
+
 namespace llvm {
 class MCSubtargetInfo;
-void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI);
+void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI, llvm::StringRef CPUName);
 }
 
 #endif

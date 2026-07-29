@@ -47,24 +47,40 @@ template struct Rob<MCSubtargetInfo_ReadAdvanceTable, &llvm::MCSubtargetInfo::Re
 #undef extern
 
 namespace llvm {
-void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI) {
-    if (STI.getCPU() == "cortex-a55") {
+void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI, llvm::StringRef CPUName) {
+    if (CPUName == "cortex-a55") {
         STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CortexA55Model;
         STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
         STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
         STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (STI.getCPU() == "cortex-a76" || STI.getCPU() == "cortex-a76ae") {
+    } else if (CPUName == "cortex-a76" || CPUName == "cortex-a76ae") {
         STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseN1Model;
         STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
         STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
         STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c") {
+    } else if (CPUName == "cortex-a78" || CPUName == "cortex-a78ae" || CPUName == "cortex-a78c") {
         STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseN2Model;
         STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
         STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
         STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (STI.getCPU() == "cortex-x1" || STI.getCPU() == "cortex-x1c") {
+    } else if (CPUName == "cortex-x1" || CPUName == "cortex-x1c") {
         STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseV1Model;
+        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
+        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
+        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
+    } else if (CPUName == "icestorm" || CPUName == "ice") {
+        static llvm::MCSchedModel CustomIcestormModel = NeoverseN1Model;
+        CustomIcestormModel.IssueWidth = 4;
+        CustomIcestormModel.MicroOpBufferSize = 60;
+        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CustomIcestormModel;
+        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
+        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
+        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
+    } else if (CPUName == "firestorm" || CPUName == "fire") {
+        static llvm::MCSchedModel CustomFirestormModel = NeoverseN1Model;
+        CustomFirestormModel.IssueWidth = 8;
+        CustomFirestormModel.MicroOpBufferSize = 256;
+        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CustomFirestormModel;
         STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
         STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
         STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;

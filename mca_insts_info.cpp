@@ -109,9 +109,13 @@ int main(int argc, char **argv) {
     MCTargetOptions MCOPT;
     std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
     std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
-    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, MCPU, ""));
+    std::string llvm_cpu = MCPU;
+    if (MCPU == "ice" || MCPU == "icestorm" || MCPU == "fire" || MCPU == "firestorm") {
+        llvm_cpu = "apple-m1";
+    }
+    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
     if (STI) {
-        llvm::overrideCortexA55SchedModel(*STI);
+        llvm::overrideCortexA55SchedModel(*STI, MCPU);
     }
     std::unique_ptr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(TT, 0, *MAI, *MCII, *MRI));
 
