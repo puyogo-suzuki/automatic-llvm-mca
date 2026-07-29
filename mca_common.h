@@ -44,6 +44,8 @@ using FunctionBoundaries = std::map<uint64_t, uint64_t>;
 struct RegionSpan {
     size_t Start;
     size_t Size;
+    size_t AnalysisStart;
+    size_t AnalysisSize;
 };
 
 struct McaMetrics {
@@ -188,12 +190,16 @@ public:
 struct McaRegion {
     size_t Start;
     size_t Size;
+    size_t AnalysisStart;
+    size_t AnalysisSize;
     size_t SimulatedSize;
     bool IsLoop;
     McaMetrics Metrics;
     bool Valid = false;
     uint64_t StartAddr;
     uint64_t EndAddr;
+    uint64_t AnalysisStartAddr;
+    uint64_t AnalysisEndAddr;
 };
 
 void initializeTargets();

@@ -27,8 +27,10 @@ using namespace llvm::object;
 
 
 
-static void printResultCsv(const Instr &First, const Instr &Last, size_t Length, bool isLoop, const McaMetrics &M) {
-    std::printf("0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f\n", First.Addr, Last.Addr,
+static void printResultCsv(uint64_t StartAddr, uint64_t EndAddr, uint64_t AnalysisStartAddr, uint64_t AnalysisEndAddr,
+                           size_t Length, bool isLoop, const McaMetrics &M) {
+    std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f\n",
+                StartAddr, EndAddr, AnalysisStartAddr, AnalysisEndAddr,
                 static_cast<unsigned long>(Length),
                 isLoop ? 1 : 0,
                 static_cast<unsigned long>(M.RetiredInstructions),
@@ -64,12 +66,12 @@ int main(int argc, char **argv) {
             while (std::getline(ss, cell, ',')) {
                 row.push_back(cell);
             }
-            if (row.size() < 7) continue;
+            if (row.size() < 9) continue;
             try {
                 uint64_t start_addr = std::stoull(row[0], nullptr, 16);
                 McaMetrics M;
-                M.RetiredInstructions = std::stoull(row[4]);
-                M.Cycles = std::stoul(row[6]);
+                M.RetiredInstructions = std::stoull(row[6]);
+                M.Cycles = std::stoul(row[8]);
                 M.Valid = true;
                 csv_cache[start_addr] = M;
             } catch (...) {
@@ -78,7 +80,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    std::printf("start_address,end_address,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
+    std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(*Obj);
 
     for (const SectionRef &Section : Obj->sections()) {
@@ -103,20 +105,28 @@ int main(int argc, char **argv) {
                         McaRegion r;
                         r.Start = Span.Start;
                         r.Size = Span.Size;
-                        r.SimulatedSize = Span.Size;
+                        r.AnalysisStart = Span.AnalysisStart;
+                        r.AnalysisSize = Span.AnalysisSize;
+                        r.SimulatedSize = Span.AnalysisSize;
                         r.IsLoop = true;
                         r.StartAddr = SectionInstrs[Span.Start].Addr;
                         r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
+                        r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
+                        r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
                         regions.push_back(r);
                     },
                     [&](const RegionSpan &Span) {
                         McaRegion r;
                         r.Start = Span.Start;
                         r.Size = Span.Size;
-                        r.SimulatedSize = Span.Size;
+                        r.AnalysisStart = Span.AnalysisStart;
+                        r.AnalysisSize = Span.AnalysisSize;
+                        r.SimulatedSize = Span.AnalysisSize;
                         r.IsLoop = false;
                         r.StartAddr = SectionInstrs[Span.Start].Addr;
                         r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
+                        r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
+                        r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
                         regions.push_back(r);
                     });
 
@@ -125,7 +135,7 @@ int main(int argc, char **argv) {
             uint64_t regionAddr = r.StartAddr;
             if (TI.TargetAddress != 0 && regionAddr != TI.TargetAddress) return;
             
-            auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size);
+            auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(r.AnalysisStart, r.AnalysisSize);
             if (isAllNopRegion(region_instrs, *TI.MCII)) return;
 
             bool ignore = false;
@@ -165,7 +175,7 @@ int main(int argc, char **argv) {
             }
 
             if (!reused) {
-                r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.Start, r.Size), *TI.STI, *TI.MCII,
+                r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.AnalysisStart, r.AnalysisSize), *TI.STI, *TI.MCII,
                                              *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
                                              *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
             }
@@ -192,7 +202,7 @@ int main(int argc, char **argv) {
 
         // Output all valid results
         for (const auto &r : valid_regions) {
-            printResultCsv(SectionInstrs[r.Start], SectionInstrs[r.Start + r.Size - 1], r.SimulatedSize, r.IsLoop, r.Metrics);
+            printResultCsv(r.StartAddr, r.EndAddr, r.AnalysisStartAddr, r.AnalysisEndAddr, r.SimulatedSize, r.IsLoop, r.Metrics);
         }
     }
 

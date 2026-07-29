@@ -107,9 +107,9 @@ int main(int argc, char **argv) {
         std::vector<SpanKey> SpanForInstr(SectionInstrs.size(), SpanKey{0, 0});
 
         auto accumulateSpan = [&](const RegionSpan &Span, bool isLoop) {
-            if (Span.Size == 0) return;
+            if (Span.AnalysisSize == 0) return;
             
-            auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size);
+            auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(Span.AnalysisStart, Span.AnalysisSize);
             if (isAllNopRegion(region_instrs, *TI.MCII)) return;
 
             const SpanKey Key{Span.Start, Span.Size};
@@ -130,7 +130,7 @@ int main(int argc, char **argv) {
                 mlpLoop = false;
             }
             ScopedSilence silence;
-            auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.Start, Span.Size), *TI.STI, *TI.MCII,
+            auto Result = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(Span.AnalysisStart, Span.AnalysisSize), *TI.STI, *TI.MCII,
                                            *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
                                            *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
 

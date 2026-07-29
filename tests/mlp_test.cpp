@@ -624,11 +624,9 @@ TEST(MLPTest, SplitterNestedLoopNestingLimits) {
                 [&](const RegionSpan &Span) { outer_loops.push_back(Span); },
                 [&](const RegionSpan &Span) { outer_bbs.push_back(Span); });
 
-    ASSERT_EQ(outer_loops.size(), 2u);
+    ASSERT_EQ(outer_loops.size(), 1u);
     EXPECT_EQ(outer_loops[0].Start, 1u);
     EXPECT_EQ(outer_loops[0].Size, 5u);
-    EXPECT_EQ(outer_loops[1].Start, 2u);
-    EXPECT_EQ(outer_loops[1].Size, 2u);
 }
 
 TEST(MLPTest, AArch64OverrideLoadLatencyInfluence) {

@@ -22,17 +22,109 @@ struct CFGNode {
     std::vector<size_t> preds;
 };
 
-void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMaxInstrs, int bbMaxInstrs, int nestLimitOuter, int nestLimitInner,
-                     const std::function<void(const RegionSpan &)> &onLoop,
-                     const std::function<void(const RegionSpan &)> &onBasicBlock) {
-    size_t n = funcInstrs.size();
-    if (n == 0) return;
+// ループ情報用の構造体
+struct LoopInfo {
+    size_t header;
+    size_t latch;
+    std::vector<size_t> member_nodes;
+    size_t total_instrs;
+    size_t min_idx;
+    size_t max_idx;
+    size_t analysis_min_idx;
+    size_t analysis_max_idx;
+    bool valid;
+    int depth = 0;
+    int height = 0;
+};
 
-    // 1. 各命令がBBの境界（カットポイント）であるかを判定する
+// Lengauer-Tarjan アルゴリズムによる支配木 (Dominator Tree) の計算
+std::vector<int> computeLengauerTarjan(size_t num_nodes, size_t root,
+                                       const std::vector<std::vector<size_t>> &succs,
+                                       const std::vector<std::vector<size_t>> &preds) {
+    std::vector<int> dfnum(num_nodes, -1);
+    std::vector<int> vertex(num_nodes, -1);
+    std::vector<int> parent(num_nodes, -1);
+    std::vector<int> semi(num_nodes, -1);
+    std::vector<int> dom(num_nodes, -1);
+    std::vector<int> ancestor(num_nodes, -1);
+    std::vector<int> label(num_nodes, -1);
+    std::vector<std::vector<int>> bucket(num_nodes);
+    int dfs_count = 0;
+
+    std::function<void(int)> dfs = [&](int u) {
+        dfnum[u] = dfs_count;
+        vertex[dfs_count] = u;
+        semi[u] = dfs_count;
+        label[u] = u;
+        dfs_count++;
+
+        for (size_t v : succs[u]) {
+            if (dfnum[v] == -1) {
+                parent[v] = u;
+                dfs(v);
+            }
+        }
+    };
+
+    dfs(static_cast<int>(root));
+
+    std::function<void(int)> compress = [&](int v) {
+        int anc = ancestor[v];
+        if (ancestor[anc] != -1) {
+            compress(anc);
+            if (semi[label[anc]] < semi[label[v]]) {
+                label[v] = label[anc];
+            }
+            ancestor[v] = ancestor[anc];
+        }
+    };
+
+    auto eval = [&](int v) -> int {
+        if (ancestor[v] == -1) return v;
+        compress(v);
+        return label[v];
+    };
+
+    auto link = [&](int u, int v) {
+        ancestor[v] = u;
+    };
+
+    for (int i = dfs_count - 1; i >= 1; --i) {
+        int w = vertex[i];
+        for (size_t v : preds[w]) {
+            if (dfnum[v] == -1) continue;
+            int u = eval(v);
+            if (semi[u] < semi[w]) {
+                semi[w] = semi[u];
+            }
+        }
+        bucket[vertex[semi[w]]].push_back(w);
+        link(parent[w], w);
+        int p = parent[w];
+        for (int v : bucket[p]) {
+            int u = eval(v);
+            dom[v] = (semi[u] < semi[v]) ? u : p;
+        }
+        bucket[p].clear();
+    }
+
+    for (int i = 1; i < dfs_count; ++i) {
+        int w = vertex[i];
+        if (dom[w] != vertex[semi[w]]) {
+            dom[w] = dom[dom[w]];
+        }
+    }
+
+    return dom;
+}
+
+// 1. 各命令がBBの境界であるかを判定し、CFGNode を作成する
+std::vector<CFGNode> buildCFGNodes(ArrayRef<Instr> funcInstrs, int bbMaxInstrs) {
+    size_t n = funcInstrs.size();
     std::vector<bool> cuts(n, false);
     cuts[0] = true; // 関数の開始は必ずBBの開始
 
-    // 分岐ターゲットアドレスの集合を特定する
+    // 分岐ターゲットアドレスの集合を特定
     std::set<uint64_t> targets;
     for (size_t i = 0; i < n; ++i) {
         const auto &I = funcInstrs[i];
@@ -54,9 +146,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         }
     }
 
-    // BBの切り出しと、必要に応じた bbMaxInstrs 分割
     std::vector<CFGNode> nodes;
-    size_t start = 0;
     auto addNode = [&](size_t s, size_t sz) {
         CFGNode node;
         node.id = nodes.size();
@@ -67,6 +157,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         nodes.push_back(node);
     };
 
+    size_t start = 0;
     for (size_t i = 1; i < n; ++i) {
         if (cuts[i]) {
             size_t sz = i - start;
@@ -85,7 +176,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             start = i;
         }
     }
-    // 最後のBB
+
     size_t sz = n - start;
     if (bbMaxInstrs > 0 && sz > static_cast<size_t>(bbMaxInstrs)) {
         size_t rem = sz;
@@ -100,10 +191,12 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         addNode(start, sz);
     }
 
-    size_t num_nodes = nodes.size();
-    if (num_nodes == 0) return;
+    return nodes;
+}
 
-    // 2. CFGエッジの構築
+// 2. CFGエッジの構築
+void buildCFGEdges(ArrayRef<Instr> funcInstrs, std::vector<CFGNode> &nodes) {
+    size_t num_nodes = nodes.size();
     std::map<uint64_t, size_t> addr_to_node;
     for (size_t i = 0; i < num_nodes; ++i) {
         addr_to_node[nodes[i].start_addr] = i;
@@ -145,66 +238,36 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             nodes[v].preds.push_back(u);
         }
     }
+}
 
-    // 3. EXITノードの作成 (ID = num_nodes)
-    // 逆CFGを構築する（post-dominator 算出のため）。
-    // 元CFGの辺 u→v に対して、逆CFGでは v→u の辺となる。
-    //   rev_succs[v]  : 逆CFGにおける v の後続ノード群（元CFGで v へ入ってくる辺の始点）
-    //   rev_preds[u]  : 逆CFGにおける u の先行ノード群（元CFGで u から出ていく辺の終点）
-    // Lengauer-Tarjan アルゴリズムは rev_succs を DFS で辿り、
-    // semi-dominator の計算で rev_preds を参照する。
-    size_t virtual_exit = num_nodes;
-    std::vector<std::vector<size_t>> rev_succs(num_nodes + 1);  // 逆CFGの後続（= 元CFGの前駆）
-    std::vector<std::vector<size_t>> rev_preds(num_nodes + 1);  // 逆CFGの先行（= 元CFGの後続）
+// 3. バックエッジ (latch -> header, header dom latch) から Natural Loop を検出
+std::vector<LoopInfo> detectNaturalLoops(const std::vector<CFGNode> &nodes,
+                                         const std::vector<int> &dom_fwd,
+                                         int loopMaxInstrs) {
+    size_t num_nodes = nodes.size();
+    auto dominates = [&](int a, int b) -> bool {
+        int curr = b;
+        while (curr != -1) {
+            if (curr == a) return true;
+            curr = dom_fwd[curr];
+        }
+        return false;
+    };
 
+    std::vector<std::pair<size_t, size_t>> back_edges; // (latch, header)
+    std::set<std::pair<size_t, size_t>> seen_edges;
     for (size_t u = 0; u < num_nodes; ++u) {
         for (size_t v : nodes[u].succs) {
-            // 元CFG: u→v  ⇒  逆CFG: v→u
-            rev_succs[v].push_back(u);   // 逆CFGで v の後続に u を追加
-            rev_preds[u].push_back(v);   // 逆CFGで u の先行に v を追加
-        }
-        const auto &last_instr = funcInstrs[nodes[u].start_idx + nodes[u].size - 1];
-        if (nodes[u].succs.empty() || last_instr.IsReturn) {
-            // u は virtual_exit へ繋がる（リターンまたは後続なし）
-            // 逆CFG: virtual_exit→u
-            rev_succs[virtual_exit].push_back(u);
-            rev_preds[u].push_back(virtual_exit);
+            if (dominates(v, u)) {
+                if (seen_edges.find({u, v}) == seen_edges.end()) {
+                    back_edges.push_back({u, v});
+                    seen_edges.insert({u, v});
+                }
+            }
         }
     }
 
-    // 4. Natural Loop の検出 (DFS)
-    std::vector<std::pair<size_t, size_t>> back_edges; // (latch, header)
-    std::vector<int> dfnum(num_nodes + 1, -1);
-    std::vector<bool> active(num_nodes + 1, false);
-    int dfs_count = 0;
-
-    std::function<void(size_t)> find_loops_dfs = [&](size_t u) {
-        dfnum[u] = dfs_count++;
-        active[u] = true;
-        for (size_t v : nodes[u].succs) {
-            if (dfnum[v] == -1) {
-                find_loops_dfs(v);
-            } else if (active[v]) {
-                back_edges.push_back({u, v});
-            }
-        }
-        active[u] = false;
-    };
-
-    find_loops_dfs(0);
-
-    struct LoopInfo {
-        size_t header;
-        std::vector<size_t> member_nodes;
-        size_t total_instrs;
-        size_t min_idx;
-        size_t max_idx;
-        bool valid;
-        int depth;
-        int height;
-    };
     std::vector<LoopInfo> loops;
-
     for (const auto &edge : back_edges) {
         size_t latch = edge.first;
         size_t header = edge.second;
@@ -216,9 +279,11 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         loop_nodes.push_back(header);
         visited.insert(header);
 
-        stack.push_back(latch);
-        loop_nodes.push_back(latch);
-        visited.insert(latch);
+        if (visited.find(latch) == visited.end()) {
+            stack.push_back(latch);
+            loop_nodes.push_back(latch);
+            visited.insert(latch);
+        }
 
         while (!stack.empty()) {
             size_t curr = stack.back();
@@ -233,9 +298,6 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             }
         }
 
-
-        // min_idx/max_idx/total_instrs を member_nodes 全体から算出する。
-        // header と latch のみでは、ループボディ内の全ノードを網羅できない。
         size_t min_idx = SIZE_MAX;
         size_t max_idx = 0;
         size_t total_instrs = 0;
@@ -247,6 +309,15 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             total_instrs += nodes[m].size;
         }
 
+        size_t analysis_min_idx = nodes[header].start_idx;
+        size_t analysis_max_idx = nodes[latch].start_idx + nodes[latch].size - 1;
+
+        // header が latch より後のアドレスにある場合は不正（安全策としてフォールバック）
+        if (analysis_min_idx > analysis_max_idx) {
+            analysis_min_idx = min_idx;
+            analysis_max_idx = max_idx;
+        }
+
         bool valid = true;
         if (loopMaxInstrs > 0 && total_instrs > static_cast<size_t>(loopMaxInstrs)) {
             valid = false;
@@ -254,16 +325,22 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
 
         LoopInfo loop;
         loop.header = header;
+        loop.latch = latch;
         loop.member_nodes = loop_nodes;
         loop.total_instrs = total_instrs;
         loop.min_idx = min_idx;
         loop.max_idx = max_idx;
+        loop.analysis_min_idx = analysis_min_idx;
+        loop.analysis_max_idx = analysis_max_idx;
         loop.valid = valid;
-        loop.depth = 0;
-        loop.height = 0;
         loops.push_back(loop);
     }
 
+    return loops;
+}
+
+// 4. 同一 header の最大ループ選択と包含関係に基づく Loop 木構造・深さ・高さの計算
+std::vector<LoopInfo> buildLoopHierarchy(std::vector<LoopInfo> &loops) {
     std::map<size_t, size_t> header_to_max_loop;
     for (size_t i = 0; i < loops.size(); ++i) {
         if (!loops[i].valid) continue;
@@ -291,7 +368,7 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
 
     for (size_t i = 0; i < num_loops; ++i) {
         int best_p = -1;
-        size_t best_p_size = -1;
+        size_t best_p_size = SIZE_MAX;
         for (size_t j = 0; j < num_loops; ++j) {
             if (i == j) continue;
             if (is_subset(valid_loops[i].member_nodes, valid_loops[j].member_nodes)) {
@@ -324,11 +401,11 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
             valid_loops[idx].height = 0;
             return 0;
         }
-        int min_child_h = calc_height(children[idx][0]);
+        int max_child_h = calc_height(children[idx][0]);
         for (size_t i = 1; i < children[idx].size(); ++i) {
-            min_child_h = std::min(min_child_h, calc_height(children[idx][i]));
+            max_child_h = std::max(max_child_h, calc_height(children[idx][i]));
         }
-        int h = min_child_h + 1;
+        int h = max_child_h + 1;
         valid_loops[idx].height = h;
         return h;
     };
@@ -338,200 +415,191 @@ void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMa
         }
     }
 
-    for (size_t i = 0; i < num_loops; ++i) {
-        bool fail_outer = (nestLimitOuter > 0 && valid_loops[i].depth >= nestLimitOuter);
-        bool fail_inner = (nestLimitInner > 0 && valid_loops[i].height >= nestLimitInner);
-        if (fail_outer && fail_inner) {
-            valid_loops[i].valid = false;
-        }
+    return valid_loops;
+}
+
+// 5. Stage 1: ループ抽出 (Phase A: Inner-limit, Phase B: Outer-limit)
+void extractLoopRegions(size_t n, size_t globalOffset,
+                        const std::vector<LoopInfo> &valid_loops,
+                        int nestLimitOuter, int nestLimitInner,
+                        std::vector<int> &inner_counts,
+                        std::vector<int> &outer_counts,
+                        const std::function<void(const RegionSpan &)> &onLoop) {
+    size_t num_loops = valid_loops.size();
+    int limit_inner = nestLimitInner;
+    int limit_outer = nestLimitOuter;
+    if (limit_inner == 0 && limit_outer == 0) {
+        limit_inner = 1;
     }
 
-#if OPT_MERGE_BB
-    // 5. 出力 (onLoop と onBasicBlock) - マージモード
-    for (size_t i = 0; i < num_loops; ++i) {
-        if (!valid_loops[i].valid) continue;
-        onLoop(RegionSpan{globalOffset + valid_loops[i].min_idx, valid_loops[i].max_idx - valid_loops[i].min_idx + 1});
-    }
+    if (limit_inner > 0) {
+        // Phase A: Inner Loops (Height 昇順 - 最内側優先)
+        std::vector<size_t> inner_order(num_loops);
+        for (size_t i = 0; i < num_loops; ++i) inner_order[i] = i;
+        std::sort(inner_order.begin(), inner_order.end(), [&](size_t a, size_t b) {
+            if (valid_loops[a].height != valid_loops[b].height)
+                return valid_loops[a].height < valid_loops[b].height;
+            return valid_loops[a].total_instrs < valid_loops[b].total_instrs;
+        });
 
-    std::vector<size_t> loop_cuts;
-    loop_cuts.push_back(0);
-    loop_cuts.push_back(n);
-    for (size_t i = 0; i < num_loops; ++i) {
-        if (!valid_loops[i].valid) continue;
-        loop_cuts.push_back(valid_loops[i].min_idx);
-        loop_cuts.push_back(valid_loops[i].max_idx + 1);
-    }
-    std::sort(loop_cuts.begin(), loop_cuts.end());
-    loop_cuts.erase(std::unique(loop_cuts.begin(), loop_cuts.end()), loop_cuts.end());
-
-    for (size_t i = 0; i + 1 < loop_cuts.size(); ++i) {
-        size_t c_start = loop_cuts[i];
-        size_t c_end = loop_cuts[i + 1];
-        if (c_start >= c_end) continue;
-
-        bool inside_loop = false;
-        for (size_t j = 0; j < num_loops; ++j) {
-            if (!valid_loops[j].valid) continue;
-            if (c_start >= valid_loops[j].min_idx && c_end <= valid_loops[j].max_idx + 1) {
-                inside_loop = true;
-                break;
-            }
-        }
-        if (!inside_loop) {
-            onBasicBlock(RegionSpan{globalOffset + c_start, c_end - c_start});
-        }
-    }
-#else
-    std::vector<int> node_merged_to_loop(num_nodes, -1);
-
-    bool has_valid_loops = false;
-    for (size_t l = 0; l < num_loops; ++l) {
-        if (valid_loops[l].valid) {
-            has_valid_loops = true;
-            break;
-        }
-    }
-
-    if (has_valid_loops) {
-        // 5. Post-dominator の算出 (Lengauer-Tarjan on reverse CFG)
-        std::vector<int> dfnum_rev(num_nodes + 1, -1);
-        std::vector<int> vertex_rev(num_nodes + 1, -1);
-        std::vector<int> parent_rev(num_nodes + 1, -1);
-        std::vector<int> semi_rev(num_nodes + 1, -1);
-        std::vector<int> dom_rev(num_nodes + 1, -1);
-        std::vector<int> ancestor_rev(num_nodes + 1, -1);
-        std::vector<int> label_rev(num_nodes + 1, -1);
-        std::vector<std::vector<int>> bucket_rev(num_nodes + 1);
-        int dfs_count_rev = 0;
-
-        std::function<void(int)> dfs_rev = [&](int u) {
-            dfnum_rev[u] = dfs_count_rev;
-            vertex_rev[dfs_count_rev] = u;
-            semi_rev[u] = dfs_count_rev;
-            label_rev[u] = u;
-            dfs_count_rev++;
-
-            for (size_t v : rev_succs[u]) {  // 逆CFGの後続（= 元CFGの前駆）を辿る
-                if (dfnum_rev[v] == -1) {
-                    parent_rev[v] = u;
-                    dfs_rev(v);
-                }
-            }
-        };
-
-        dfs_rev(virtual_exit);
-
-        std::function<void(int)> compress_rev = [&](int v) {
-            int anc = ancestor_rev[v];
-            if (ancestor_rev[anc] != -1) {
-                compress_rev(anc);
-                if (semi_rev[label_rev[anc]] < semi_rev[label_rev[v]]) {
-                    label_rev[v] = label_rev[anc];
-                }
-                ancestor_rev[v] = ancestor_rev[anc];
-            }
-        };
-
-        auto eval_rev = [&](int v) -> int {
-            if (ancestor_rev[v] == -1) {
-                return v;
-            }
-            compress_rev(v);
-            return label_rev[v];
-        };
-
-        auto link_rev = [&](int u, int v) {
-            ancestor_rev[v] = u;
-        };
-
-        for (int i = dfs_count_rev - 1; i >= 1; --i) {
-            int w = vertex_rev[i];
-            for (size_t v : rev_preds[w]) {  // 逆CFGの先行（= 元CFGの後続）を参照
-                if (dfnum_rev[v] == -1) continue;
-                int u = eval_rev(v);
-                if (semi_rev[u] < semi_rev[w]) {
-                    semi_rev[w] = semi_rev[u];
-                }
-            }
-            bucket_rev[vertex_rev[semi_rev[w]]].push_back(w);
-            link_rev(parent_rev[w], w);
-            int p = parent_rev[w];
-            for (int v : bucket_rev[p]) {
-                int u = eval_rev(v);
-                dom_rev[v] = (semi_rev[u] < semi_rev[v]) ? u : p;
-            }
-            bucket_rev[p].clear();
-        }
-
-        for (int i = 1; i < dfs_count_rev; ++i) {
-            int w = vertex_rev[i];
-            if (dom_rev[w] != vertex_rev[semi_rev[w]]) {
-                dom_rev[w] = dom_rev[dom_rev[w]];
-            }
-        }
-
-        // 6. 各基本ブロックがループに後支配（pdom）されてマージされるかの判定
-        // ループヘッダからループインデックスへの高速ルックアップテーブルを構築
-        std::vector<int> header_to_loop_idx(num_nodes, -1);
-        for (size_t l = 0; l < num_loops; ++l) {
-            if (valid_loops[l].valid) {
-                header_to_loop_idx[valid_loops[l].header] = l;
-            }
-        }
-
-        for (size_t u = 0; u < num_nodes; ++u) {
-            bool directly_in_loop = false;
-            for (size_t l = 0; l < num_loops; ++l) {
-                if (!valid_loops[l].valid) continue;
-                if (nodes[u].start_idx >= valid_loops[l].min_idx && 
-                    (nodes[u].start_idx + nodes[u].size - 1) <= valid_loops[l].max_idx) {
-                    directly_in_loop = true;
+        for (size_t idx : inner_order) {
+            const auto &loop = valid_loops[idx];
+            if (!loop.valid) continue;
+            bool can_extract = true;
+            for (size_t i = loop.min_idx; i <= loop.max_idx; ++i) {
+                if (inner_counts[i] >= limit_inner) {
+                    can_extract = false;
                     break;
                 }
             }
-            if (directly_in_loop) {
-                node_merged_to_loop[u] = -2;
-                continue;
-            }
-
-            int curr = dom_rev[u];
-            std::vector<size_t> pdom_loop_headers;
-            while (curr != -1 && curr != (int)virtual_exit) {
-                if (curr < (int)num_nodes && header_to_loop_idx[curr] != -1) {
-                    pdom_loop_headers.push_back(curr);
+            if (can_extract) {
+                onLoop(RegionSpan{
+                    globalOffset + loop.min_idx,
+                    loop.max_idx - loop.min_idx + 1,
+                    globalOffset + loop.analysis_min_idx,
+                    loop.analysis_max_idx - loop.analysis_min_idx + 1
+                });
+                for (size_t i = loop.min_idx; i <= loop.max_idx; ++i) {
+                    inner_counts[i]++;
                 }
-                curr = dom_rev[curr];
-            }
-
-            if (!pdom_loop_headers.empty()) {
-                int best_header = -1;
-                size_t min_loop_nodes_size = SIZE_MAX;
-                for (size_t h : pdom_loop_headers) {
-                    size_t l = header_to_loop_idx[h];
-                    // ループの前方・後方を問わず post-dominate されているBBをマージする。
-                    // 最小サイズのループ（最も内側）を選ぶ。
-                    if (valid_loops[l].member_nodes.size() < min_loop_nodes_size) {
-                        min_loop_nodes_size = valid_loops[l].member_nodes.size();
-                        best_header = h;
-                    }
-                }
-                node_merged_to_loop[u] = best_header;
             }
         }
     }
 
-    // 7. 出力 (onLoop と onBasicBlock)
-    for (size_t i = 0; i < num_loops; ++i) {
-        if (!valid_loops[i].valid) continue;
-        onLoop(RegionSpan{globalOffset + valid_loops[i].min_idx, valid_loops[i].max_idx - valid_loops[i].min_idx + 1});
+    if (limit_outer > 0) {
+        // Phase B: Outer Loops (Depth 昇順 - 最外側優先)
+        std::vector<size_t> outer_order(num_loops);
+        for (size_t i = 0; i < num_loops; ++i) outer_order[i] = i;
+        std::sort(outer_order.begin(), outer_order.end(), [&](size_t a, size_t b) {
+            if (valid_loops[a].depth != valid_loops[b].depth)
+                return valid_loops[a].depth < valid_loops[b].depth;
+            return valid_loops[a].total_instrs > valid_loops[b].total_instrs;
+        });
+
+        for (size_t idx : outer_order) {
+            const auto &loop = valid_loops[idx];
+            if (!loop.valid) continue;
+            bool can_extract = true;
+            for (size_t i = loop.min_idx; i <= loop.max_idx; ++i) {
+                if (outer_counts[i] >= limit_outer) {
+                    can_extract = false;
+                    break;
+                }
+            }
+            if (can_extract) {
+                onLoop(RegionSpan{
+                    globalOffset + loop.min_idx,
+                    loop.max_idx - loop.min_idx + 1,
+                    globalOffset + loop.analysis_min_idx,
+                    loop.analysis_max_idx - loop.analysis_min_idx + 1
+                });
+                for (size_t i = loop.min_idx; i <= loop.max_idx; ++i) {
+                    outer_counts[i]++;
+                }
+            }
+        }
     }
+}
+
+// 6. Stage 2: Post-Dominator Tree による未解析基本ブロックの集約
+void aggregateBasicBlocks(ArrayRef<Instr> funcInstrs, size_t globalOffset,
+                          const std::vector<CFGNode> &nodes,
+                          const std::vector<int> &inner_counts,
+                          const std::vector<int> &outer_counts,
+                          const std::function<void(const RegionSpan &)> &onBasicBlock) {
+    size_t num_nodes = nodes.size();
+    size_t virtual_exit = num_nodes;
+    std::vector<std::vector<size_t>> rev_succs(num_nodes + 1);
+    std::vector<std::vector<size_t>> rev_preds(num_nodes + 1);
 
     for (size_t u = 0; u < num_nodes; ++u) {
-        if (node_merged_to_loop[u] == -1) {
-            onBasicBlock(RegionSpan{globalOffset + nodes[u].start_idx, nodes[u].size});
+        for (size_t v : nodes[u].succs) {
+            rev_succs[v].push_back(u);
+            rev_preds[u].push_back(v);
+        }
+        const auto &last_instr = funcInstrs[nodes[u].start_idx + nodes[u].size - 1];
+        if (nodes[u].succs.empty() || last_instr.IsReturn) {
+            rev_succs[virtual_exit].push_back(u);
+            rev_preds[u].push_back(virtual_exit);
         }
     }
-#endif
+
+    std::vector<int> dom_rev = computeLengauerTarjan(num_nodes + 1, virtual_exit, rev_succs, rev_preds);
+
+    // 各ノードの命令が一つでも未解析 (inner_count == 0 && outer_count == 0) かどうか判定
+    std::vector<bool> node_has_unanalyzed(num_nodes, false);
+    for (size_t u = 0; u < num_nodes; ++u) {
+        for (size_t i = nodes[u].start_idx; i < nodes[u].start_idx + nodes[u].size; ++i) {
+            if (inner_counts[i] == 0 && outer_counts[i] == 0) {
+                node_has_unanalyzed[u] = true;
+                break;
+            }
+        }
+    }
+
+    // 未解析の基本ブロックをグループ化（CFG 制御フローに沿った Post-Dominance / 直列パスをマージ）
+    std::vector<int> bb_group(num_nodes, -1);
+    for (size_t u = 0; u < num_nodes; ++u) {
+        if (!node_has_unanalyzed[u]) continue;
+        if (bb_group[u] != -1) continue;
+
+        size_t g_start = nodes[u].start_idx;
+        size_t g_size = nodes[u].size;
+        bb_group[u] = u;
+
+        size_t curr = u;
+        while (curr + 1 < num_nodes && node_has_unanalyzed[curr + 1]) {
+            bool has_edge = (std::find(nodes[curr].succs.begin(), nodes[curr].succs.end(), curr + 1) != nodes[curr].succs.end());
+            if (has_edge && (nodes[curr].succs.size() == 1 || dom_rev[curr] == static_cast<int>(curr + 1))) {
+                curr++;
+                g_size += nodes[curr].size;
+                bb_group[curr] = u;
+            } else {
+                break;
+            }
+        }
+        onBasicBlock(RegionSpan{
+            globalOffset + g_start,
+            g_size,
+            globalOffset + g_start,
+            g_size
+        });
+    }
+}
+
+void processFunction(ArrayRef<Instr> funcInstrs, size_t globalOffset, int loopMaxInstrs, int bbMaxInstrs, int nestLimitOuter, int nestLimitInner,
+                     const std::function<void(const RegionSpan &)> &onLoop,
+                     const std::function<void(const RegionSpan &)> &onBasicBlock) {
+    size_t n = funcInstrs.size();
+    if (n == 0) return;
+
+    // 1. CFG ノードの構築
+    std::vector<CFGNode> nodes = buildCFGNodes(funcInstrs, bbMaxInstrs);
+    if (nodes.empty()) return;
+
+    // 2. CFG エッジの構築
+    buildCFGEdges(funcInstrs, nodes);
+
+    // 3. 支配木 (Forward Dominator Tree) の計算
+    size_t num_nodes = nodes.size();
+    std::vector<std::vector<size_t>> succs(num_nodes), preds(num_nodes);
+    for (size_t i = 0; i < num_nodes; ++i) {
+        succs[i] = nodes[i].succs;
+        preds[i] = nodes[i].preds;
+    }
+    std::vector<int> dom_fwd = computeLengauerTarjan(num_nodes, 0, succs, preds);
+
+    // 4. ループ検出と階層ツリーの構築
+    std::vector<LoopInfo> raw_loops = detectNaturalLoops(nodes, dom_fwd, loopMaxInstrs);
+    std::vector<LoopInfo> valid_loops = buildLoopHierarchy(raw_loops);
+
+    // 5. Stage 1: ループ領域の抽出
+    std::vector<int> inner_counts(n, 0);
+    std::vector<int> outer_counts(n, 0);
+    extractLoopRegions(n, globalOffset, valid_loops, nestLimitOuter, nestLimitInner, inner_counts, outer_counts, onLoop);
+
+    // 6. Stage 2: 未解析基本ブロックの集約
+    aggregateBasicBlocks(funcInstrs, globalOffset, nodes, inner_counts, outer_counts, onBasicBlock);
 }
 
 } // namespace
