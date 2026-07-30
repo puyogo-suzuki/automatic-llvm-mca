@@ -45,18 +45,18 @@ def IceUnitFP  : ProcResource<2> { let BufferSize = 26; }
 // 1 MEM Scheduler (18 entries)
 def IceUnitMem : ProcResource<4> { let BufferSize = 18; }
 
-def IceLoadBuffer  : ProcResource<1> { let BufferSize = 30; }
-def IceStoreBuffer : ProcResource<1> { let BufferSize = 18; }
+def IceLoadBuffer  : ProcResource<2> { let BufferSize = 30; } // 2 loads per cycle
+def IceStoreBuffer : ProcResource<1> { let BufferSize = 18; } // 1 store per cycle
 
 //===----------------------------------------------------------------------===//
 // Target-wide SchedWrites mappings for Icestorm Model
 
 let SchedModel = IcestormModel in {
 
-def : WriteRes<WriteImm, [IceUnitI]> { let Latency = 1; }
+def : WriteRes<WriteImm, []> { let Latency = 0; }
 def : WriteRes<WriteI, [IceUnitI]> { let Latency = 1; }
-def : WriteRes<WriteISReg, [IceUnitI, IceUnitI]> { let Latency = 2; }
-def : WriteRes<WriteIEReg, [IceUnitI, IceUnitI]> { let Latency = 2; }
+def : WriteRes<WriteISReg, [IceUnitI]> { let Latency = 2; }
+def : WriteRes<WriteIEReg, [IceUnitI]> { let Latency = 2; }
 def : WriteRes<WriteExtr, [IceUnitI]> { let Latency = 1; }
 def : WriteRes<WriteIS, [IceUnitI]> { let Latency = 1; }
 def : WriteRes<WriteIM32, [IceUnitI2]> { let Latency = 3; }
@@ -91,6 +91,19 @@ def : WriteRes<WriteVLD, [IceUnitMem, IceLoadBuffer]> { let Latency = 3; }
 def : WriteRes<WriteVST, [IceUnitMem, IceStoreBuffer]> { let Latency = 1; }
 
 def : WriteRes<WriteAtomic, []> { let Unsupported = 1; }
+
+// Zero-cycle execution (Zero-latency, no ProcResource consumed) for Register Renaming elimination (Hardware Copy-on-Write)
+def WriteZeroIce : SchedWriteRes<[]> { let Latency = 0; }
+
+// InstRW overrides for IceStorm Processor Model:
+// 1. Zero-cycle Register Renaming Elimination (MOVs, FMOVs, NOP)
+def : InstRW<[WriteZeroIce], (instrs MOVZWi, MOVZXi, MOVNWi, MOVNXi, MOVKWi, MOVKXi, FMOVDr, FMOVSr, NOP)>;
+// 2. PC-relative Address Calculation
+def : InstRW<[WriteAdr], (instrs ADR, ADRP)>;
+// 3. Scalar Loads - 3 cycle latency
+def : InstRW<[WriteLD], (instrs LDRBui, LDRHui, LDRWui, LDRXui, LDRBroX, LDRHroX, LDRWroX, LDRXroX, LDPWi, LDPXi)>;
+// 4. Scalar Stores - 1 cycle latency
+def : InstRW<[WriteST], (instrs STRBui, STRHui, STRWui, STRXui, STRBroX, STRHroX, STRWroX, STRXroX, STPWi, STPXi)>;
 
 def : ReadAdvance<ReadI, 0>;
 def : ReadAdvance<ReadISReg, 0>;

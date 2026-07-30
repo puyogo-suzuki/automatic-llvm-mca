@@ -43,6 +43,9 @@ def FireUnitI  : ProcResource<6> { let BufferSize = 134; }
 // Multiply execution ports (u5, u6 = FireUnitI4, FireUnitI5)
 def FireUnitIMul : ProcResource<2> { let BufferSize = 56; }
 
+// Branch execution ports (u1, u2 = FireUnitI0, FireUnitI1)
+def FireUnitBranch : ProcResource<2> { let BufferSize = 50; }
+
 // 4 FP/Vector Schedulers (each 36 entries)
 def FireUnitFP0 : ProcResource<1> { let BufferSize = 36; }
 def FireUnitFP1 : ProcResource<1> { let BufferSize = 36; }
@@ -53,26 +56,26 @@ def FireUnitFP  : ProcResource<4> { let BufferSize = 144; }
 // 1 MEM Scheduler (28 entries)
 def FireUnitMem : ProcResource<7> { let BufferSize = 28; } // u7-u10: Store x2, Load x3
 
-def FireLoadBuffer  : ProcResource<1> { let BufferSize = 130; }
-def FireStoreBuffer : ProcResource<1> { let BufferSize = 60; }
+def FireLoadBuffer  : ProcResource<3> { let BufferSize = 130; } // 3 loads per cycle
+def FireStoreBuffer : ProcResource<2> { let BufferSize = 60; }  // 2 stores per cycle
 
 //===----------------------------------------------------------------------===//
 // Target-wide SchedWrites mappings for Firestorm Model
 
 let SchedModel = FirestormModel in {
 
-def : WriteRes<WriteImm, [FireUnitI]> { let Latency = 1; }
+def : WriteRes<WriteImm, []> { let Latency = 0; }
 def : WriteRes<WriteI, [FireUnitI]> { let Latency = 1; }
-def : WriteRes<WriteISReg, [FireUnitI, FireUnitI]> { let Latency = 2; }
-def : WriteRes<WriteIEReg, [FireUnitI, FireUnitI]> { let Latency = 2; }
+def : WriteRes<WriteISReg, [FireUnitI]> { let Latency = 2; }
+def : WriteRes<WriteIEReg, [FireUnitI]> { let Latency = 2; }
 def : WriteRes<WriteExtr, [FireUnitI]> { let Latency = 1; }
 def : WriteRes<WriteIS, [FireUnitI]> { let Latency = 1; }
 def : WriteRes<WriteIM32, [FireUnitIMul]> { let Latency = 3; }
 def : WriteRes<WriteIM64, [FireUnitIMul]> { let Latency = 3; }
 def : WriteRes<WriteID32, [FireUnitI4]> { let Latency = 9; }
 def : WriteRes<WriteID64, [FireUnitI4]> { let Latency = 9; }
-def : WriteRes<WriteBr, [FireUnitI0]> { let Latency = 1; }
-def : WriteRes<WriteBrReg, [FireUnitI1]> { let Latency = 1; }
+def : WriteRes<WriteBr, [FireUnitBranch]> { let Latency = 1; }
+def : WriteRes<WriteBrReg, [FireUnitBranch]> { let Latency = 1; }
 def : WriteRes<WriteLD, [FireUnitMem, FireLoadBuffer]> { let Latency = 3; }
 def : WriteRes<WriteST, [FireUnitMem, FireStoreBuffer]> { let Latency = 1; }
 def : WriteRes<WriteSTP, [FireUnitMem, FireStoreBuffer]> { let Latency = 1; }
@@ -100,15 +103,28 @@ def : WriteRes<WriteVST, [FireUnitMem, FireStoreBuffer]> { let Latency = 1; }
 
 def : WriteRes<WriteAtomic, []> { let Unsupported = 1; }
 
+// Zero-cycle execution (Zero-latency, no ProcResource consumed) for Register Renaming elimination (Hardware Copy-on-Write)
+def WriteZeroFire : SchedWriteRes<[]> { let Latency = 0; }
+
+// InstRW overrides for Firestorm Processor Model:
+// 1. Zero-cycle Register Renaming Elimination (MOVs, FMOVs, NOP)
+def : InstRW<[WriteZeroFire], (instrs MOVZWi, MOVZXi, MOVNWi, MOVNXi, MOVKWi, MOVKXi, FMOVDr, FMOVSr, NOP)>;
+// 2. PC-relative Address Calculation (u1, u2)
+def : InstRW<[WriteAdr], (instrs ADR, ADRP)>;
+// 3. Scalar Loads (u8-u10) - 3 cycle latency
+def : InstRW<[WriteLD], (instrs LDRBui, LDRHui, LDRWui, LDRXui, LDRBroX, LDRHroX, LDRWroX, LDRXroX, LDPWi, LDPXi)>;
+// 4. Scalar Stores (u7-u8) - 1 cycle latency
+def : InstRW<[WriteST], (instrs STRBui, STRHui, STRWui, STRXui, STRBroX, STRHroX, STRWroX, STRXroX, STPWi, STPXi)>;
+
 def : ReadAdvance<ReadI, 0>;
 def : ReadAdvance<ReadISReg, 0>;
 def : ReadAdvance<ReadIEReg, 0>;
 def : ReadAdvance<ReadIM, 0>;
-def : ReadAdvance<ReadIMA, 0>;
+def : ReadAdvance<ReadIMA, 2>; // Accumulator operand read 2 cycles late in MADD pipeline
 def : ReadAdvance<ReadID, 0>;
-def : ReadAdvance<ReadST, 0>;
+def : ReadAdvance<ReadST, 1>;  // Store data operand read 1 cycle late in Store Buffer
 def : ReadAdvance<ReadExtrHi, 0>;
-def : ReadAdvance<ReadAdrBase, 0>;
+def : ReadAdvance<ReadAdrBase, 1>; // AGU base address forwarded 1 cycle early
 def : ReadAdvance<ReadVLD, 0>;
 
 } // SchedModel = FirestormModel
