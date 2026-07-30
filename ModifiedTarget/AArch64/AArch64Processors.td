@@ -1411,9 +1411,9 @@ def : ProcessorModel<"cortex-a55", CortexA55Model, ProcessorFeatures.A55,
                      [TuneA55]>;
 def : ProcessorModel<"cortex-a510", CortexA510Model, ProcessorFeatures.A510,
                      [TuneA510]>;
-def : ProcessorModel<"cortex-a520", CortexA510Model, ProcessorFeatures.A520,
+def : ProcessorModel<"cortex-a520", CortexA520Model, ProcessorFeatures.A520,
                      [TuneA520]>;
-def : ProcessorModel<"cortex-a520ae", CortexA510Model, ProcessorFeatures.A520AE,
+def : ProcessorModel<"cortex-a520ae", CortexA520Model, ProcessorFeatures.A520AE,
                      [TuneA520AE]>;
 def : ProcessorModel<"c1-nano", CortexA510Model,
                      ProcessorFeatures.C1Nano, [TuneC1Nano]>;
@@ -1445,9 +1445,9 @@ def : ProcessorModel<"cortex-a710", NeoverseN2Model, ProcessorFeatures.A710,
                      [TuneA710]>;
 def : ProcessorModel<"cortex-a715", NeoverseN2Model, ProcessorFeatures.A715,
                      [TuneA715]>;
-def : ProcessorModel<"cortex-a720", NeoverseN2Model, ProcessorFeatures.A720,
+def : ProcessorModel<"cortex-a720", CortexA720Model, ProcessorFeatures.A720,
                      [TuneA720]>;
-def : ProcessorModel<"cortex-a720ae", NeoverseN2Model, ProcessorFeatures.A720AE,
+def : ProcessorModel<"cortex-a720ae", CortexA720Model, ProcessorFeatures.A720AE,
                      [TuneA720AE]>;
 def : ProcessorModel<"cortex-a725", NeoverseN3Model, ProcessorFeatures.A725,
                      [TuneA725]>;

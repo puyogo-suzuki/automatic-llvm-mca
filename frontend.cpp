@@ -81,7 +81,7 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
 
     TI.CPU = opts::MCPU.empty() ? "generic" : std::string(opts::MCPU);
     std::string llvm_cpu = TI.CPU;
-    if (TI.CPU == "ice" || TI.CPU == "icestorm" || TI.CPU == "fire" || TI.CPU == "firestorm") {
+    if (TI.CPU == "icestorm" || TI.CPU == "firestorm") {
         llvm_cpu = "apple-m1";
     }
     TI.MRI.reset(TI.TheTarget->createMCRegInfo(TT));
