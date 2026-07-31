@@ -71,8 +71,10 @@ def : WriteRes<WriteIS, [A720UnitI]> { let Latency = 1; }
 
 def : WriteRes<WriteIM32, [A720UnitMul]> { let Latency = 2; }
 def : WriteRes<WriteIM64, [A720UnitMul]> { let Latency = 3; }
-def : WriteRes<WriteID32, [A720UnitM0]> { let Latency = 12; }
-def : WriteRes<WriteID64, [A720UnitM0]> { let Latency = 20; }
+
+// Integer Divide (SOG Table 3-4 variable latencies: 32-bit 5-12c [median 8], 64-bit 5-20c [median 12])
+def : WriteRes<WriteID32, [A720UnitM0]> { let Latency = 8; }
+def : WriteRes<WriteID64, [A720UnitM0]> { let Latency = 12; }
 
 def : WriteRes<WriteBr, [A720UnitB]> { let Latency = 1; }
 def : WriteRes<WriteBrReg, [A720UnitB]> { let Latency = 1; }
@@ -95,6 +97,8 @@ def : WriteRes<WriteFCvt, [A720UnitV]> { let Latency = 3; }
 def : WriteRes<WriteFCopy, [A720UnitV]> { let Latency = 1; }
 def : WriteRes<WriteFImm, [A720UnitV]> { let Latency = 1; }
 def : WriteRes<WriteFMul, [A720UnitV]> { let Latency = 3; }
+
+// Floating-Point Divide (SOG Table 3-12 variable latencies: 32-bit 7-10c [median 8], 64-bit 7-15c [median 11])
 def : WriteRes<WriteFDiv, [A720UnitV0]> { let Latency = 10; }
 
 def : WriteRes<WriteVd, [A720UnitV]> { let Latency = 2; }
