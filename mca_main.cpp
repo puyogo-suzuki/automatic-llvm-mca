@@ -1,6 +1,8 @@
 #include "mca_common.h"
 #include "frontend.h"
 #include "custom_a55_sched.h"
+#include "facile.h"
+#include "llvm/MCA/InstrBuilder.h"
 #include <cstdio>
 #include <algorithm>
 #include <fcntl.h>
@@ -154,6 +156,35 @@ int main(int argc, char **argv) {
             } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Disable) {
                 mlpLoop = false;
             }
+
+            if (opts::Facile) {
+                mca::InstrumentManager IM(*TI.STI, *TI.MCII);
+                mca::InstrBuilder IB(*TI.STI, *TI.MCII, *TI.MRI, TI.MCIA.get(), IM, 0);
+                std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
+                std::vector<const MCInst *> MCInsts;
+                for (const auto &I : region_instrs) {
+                    auto ExpectedInst = IB.createInstruction(I.Inst, {});
+                    if (ExpectedInst) {
+                        SimInstrs.push_back(std::move(*ExpectedInst));
+                        MCInsts.push_back(&I.Inst);
+                    }
+                }
+
+                facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts);
+                unsigned SteadyIterations = computeSteadyIterations(*TI.STI, region_instrs.size(), opts::Iterations);
+
+                McaMetrics M;
+                M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size() * SteadyIterations);
+                M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind);
+                M.Cycles = static_cast<uint64_t>(std::round(Res.EstimatedCycles));
+                M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, M.MLP_R, mlpLoop);
+                M.BaseCPI = Res.EstimatedCPI;
+                M.Valid = true;
+                r.Metrics = M;
+                r.Valid = true;
+                return;
+            }
+
             bool reused = false;
             if (!opts::UpdateMlp.empty()) {
                 auto it = csv_cache.find(regionAddr);

@@ -63,7 +63,7 @@ include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CUR
 add_definitions(${LLVM_DEFINITIONS})
 
 # Common library for shared logic between tool and tests
-add_library(mca_common_lib STATIC mlp_logic.cpp mca.cpp splitter.cpp custom_a55_sched.cpp frontend.cpp ${GEN_INC_FILE} ${GEN_REG_INC_FILE} ${GEN_INSTR_INC_FILE})
+add_library(mca_common_lib STATIC mlp_logic.cpp mca.cpp splitter.cpp custom_a55_sched.cpp frontend.cpp facile.cpp ${GEN_INC_FILE} ${GEN_REG_INC_FILE} ${GEN_INSTR_INC_FILE})
 target_link_libraries(mca_common_lib PUBLIC LLVM)
 
 add_executable(mca_tool mca_main.cpp)
@@ -114,5 +114,9 @@ set_target_properties(mca_insts_info PROPERTIES OUTPUT_NAME "mca-insts-info")
 add_executable(mlp_check mlp_check.cpp)
 target_link_libraries(mlp_check PRIVATE mca_common_lib ${llvm_libs})
 set_target_properties(mlp_check PROPERTIES OUTPUT_NAME "mlp-check")
+
+
+
+
 
 

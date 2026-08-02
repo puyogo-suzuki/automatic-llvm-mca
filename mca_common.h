@@ -58,6 +58,8 @@ struct McaMetrics {
     bool Valid = false;
 };
 
+unsigned computeSteadyIterations(const llvm::MCSubtargetInfo &STI, size_t regionInstrCount, unsigned iterations);
+
 struct MemAccessInfo {
     std::bitset<7> flags;
     unsigned base_reg = 0;

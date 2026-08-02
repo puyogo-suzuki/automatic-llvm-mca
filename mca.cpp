@@ -267,6 +267,8 @@ unsigned getWarmupWindowSize(const MCSubtargetInfo &STI) {
     return std::max(1u, SM.IssueWidth);
 }
 
+} // namespace
+
 unsigned computeSteadyIterations(const MCSubtargetInfo &STI, size_t regionInstrCount, unsigned iterations) {
     if (regionInstrCount == 0) return 1;
     const unsigned WindowSize = std::max(1u, getWarmupWindowSize(STI));
@@ -277,9 +279,6 @@ unsigned computeSteadyIterations(const MCSubtargetInfo &STI, size_t regionInstrC
 unsigned computeWarmupIterations(const MCSubtargetInfo &STI, size_t regionInstrCount) {
     return computeSteadyIterations(STI, regionInstrCount, 1);
 }
-
-
-} // namespace
 
 void initializeTargets() {
     LLVMInitializeX86TargetInfo();

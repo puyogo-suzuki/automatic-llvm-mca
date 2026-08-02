@@ -51,6 +51,7 @@ namespace opts {
         cl::desc("Target address to analyze (hex)"), cl::init(""));
 
     cl::opt<std::string> UpdateMlp("update-mlp", cl::desc("CSV file containing previous MCA results to reuse"), cl::init(""));
+    cl::opt<bool> Facile("facile", cl::desc("Enable Facile static analytical throughput prediction (AArch64)"), cl::init(false));
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

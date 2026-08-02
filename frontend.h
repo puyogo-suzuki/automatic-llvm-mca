@@ -56,6 +56,7 @@ namespace opts {
     extern llvm::cl::opt<std::string> TargetAddressStr;
     
     extern llvm::cl::opt<std::string> UpdateMlp;
+    extern llvm::cl::opt<bool> Facile;
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

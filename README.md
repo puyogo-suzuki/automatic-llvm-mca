@@ -50,8 +50,9 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 
 ```bash
 # Main tool to analyze all loops and basic blocks, outputting metrics to stdout as CSV
+# Use --facile to enable Facile analytical throughput prediction (AArch64) instead of full cycle-by-cycle MCA simulation
 # Use --update-mlp=<csv file> to reuse the simulation results (Cycles, RetiredInsts) from a previous CSV run
-./build/mca_tool [--update-mlp <csv file>] [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
+./build/mca_tool [--facile] [--update-mlp <csv file>] [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
 
 # Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address
 ./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
@@ -65,7 +66,8 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 
 *   `<elf-binary>` — Path to the ELF binary to analyze.
 *   `mlp-objdump` — Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address.
-*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a72`, `haswell`).
+*   `--facile` — Enable Facile static analytical throughput prediction (AArch64). Calculates analytical throughput bounds for Issue, Execution Ports, and Precedence Constraints without cycle-by-cycle simulation overhead.
+*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `firestorm`, `icestorm`).
 *   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `aarch64-linux-gnu`).
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).
 *   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`, `dependency`).
@@ -76,6 +78,22 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
     *   `default`: Ignores loop-carried dependencies in basic blocks, but considers them in loops (default behavior if option is omitted).
     *   `force`: Ignores loop-carried dependencies in both loops and basic blocks.
     *   `disable`: Considers loop-carried dependencies in both loops and basic blocks.
+
+## Facile Analytical Throughput Predictor
+
+When passing `--facile` to `mca_tool`, the tool computes steady-state basic-block throughput analytically based on the **Facile** model instead of full step-by-step cycle-by-cycle MCA simulation.
+
+Facile calculates three independent throughput limits from LLVM's machine scheduling model and takes their maximum ($\max$):
+1. **Issue Limit**: Dispatch width bottleneck ($\sum \text{uops} / \text{IssueWidth}$).
+2. **Execution Ports Limit**: Contention on execution unit resource ports ($\max_p \text{ResourceCycles}(p) / \text{NumUnits}(p)$).
+3. **Precedence Constraints Limit**: Maximum Cycle Ratio (MCR) of loop-carried Read-After-Write (RAW) register dependency chains.
+
+$$\text{Facile Throughput (Cycles/Iter)} = \max\left( \text{Issue Limit},\; \text{Execution Ports Limit},\; \text{Precedence Limit} \right)$$
+
+### Reference & Citation
+* **Paper**: *Facile: Fast, Accurate, and Interpretable Basic-Block Throughput Prediction*
+* **Authors**: Shrey Sharma, Jan Reineke, Andreas Abel (Saarland University)
+* **Preprint**: [arXiv:2310.13212 [cs.PF]](https://arxiv.org/abs/2310.13212) (2023)
 
 ## Tests
 
