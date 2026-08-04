@@ -102,35 +102,36 @@ int main(int argc, char **argv) {
 
         std::vector<McaRegion> regions;
 
-        walkRegions(SectionInstrs, FunctionRanges, opts::LoopMaxInstrs, opts::BBMaxInstrs, opts::NestLimitOuter, opts::NestLimitInner,
-                    [&](const RegionSpan &Span) {
-                        McaRegion r;
-                        r.Start = Span.Start;
-                        r.Size = Span.Size;
-                        r.AnalysisStart = Span.AnalysisStart;
-                        r.AnalysisSize = Span.AnalysisSize;
-                        r.SimulatedSize = Span.AnalysisSize;
-                        r.IsLoop = true;
-                        r.StartAddr = SectionInstrs[Span.Start].Addr;
-                        r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
-                        r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
-                        r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
-                        regions.push_back(r);
-                    },
-                    [&](const RegionSpan &Span) {
-                        McaRegion r;
-                        r.Start = Span.Start;
-                        r.Size = Span.Size;
-                        r.AnalysisStart = Span.AnalysisStart;
-                        r.AnalysisSize = Span.AnalysisSize;
-                        r.SimulatedSize = Span.AnalysisSize;
-                        r.IsLoop = false;
-                        r.StartAddr = SectionInstrs[Span.Start].Addr;
-                        r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
-                        r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
-                        r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
-                        regions.push_back(r);
-                    });
+        auto onLoop = [&](const RegionSpan &Span) {
+            McaRegion r;
+            r.Start = Span.Start;
+            r.Size = Span.Size;
+            r.AnalysisStart = Span.AnalysisStart;
+            r.AnalysisSize = Span.AnalysisSize;
+            r.SimulatedSize = Span.AnalysisSize;
+            r.IsLoop = true;
+            r.StartAddr = SectionInstrs[Span.Start].Addr;
+            r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
+            r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
+            r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
+            regions.push_back(r);
+        };
+        auto onBasicBlock = [&](const RegionSpan &Span) {
+            McaRegion r;
+            r.Start = Span.Start;
+            r.Size = Span.Size;
+            r.AnalysisStart = Span.AnalysisStart;
+            r.AnalysisSize = Span.AnalysisSize;
+            r.SimulatedSize = Span.AnalysisSize;
+            r.IsLoop = false;
+            r.StartAddr = SectionInstrs[Span.Start].Addr;
+            r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
+            r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
+            r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
+            regions.push_back(r);
+        };
+
+        walkRegions(SectionInstrs, FunctionRanges, onLoop, onBasicBlock);
 
 
         auto runMca = [&](McaRegion &r) {
@@ -212,6 +213,11 @@ int main(int argc, char **argv) {
             }
             r.Valid = r.Metrics.Valid;
         };
+
+        if (opts::CountOnly) {
+            std::printf("TOTAL_REGIONS:%lu\n", static_cast<unsigned long>(regions.size()));
+            continue;
+        }
 
         ScopedSilence silence;
 

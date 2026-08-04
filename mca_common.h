@@ -32,6 +32,7 @@ struct Instr {
     uint64_t Addr;
     llvm::MCInst Inst;
     bool IsBranch;
+    bool IsCall;                // function call instruction (e.g. BL/BLR)
     bool EndsBB;
     bool IsUnconditionalBranch; // unconditional branch or indirect jump (cannot fall through)
     bool IsReturn;              // return instruction
@@ -218,8 +219,7 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             MLPWindowAssignmentKind assignKind, const MLPAnalyzer &analyzer,
                             bool ignoreLoopCarriedDep = false,
                             int overrideLoadLatency = -1, bool mlpWindowLoop = false);
-void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries, int loopMaxInstrs,
-                 int bbMaxInstrs, int nestLimitOuter, int nestLimitInner,
+void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries,
                  const std::function<void(const RegionSpan &)> &onLoop,
                  const std::function<void(const RegionSpan &)> &onBasicBlock);
 

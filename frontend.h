@@ -46,10 +46,6 @@ namespace opts {
     extern llvm::cl::opt<DependencyKind> DepKind;
     extern llvm::cl::opt<MLPWindowAssignmentKind> AssignKind;
     extern llvm::cl::opt<int> Iterations;
-    extern llvm::cl::opt<int> LoopMaxInstrs;
-    extern llvm::cl::opt<int> BBMaxInstrs;
-    extern llvm::cl::opt<int> NestLimitOuter;
-    extern llvm::cl::opt<int> NestLimitInner;
     extern llvm::cl::opt<IgnoreLoopCarriedMode> IgnoreLoopCarried;
     extern llvm::cl::opt<int> OverrideLoadLatency;
     extern llvm::cl::opt<MlpWindowLoopMode> MlpWindowLoop;
@@ -57,6 +53,8 @@ namespace opts {
     
     extern llvm::cl::opt<std::string> UpdateMlp;
     extern llvm::cl::opt<bool> Facile;
+    extern llvm::cl::opt<int> ChainThreshold;
+    extern llvm::cl::opt<bool> CountOnly;
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

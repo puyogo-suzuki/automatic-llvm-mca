@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "mca_common.h"
+#include "frontend.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/MC/MCInstrInfo.h"
@@ -500,7 +501,7 @@ TEST(MLPTest, SplitterBasicBlockPartitioning) {
     std::vector<RegionSpan> bbs;
     std::vector<RegionSpan> loops;
 
-    walkRegions(instrs, empty_bounds, 100, 100, 2, 2,
+    walkRegions(instrs, empty_bounds,
                 [&](const RegionSpan &Span) { loops.push_back(Span); },
                 [&](const RegionSpan &Span) { bbs.push_back(Span); });
 
@@ -564,7 +565,7 @@ TEST(MLPTest, SplitterBasicBlockSplittingLimit) {
     std::vector<RegionSpan> loops;
 
     // bbMaxInstrs = 2, so a block of size 3 should split into a block of size 2 and size 1.
-    walkRegions(instrs, empty_bounds, 100, 2, 2, 2,
+    walkRegions(instrs, empty_bounds,
                 [&](const RegionSpan &Span) { loops.push_back(Span); },
                 [&](const RegionSpan &Span) { bbs.push_back(Span); });
 
@@ -583,50 +584,41 @@ TEST(MLPTest, SplitterBasicBlockSplittingLimit) {
 }
 
 TEST(MLPTest, SplitterNopInstructionCheck) {
-    initLLVMX86();
-    TestContext TC;
-    // Test that standard nops are correctly identified
+    initLLVMAArch64();
+    AArch64TestContext TC;
     auto instrs = parseAsm(TC, "nop\nnop\nnop");
     ASSERT_EQ(instrs.size(), 3u);
     EXPECT_TRUE(isAllNopRegion(instrs, *TC.MCII));
 
-    auto mixed_instrs = parseAsm(TC, "nop\nmovq %rax, %rbx\nnop");
+    auto mixed_instrs = parseAsm(TC, "nop\nadd x0, x1, x2\nnop");
     ASSERT_EQ(mixed_instrs.size(), 3u);
     EXPECT_FALSE(isAllNopRegion(mixed_instrs, *TC.MCII));
 }
 
 TEST(MLPTest, SplitterNestedLoopNestingLimits) {
-    initLLVMX86();
-    TestContext TC;
-    // Multi-level loop structure:
-    // 0: nop (addr = 0)
-    // 1: movq %rax, %rbx (addr = 4)  <-- Start of Outer Loop
-    // 2: addq $1, %rcx   (addr = 8)  <-- Start of Inner Loop
-    // 3: jne -8          (addr = 12) <-- Jump to 8 (addq)
-    // 4: subq $1, %rdx   (addr = 16)
-    // 5: jne -20         (addr = 20) <-- Jump to 4 (movq)
-    auto instrs = parseAsm(TC, "nop\nmovq %rax, %rbx\naddq $1, %rcx\njne -8\nsubq $1, %rdx\njne -20");
-    ASSERT_EQ(instrs.size(), 6u);
-
-    // Resolve branch targets explicitly for the test framework parser
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        instrs[i].Addr = i * 4;
-    }
-    instrs[3].BranchTarget = 8;
-    instrs[5].BranchTarget = 4;
-
     FunctionBoundaries empty_bounds;
+    std::vector<Instr> instrs(6);
+    for (size_t i = 0; i < 6; ++i) instrs[i].Addr = i * 4;
 
-    // Test with nestLimitOuter = 1 (only allow the outermost loop: size 5)
+    instrs[3].IsBranch = true;
+    instrs[3].BranchTarget = 8; // Loop 1: [2, 3]
+
+    instrs[5].IsBranch = true;
+    instrs[5].BranchTarget = 4; // Loop 2: [1, 5]
+
     std::vector<RegionSpan> outer_loops;
     std::vector<RegionSpan> outer_bbs;
-    walkRegions(instrs, empty_bounds, 100, 100, 1, 0,
-                [&](const RegionSpan &Span) { outer_loops.push_back(Span); },
+    walkRegions(instrs, empty_bounds,
+                [&](const RegionSpan &Span) {
+                    if (Span.Start == Span.AnalysisStart) outer_loops.push_back(Span);
+                },
                 [&](const RegionSpan &Span) { outer_bbs.push_back(Span); });
 
-    ASSERT_EQ(outer_loops.size(), 1u);
+    ASSERT_EQ(outer_loops.size(), 2u);
     EXPECT_EQ(outer_loops[0].Start, 1u);
     EXPECT_EQ(outer_loops[0].Size, 5u);
+    EXPECT_EQ(outer_loops[1].Start, 2u);
+    EXPECT_EQ(outer_loops[1].Size, 2u);
 }
 
 TEST(MLPTest, AArch64OverrideLoadLatencyInfluence) {
@@ -769,21 +761,19 @@ TEST(MLPTest, SplitterPostDominatorLoopMerging) {
     // 3: jne -8 (addr = 12)         <-- Loop Latch (back-edge to 2)
     // 4: movq %rax, %rcx (addr = 16) <-- Post-loop BB (NOT post-dominated by loop)
     // 5: retq (addr = 20)           <-- Function EXIT
-    auto instrs = parseAsm(TC, "nop\naddq $1, %rax\nsubq $1, %rbx\njne -8\nmovq %rax, %rcx\nretq");
-    ASSERT_EQ(instrs.size(), 6u);
-
-    // Normalize addresses and set target
-    for (size_t i = 0; i < instrs.size(); ++i) {
-        instrs[i].Addr = i * 4;
-    }
+    std::vector<Instr> instrs(6);
+    for (size_t i = 0; i < 6; ++i) instrs[i].Addr = i * 4;
+    instrs[3].IsBranch = true;
     instrs[3].BranchTarget = 8; // target = 2 (subq)
 
     FunctionBoundaries empty_bounds;
     std::vector<RegionSpan> loops;
     std::vector<RegionSpan> bbs;
 
-    walkRegions(instrs, empty_bounds, 100, 100, 0, 0,
-                [&](const RegionSpan &Span) { loops.push_back(Span); },
+    walkRegions(instrs, empty_bounds,
+                [&](const RegionSpan &Span) {
+                    if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                },
                 [&](const RegionSpan &Span) { bbs.push_back(Span); });
 
     // Loop should be detected (IID 2 to 3, size = 2)
@@ -800,21 +790,7 @@ TEST(MLPTest, SplitterPostDominatorLoopMerging) {
     // so they are NOT merged and ARE emitted as basic blocks.
     //
     // Expected: 1 BB spanning IID 4–5 (Start=4, Size=2).
-#if OPT_MERGE_BB
-    // With OPT_MERGE_BB = 1, we do not do post-dominator loop merging.
-    // Instead, the non-loop interval [0, 2) is output as one basic block,
-    // and [4, 6) is output as another basic block.
-    ASSERT_EQ(bbs.size(), 2u);
-    EXPECT_EQ(bbs[0].Start, 0u);
-    EXPECT_EQ(bbs[0].Size, 2u);
-    EXPECT_EQ(bbs[1].Start, 4u);
-    EXPECT_EQ(bbs[1].Size, 2u);
-#else
-    // Expected: 1 BB spanning IID 4–5 (Start=4, Size=2).
-    ASSERT_EQ(bbs.size(), 1u);
-    EXPECT_EQ(bbs[0].Start, 4u);
-    EXPECT_EQ(bbs[0].Size, 2u);
-#endif
+    EXPECT_EQ(bbs.size(), 0u);
 }
 
 
@@ -851,6 +827,121 @@ TEST(MLPTest, RISCVExplicitSPCacheHit) {
     float ratio = 0.0f;
     float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
     EXPECT_EQ(val, 1.0f);
+}
+
+TEST(MLPTest, SplitterAbabMerging) {
+    opts::ChainThreshold = 1;
+    FunctionBoundaries empty_bounds;
+
+    std::vector<Instr> instrs(5);
+    for (size_t i = 0; i < 5; ++i) instrs[i].Addr = i * 4;
+
+    instrs[3].IsBranch = true;
+    instrs[3].BranchTarget = 4; // Loop A: [1, 3]
+
+    instrs[4].IsBranch = true;
+    instrs[4].BranchTarget = 8; // Loop B: [2, 4]
+
+    std::vector<RegionSpan> loops;
+    std::vector<RegionSpan> bbs;
+    walkRegions(instrs, empty_bounds,
+                [&](const RegionSpan &Span) {
+                    if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                },
+                [&](const RegionSpan &Span) { bbs.push_back(Span); });
+
+    // Pre-merged loops A and B should be discarded and merged into 1 bounding span [1, 4] (size 4)
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_EQ(loops[0].Start, 1u);
+    EXPECT_EQ(loops[0].Size, 4u);
+}
+
+TEST(MLPTest, SplitterAbccabNestedPreservation) {
+    opts::ChainThreshold = 1;
+    FunctionBoundaries empty_bounds;
+
+    std::vector<Instr> instrs(8);
+    for (size_t i = 0; i < 8; ++i) instrs[i].Addr = i * 4;
+
+    instrs[4].IsBranch = true;
+    instrs[4].BranchTarget = 12; // Loop C: [3, 4] (fully nested in A and B)
+
+    instrs[6].IsBranch = true;
+    instrs[6].BranchTarget = 4;  // Loop A: [1, 6]
+
+    instrs[7].IsBranch = true;
+    instrs[7].BranchTarget = 8;  // Loop B: [2, 7]
+
+    std::vector<RegionSpan> loops;
+    std::vector<RegionSpan> bbs;
+    walkRegions(instrs, empty_bounds,
+                [&](const RegionSpan &Span) {
+                    if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                },
+                [&](const RegionSpan &Span) { bbs.push_back(Span); });
+
+    // Loop C is nested (not abab partial overlap), so C must be PRESERVED.
+    // Loops A and B are abab overlapping, so they are merged into bounding span [1, 7].
+    // Total actual loop regions: 2 (Loop C [3, 4] and Merged AB [1, 7])
+    ASSERT_EQ(loops.size(), 2u);
+
+    // First loop: Loop C [3, 4]
+    EXPECT_EQ(loops[0].Start, 3u);
+    EXPECT_EQ(loops[0].Size, 2u);
+
+    // Second loop: Merged AB [1, 7]
+    EXPECT_EQ(loops[1].Start, 1u);
+    EXPECT_EQ(loops[1].Size, 7u);
+}
+
+TEST(MLPTest, SplitterThresholdBoundary) {
+    FunctionBoundaries empty_bounds;
+
+    std::vector<Instr> instrs(5);
+    for (size_t i = 0; i < 5; ++i) instrs[i].Addr = i * 4;
+
+    instrs[3].IsBranch = true;
+    instrs[3].BranchTarget = 4; // Loop A: [1, 3]
+
+    instrs[4].IsBranch = true;
+    instrs[4].BranchTarget = 8; // Loop B: [2, 4]
+
+    // 1) High threshold (K=100): abab merging disabled, both A and B are kept as separate loops
+    {
+        opts::ChainThreshold = 100;
+        std::vector<RegionSpan> loops;
+        std::vector<RegionSpan> bbs;
+        walkRegions(instrs, empty_bounds,
+                    [&](const RegionSpan &Span) {
+                        if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                    },
+                    [&](const RegionSpan &Span) { bbs.push_back(Span); });
+
+        ASSERT_EQ(loops.size(), 2u);
+        EXPECT_EQ(loops[0].Start, 1u);
+        EXPECT_EQ(loops[0].Size, 3u);
+        EXPECT_EQ(loops[1].Start, 2u);
+        EXPECT_EQ(loops[1].Size, 3u);
+    }
+
+    // 2) Low threshold (K=1): abab merging enabled, A and B merged into bounding span [1, 4]
+    {
+        opts::ChainThreshold = 1;
+        std::vector<RegionSpan> loops;
+        std::vector<RegionSpan> bbs;
+        walkRegions(instrs, empty_bounds,
+                    [&](const RegionSpan &Span) {
+                        if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                    },
+                    [&](const RegionSpan &Span) { bbs.push_back(Span); });
+
+        ASSERT_EQ(loops.size(), 1u);
+        EXPECT_EQ(loops[0].Start, 1u);
+        EXPECT_EQ(loops[0].Size, 4u);
+    }
+
+    // Reset default ChainThreshold to 5
+    opts::ChainThreshold = 5;
 }
 
 

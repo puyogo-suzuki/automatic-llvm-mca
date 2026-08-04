@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
         if (SectionInstrs.empty()) continue;
 
         std::vector<McaRegion> regions;
-        walkRegions(SectionInstrs, FunctionRanges, opts::LoopMaxInstrs, opts::BBMaxInstrs, opts::NestLimitOuter, opts::NestLimitInner,
+        walkRegions(SectionInstrs, FunctionRanges,
                     [&](const RegionSpan &Span) {
                         McaRegion r;
                         r.Start = Span.Start;

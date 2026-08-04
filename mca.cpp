@@ -349,7 +349,8 @@ std::vector<Instr> disassembleTextSection(const SectionRef &Section, const MCDis
         I.Addr = Section.getAddress() + Index;
         I.Inst = Inst;
         const MCInstrDesc &Desc = MCII.get(Inst.getOpcode());
-        I.IsBranch = Desc.isBranch();
+        I.IsCall = Desc.isCall();
+        I.IsBranch = Desc.isBranch() && !I.IsCall;
         I.IsReturn = Desc.isReturn();
         I.IsUnconditionalBranch = Desc.isUnconditionalBranch() || Desc.isIndirectBranch() || I.IsReturn;
         I.EndsBB = I.IsBranch || Desc.isTerminator();
@@ -377,7 +378,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     for (const auto &I : instrs) {
         auto ExpectedInst = IB.createInstruction(I.Inst, IVec);
         if (!ExpectedInst) {
-            consumeError(ExpectedInst.takeError());
+            llvm::errs() << "IB.createInstruction failed on PC " << format_hex(I.Addr, 10) << ": " << toString(ExpectedInst.takeError()) << "\n";
             return {};
         }
         
@@ -478,9 +479,9 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     }
 
     McaMetrics M;
-    M.RetiredInstructions = Tracker->SteadyRetired;
+    M.RetiredInstructions = Tracker->SteadyRetired > 0 ? Tracker->SteadyRetired : Tracker->TotalRetired;
     M.LoadInstructions = analyzer.countPotentialMissLoads(instrs, STI, MCII, MRI, depKind);
-    M.Cycles = Tracker->SteadyCycles;
+    M.Cycles = Tracker->SteadyCycles > 0 ? Tracker->SteadyCycles : Tracker->CurrentCycle;
     if (IsA55 && instrs.size() > 0) {
         unsigned NumSteadyIterations = Tracker->SteadyRetired / instrs.size();
         if (NumSteadyIterations > 0) {

@@ -79,6 +79,30 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
     *   `force`: Ignores loop-carried dependencies in both loops and basic blocks.
     *   `disable`: Considers loop-carried dependencies in both loops and basic blocks.
 
+## Region Splitting & Merging Algorithm
+
+`automatic-llvm-mca` automatically partitions ELF binary text sections into basic blocks and loop regions using an adaptive region splitting and merging algorithm implemented in `splitter.cpp`:
+
+1. **Loop Detection**:
+   - Scans disassembled instructions per function.
+   - Identifies backward branches (`BranchTarget <= Addr` and `BranchTarget >= FuncBase`) to construct basic loop regions `[header_idx, latch_idx]`.
+
+2. **$abab$ Interlocking Chain Detection**:
+   - Identifies partially overlapping loop pairs $a$ and $b$ ($abab$ pattern) where `a.h_idx < b.h_idx < a.l_idx < b.l_idx` (loops intersect but neither is fully nested within the other).
+   - Computes maximum interlocking chain depth using dynamic programming.
+
+3. **Adaptive Chain Merging & Pre-merged Region Discarding (`--chain-threshold=<K>`)**:
+   - Compares the maximum chain depth against the threshold $K$ (configurable via `--chain-threshold=<K>`, default: `5`).
+   - **When `max_chain >= K`**:
+     - Interlocking $abab$ loops are merged into unified outer bounding spans `merged_abab`.
+     - **Pre-merged inner loops participating in the $abab$ chain are discarded** to eliminate redundant region counts and significantly accelerate full-binary analysis.
+     - **Nested loops (e.g. $c$ in $abccab$) and non-$abab$ loops are preserved** as distinct inner regions (since fully nested loops do not partially overlap).
+   - **When `max_chain < K`**:
+     - Loop regions remain unmerged as standard individual loops.
+
+4. **Innermost-First Region Sorting**:
+   - Output regions are sorted by `EndAddr` ascending (and `StartAddr` ascending) to ensure downstream tools match the innermost nested loop span first.
+
 ## Facile Analytical Throughput Predictor
 
 When passing `--facile` to `mca_tool`, the tool computes steady-state basic-block throughput analytically based on the **Facile** model instead of full step-by-step cycle-by-cycle MCA simulation.
