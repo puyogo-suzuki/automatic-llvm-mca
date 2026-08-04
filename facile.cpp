@@ -158,40 +158,62 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
         }
     }
 
-    // Floyd-Warshall-style MCR evaluation
-    std::vector<std::vector<double>> Dist(N, std::vector<double>(N, -1e9));
-    std::vector<std::vector<unsigned>> IterDist(N, std::vector<unsigned>(N, 0));
+    // Floyd-Warshall-style MCR evaluation (guarded for N <= 1000 to prevent 20GB OOM)
+    if (N <= 1000) {
+        std::vector<double> Dist(N * N, -1e9);
+        std::vector<unsigned> IterDist(N * N, 0);
 
-    for (size_t u = 0; u < N; ++u) {
-        for (const auto &E : Adj[u]) {
-            if (E.Latency > Dist[u][E.Target]) {
-                Dist[u][E.Target] = E.Latency;
-                IterDist[u][E.Target] = E.Distance;
-            }
-        }
-    }
-
-    for (size_t k = 0; k < N; ++k) {
-        for (size_t i = 0; i < N; ++i) {
-            if (Dist[i][k] < -1e8) continue;
-            for (size_t j = 0; j < N; ++j) {
-                if (Dist[k][j] < -1e8) continue;
-                double NewDist = Dist[i][k] + Dist[k][j];
-                unsigned NewIter = IterDist[i][k] + IterDist[k][j];
-                if (NewDist > Dist[i][j]) {
-                    Dist[i][j] = NewDist;
-                    IterDist[i][j] = NewIter;
+        for (size_t u = 0; u < N; ++u) {
+            for (const auto &E : Adj[u]) {
+                size_t idx = u * N + E.Target;
+                if (E.Latency > Dist[idx]) {
+                    Dist[idx] = E.Latency;
+                    IterDist[idx] = E.Distance;
                 }
             }
         }
-    }
 
-    for (size_t i = 0; i < N; ++i) {
-        if (Dist[i][i] > 0 && IterDist[i][i] > 0) {
-            double Ratio = Dist[i][i] / static_cast<double>(IterDist[i][i]);
-            if (Ratio > MaxRatio) {
-                MaxRatio = Ratio;
+        for (size_t k = 0; k < N; ++k) {
+            for (size_t i = 0; i < N; ++i) {
+                double d_ik = Dist[i * N + k];
+                if (d_ik < -1e8) continue;
+                for (size_t j = 0; j < N; ++j) {
+                    double d_kj = Dist[k * N + j];
+                    if (d_kj < -1e8) continue;
+                    double NewDist = d_ik + d_kj;
+                    unsigned NewIter = IterDist[i * N + k] + IterDist[k * N + j];
+                    size_t ij_idx = i * N + j;
+                    if (NewDist > Dist[ij_idx]) {
+                        Dist[ij_idx] = NewDist;
+                        IterDist[ij_idx] = NewIter;
+                    }
+                }
             }
+        }
+
+        for (size_t i = 0; i < N; ++i) {
+            size_t ii_idx = i * N + i;
+            if (Dist[ii_idx] > 0 && IterDist[ii_idx] > 0) {
+                double Ratio = Dist[ii_idx] / static_cast<double>(IterDist[ii_idx]);
+                if (Ratio > MaxRatio) {
+                    MaxRatio = Ratio;
+                }
+            }
+        }
+    } else {
+        // Fast O(N) critical path estimation for large regions (N > 1000)
+        std::vector<double> LongestPath(N, 0.0);
+        for (size_t u = 0; u < N; ++u) {
+            double u_lat = SimInstrs[u]->getLatency();
+            if (u_lat < 1.0) u_lat = 1.0;
+            for (const auto &E : Adj[u]) {
+                if (E.Distance == 0 && E.Target > u) {
+                    LongestPath[E.Target] = std::max(LongestPath[E.Target], LongestPath[u] + E.Latency);
+                }
+            }
+        }
+        for (size_t u = 0; u < N; ++u) {
+            if (LongestPath[u] > MaxRatio) MaxRatio = LongestPath[u];
         }
     }
 
