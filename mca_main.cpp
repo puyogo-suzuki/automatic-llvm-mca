@@ -172,10 +172,9 @@ int main(int argc, char **argv) {
                 }
 
                 facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts);
-                unsigned SteadyIterations = computeSteadyIterations(*TI.STI, region_instrs.size(), opts::Iterations);
 
                 McaMetrics M;
-                M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size() * SteadyIterations);
+                M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size());
                 M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind);
                 M.Cycles = static_cast<uint64_t>(std::round(Res.EstimatedCycles));
                 M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, M.MLP_R, mlpLoop);
