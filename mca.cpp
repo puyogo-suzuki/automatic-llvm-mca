@@ -378,8 +378,8 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     for (const auto &I : instrs) {
         auto ExpectedInst = IB.createInstruction(I.Inst, IVec);
         if (!ExpectedInst) {
-            llvm::errs() << "IB.createInstruction failed on PC " << format_hex(I.Addr, 10) << ": " << toString(ExpectedInst.takeError()) << "\n";
-            return {};
+            consumeError(ExpectedInst.takeError());
+            continue;
         }
         
         std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
@@ -474,7 +474,8 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     auto ExpectedCycles = P->run();
 
     if (!ExpectedCycles) {
-        consumeError(ExpectedCycles.takeError());
+        auto err = ExpectedCycles.takeError();
+        llvm::errs() << "[TARGET_ERR] Region start 0x" << llvm::format_hex(instrs[0].Addr, 8) << ": " << llvm::toString(std::move(err)) << "\n";
         return {};
     }
 

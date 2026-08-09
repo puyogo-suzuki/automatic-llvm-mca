@@ -116,6 +116,7 @@ int main(int argc, char **argv) {
     std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
     if (STI) {
         llvm::overrideCortexA55SchedModel(*STI, MCPU);
+        STI = llvm::wrapCustomSubtargetInfo(std::move(STI), MCPU);
     }
     std::unique_ptr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(TT, 0, *MAI, *MCII, *MRI));
 

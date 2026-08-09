@@ -90,6 +90,7 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     TI.STI.reset(TI.TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
     if (TI.STI) {
         llvm::overrideCortexA55SchedModel(*TI.STI, TI.CPU);
+        TI.STI = llvm::wrapCustomSubtargetInfo(std::move(TI.STI), TI.CPU);
     }
     TI.Ctx = std::make_unique<MCContext>(TT, TI.MAI.get(), TI.MRI.get(), TI.STI.get());
     TI.DisAsm.reset(TI.TheTarget->createMCDisassembler(*TI.STI, *TI.Ctx));

@@ -47,6 +47,29 @@ template struct Rob<MCSubtargetInfo_ReadAdvanceTable, &llvm::MCSubtargetInfo::Re
 #undef extern
 
 namespace llvm {
+
+class CustomSubtargetInfo : public MCSubtargetInfo {
+    std::unique_ptr<MCSubtargetInfo> BaseSTI;
+public:
+    CustomSubtargetInfo(std::unique_ptr<MCSubtargetInfo> Base)
+        : MCSubtargetInfo(*Base), BaseSTI(std::move(Base)) {}
+
+    unsigned resolveVariantSchedClass(unsigned SchedClass, const MCInst *MCI, const MCInstrInfo *MCII, unsigned CPUID) const override {
+        unsigned res = AArch64_MC::resolveVariantSchedClassImpl_custom(SchedClass, MCI, MCII, *this, CPUID);
+        if (res != 0) return res;
+        // Fallback 1: try generic CPUID (0)
+        res = AArch64_MC::resolveVariantSchedClassImpl_custom(SchedClass, MCI, MCII, *this, 0);
+        if (res != 0) return res;
+        // Fallback 2: base SchedClass (never return 0 for write variants)
+        return SchedClass;
+    }
+};
+
+std::unique_ptr<MCSubtargetInfo> wrapCustomSubtargetInfo(std::unique_ptr<MCSubtargetInfo> STI, StringRef CPUName) {
+    if (!STI) return STI;
+    return std::make_unique<CustomSubtargetInfo>(std::move(STI));
+}
+
 void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI, llvm::StringRef CPUName) {
     if (CPUName == "cortex-a55") {
         STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CortexA55Model;
