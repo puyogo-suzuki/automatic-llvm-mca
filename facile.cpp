@@ -4,6 +4,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <map>
+#include <queue>
 #include <set>
 #include <vector>
 
@@ -63,7 +64,7 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
              WPR != STI.getWriteProcResEnd(SCDesc); ++WPR) {
             unsigned ProcResIdx = WPR->ProcResourceIdx;
             unsigned Cycles = WPR->ReleaseAtCycle - WPR->AcquireAtCycle;
-            if (Cycles == 0) Cycles = 1;
+            if (Cycles == 0) continue; // Skip entries that consume 0 resource cycles
             if (ProcResIdx < NumProcResources) {
                 ProcResUsage[ProcResIdx] += Cycles;
             }
@@ -146,12 +147,57 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     return Adj;
 }
 
+// Check if a cycle ratio mu is achievable using SPFA negative cycle detection on transformed weights: c = mu * distance - latency
+bool isAchievableRatio(double mu,
+                       size_t N,
+                       const std::vector<std::vector<DependencyEdge>> &Adj) {
+    std::vector<double> dist(N, 0.0);
+    std::vector<unsigned> count(N, 0);
+    std::vector<bool> inQueue(N, true);
+    std::queue<size_t> q;
+    for (size_t i = 0; i < N; ++i) {
+        q.push(i);
+    }
+
+    size_t maxOps = N * std::max<size_t>(10, N);
+    size_t ops = 0;
+
+    while (!q.empty()) {
+        size_t u = q.front();
+        q.pop();
+        inQueue[u] = false;
+
+        if (++ops > maxOps) {
+            return true;
+        }
+
+        for (const auto &E : Adj[u]) {
+            double weight = mu * E.Distance - E.Latency;
+            if (dist[u] + weight < dist[E.Target] - 1e-9) {
+                dist[E.Target] = dist[u] + weight;
+                count[E.Target] = count[u] + 1;
+                if (count[E.Target] >= N) {
+                    return true;
+                }
+                if (!inQueue[E.Target]) {
+                    q.push(E.Target);
+                    inQueue[E.Target] = true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 // 4. Calculate Maximum Cycle Ratio (MCR) for Precedence Constraints
 double calculatePrecedenceBound(
     size_t N,
     const std::vector<std::vector<DependencyEdge>> &Adj,
     llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs) {
     
+    if (N == 0) return 0.0;
+
     double MaxRatio = 0.0;
 
     // Fast check for self-loops (e.g., ADD X0, X0, #1)
@@ -164,64 +210,34 @@ double calculatePrecedenceBound(
         }
     }
 
-    // Floyd-Warshall-style MCR evaluation (guarded for N <= 1000)
-    if (N <= 1000) {
-        std::vector<double> Dist(N * N, -1e9);
-        std::vector<unsigned> IterDist(N * N, 0);
-
-        for (size_t u = 0; u < N; ++u) {
-            for (const auto &E : Adj[u]) {
-                size_t idx = u * N + E.Target;
-                if (E.Latency > Dist[idx]) {
-                    Dist[idx] = E.Latency;
-                    IterDist[idx] = E.Distance;
-                }
+    // Determine upper bound for binary search
+    double maxLatencySum = 0.0;
+    for (size_t u = 0; u < N; ++u) {
+        for (const auto &E : Adj[u]) {
+            if (E.Latency > 0.0) {
+                maxLatencySum += E.Latency;
             }
-        }
-
-        for (size_t k = 0; k < N; ++k) {
-            for (size_t i = 0; i < N; ++i) {
-                double d_ik = Dist[i * N + k];
-                if (d_ik < -1e8) continue;
-                for (size_t j = 0; j < N; ++j) {
-                    double d_kj = Dist[k * N + j];
-                    if (d_kj < -1e8) continue;
-                    double NewDist = d_ik + d_kj;
-                    unsigned NewIter = IterDist[i * N + k] + IterDist[k * N + j];
-                    size_t ij_idx = i * N + j;
-                    if (NewDist > Dist[ij_idx]) {
-                        Dist[ij_idx] = NewDist;
-                        IterDist[ij_idx] = NewIter;
-                    }
-                }
-            }
-        }
-
-        for (size_t i = 0; i < N; ++i) {
-            size_t ii_idx = i * N + i;
-            if (Dist[ii_idx] > 0 && IterDist[ii_idx] > 0) {
-                double Ratio = Dist[ii_idx] / static_cast<double>(IterDist[ii_idx]);
-                if (Ratio > MaxRatio) {
-                    MaxRatio = Ratio;
-                }
-            }
-        }
-    } else {
-        // Fast O(N) critical path estimation for large regions (N > 1000)
-        std::vector<double> LongestPath(N, 0.0);
-        for (size_t u = 0; u < N; ++u) {
-            for (const auto &E : Adj[u]) {
-                if (E.Distance == 0 && E.Target > u) {
-                    LongestPath[E.Target] = std::max(LongestPath[E.Target], LongestPath[u] + E.Latency);
-                }
-            }
-        }
-        for (size_t u = 0; u < N; ++u) {
-            if (LongestPath[u] > MaxRatio) MaxRatio = LongestPath[u];
         }
     }
 
-    return MaxRatio;
+    if (maxLatencySum <= 0.0) {
+        return MaxRatio;
+    }
+
+    double low = MaxRatio;
+    double high = std::min(500.0, std::max(MaxRatio, maxLatencySum));
+
+    // Binary search for exact MCR
+    for (int iter = 0; iter < 30; ++iter) {
+        double mid = low + (high - low) / 2.0;
+        if (isAchievableRatio(mid, N, Adj)) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+
+    return low;
 }
 
 // 5. Determine Dominant Bottleneck Category Name
