@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "frontend.h"
 #include <algorithm>
 #include <bitset>
 #include <cmath>
@@ -139,7 +140,7 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
 
 
         bool is_hit = false;
-        if (is_load) {
+        if (is_load && !opts::DisableAlwaysHitLoadsHeuristic) {
             if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
                 int64_t cache_line = inst_infos[j].mem_info.offset / 64;
                 is_hit = seen_base_regs.test(base_reg, cache_line);
@@ -923,7 +924,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
             unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
             
             bool is_hit = false;
-            if (is_load) {
+            if (is_load && !opts::DisableAlwaysHitLoadsHeuristic) {
                 if (inst_infos[j].mem_info.is_stack_access()) {
                     is_hit = true;
                 } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {

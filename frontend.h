@@ -55,6 +55,7 @@ namespace opts {
     extern llvm::cl::opt<bool> Facile;
     extern llvm::cl::opt<int> ChainThreshold;
     extern llvm::cl::opt<bool> CountOnly;
+    extern llvm::cl::opt<bool> DisableAlwaysHitLoadsHeuristic;
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,
