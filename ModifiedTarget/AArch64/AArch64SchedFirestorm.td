@@ -72,8 +72,8 @@ def : WriteRes<WriteExtr, [FireUnitI]> { let Latency = 1; }
 def : WriteRes<WriteIS, [FireUnitI]> { let Latency = 1; }
 def : WriteRes<WriteIM32, [FireUnitIMul]> { let Latency = 3; }
 def : WriteRes<WriteIM64, [FireUnitIMul]> { let Latency = 3; }
-def : WriteRes<WriteID32, [FireUnitI4]> { let Latency = 9; }
-def : WriteRes<WriteID64, [FireUnitI4]> { let Latency = 9; }
+def : WriteRes<WriteID32, [FireUnitI4]> { let Latency = 11; } // Worst-case integer divide (7-11c)
+def : WriteRes<WriteID64, [FireUnitI4]> { let Latency = 11; } // Worst-case integer divide (7-11c)
 def : WriteRes<WriteBr, [FireUnitBranch]> { let Latency = 1; }
 def : WriteRes<WriteBrReg, [FireUnitBranch]> { let Latency = 1; }
 def : WriteRes<WriteLD, [FireUnitMem, FireLoadBuffer]> { let Latency = 3; }
@@ -90,11 +90,11 @@ def : WriteRes<WriteHint, [FireUnitI0]> { let Latency = 1; }
 
 def : WriteRes<WriteF, [FireUnitFP]> { let Latency = 3; }
 def : WriteRes<WriteFCmp, [FireUnitFP0]> { let Latency = 1; }
-def : WriteRes<WriteFCvt, [FireUnitFP]> { let Latency = 3; }
+def : WriteRes<WriteFCvt, [FireUnitFP]> { let Latency = 4; } // Worst-case FP convert (3-4c)
 def : WriteRes<WriteFCopy, [FireUnitFP]> { let Latency = 1; }
 def : WriteRes<WriteFImm, [FireUnitFP]> { let Latency = 1; }
-def : WriteRes<WriteFMul, [FireUnitFP]> { let Latency = 3; }
-def : WriteRes<WriteFDiv, [FireUnitFP0]> { let Latency = 9; }
+def : WriteRes<WriteFMul, [FireUnitFP]> { let Latency = 4; } // Worst-case FP multiply / FMA (4c)
+def : WriteRes<WriteFDiv, [FireUnitFP0]> { let Latency = 13; } // Worst-case FP divide / sqrt (7-13c)
 
 def : WriteRes<WriteVd, [FireUnitFP]> { let Latency = 2; }
 def : WriteRes<WriteVq, [FireUnitFP]> { let Latency = 2; }
