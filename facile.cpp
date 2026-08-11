@@ -210,11 +210,14 @@ double calculatePrecedenceBound(
         }
     }
 
-    // Determine upper bound for binary search
+    // Determine upper bound for binary search.
+    // Any cycle must include at least one inter-iteration edge (Distance > 0) because
+    // intra-iteration edges form a DAG (lower -> higher index only, no back edges).
+    // Therefore MCR <= sum of all inter-iteration edge latencies.
     double maxLatencySum = 0.0;
     for (size_t u = 0; u < N; ++u) {
         for (const auto &E : Adj[u]) {
-            if (E.Latency > 0.0) {
+            if (E.Distance > 0 && E.Latency > 0.0) {
                 maxLatencySum += E.Latency;
             }
         }
@@ -225,7 +228,7 @@ double calculatePrecedenceBound(
     }
 
     double low = MaxRatio;
-    double high = std::min(500.0, std::max(MaxRatio, maxLatencySum));
+    double high = std::max({MaxRatio + 1.0, maxLatencySum, 1.0});
 
     // Binary search for exact MCR
     for (int iter = 0; iter < 30; ++iter) {
