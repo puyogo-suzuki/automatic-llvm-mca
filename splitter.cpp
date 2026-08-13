@@ -54,7 +54,27 @@ std::vector<SimpleLoop> detectBackwardBranchLoops(ArrayRef<Instr> funcInstrs) {
                 if (offset % 4 == 0) {
                     size_t h_idx = offset / 4;
                     if (h_idx <= i && h_idx < f_size) {
-                        loops.push_back({h_idx, i, i - h_idx + 1});
+                        // Check if from h_idx to ret instruction there is no forward branch/jump
+                        bool invalid_loop = false;
+                        for (size_t k = h_idx; k <= i; ++k) {
+                            if (funcInstrs[k].IsReturn) {
+                                bool has_forward_branch = false;
+                                for (size_t j = h_idx; j < k; ++j) {
+                                    const auto &J = funcInstrs[j];
+                                    if (J.IsBranch && !J.IsCall && J.BranchTarget != 0 && J.BranchTarget > J.Addr) {
+                                        has_forward_branch = true;
+                                        break;
+                                    }
+                                }
+                                if (!has_forward_branch) {
+                                    invalid_loop = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!invalid_loop) {
+                            loops.push_back({h_idx, i, i - h_idx + 1});
+                        }
                     }
                 }
             }
