@@ -16,6 +16,9 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
+#include "facile.h"
+#include "llvm/MCA/InstrBuilder.h"
+#include "llvm/MCA/CustomBehaviour.h"
 
 using namespace llvm;
 
@@ -943,5 +946,204 @@ TEST(MLPTest, SplitterThresholdBoundary) {
     // Reset default ChainThreshold to 5
     opts::ChainThreshold = 5;
 }
+
+TEST(MLPTest, SplitterDirectRetExclusion) {
+    FunctionBoundaries bounds;
+    bounds[0x1000] = 0x2000;
+
+    // Case 1: A: ldr; ldr; ldr; ret; add; add; goto A; (Should NOT be a loop)
+    {
+        std::vector<Instr> instrs(7, Instr{});
+        for (size_t i = 0; i < 7; ++i) instrs[i].Addr = 0x1000 + i * 4;
+        instrs[3].IsReturn = true;
+        instrs[6].IsBranch = true;
+        instrs[6].BranchTarget = 0x1000; // backward jump to 0x1000 (A)
+
+        std::vector<RegionSpan> loops;
+        walkRegions(instrs, bounds,
+                    [&](const RegionSpan &Span) {
+                        if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                    },
+                    [](const RegionSpan &) {});
+
+        EXPECT_EQ(loops.size(), 0u);
+    }
+
+    // Case 2: A: ldr; ldr; b.gt goto B; ret; B: add; add; goto A; (Should BE a loop)
+    {
+        std::vector<Instr> instrs(7, Instr{});
+        for (size_t i = 0; i < 7; ++i) instrs[i].Addr = 0x1000 + i * 4;
+        instrs[2].IsBranch = true;
+        instrs[2].BranchTarget = 0x1010; // forward branch to 0x1010 (B)
+        instrs[3].IsReturn = true;
+        instrs[6].IsBranch = true;
+        instrs[6].BranchTarget = 0x1000; // backward jump to 0x1000 (A)
+
+        std::vector<RegionSpan> loops;
+        walkRegions(instrs, bounds,
+                    [&](const RegionSpan &Span) {
+                        if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                    },
+                    [](const RegionSpan &) {});
+
+        EXPECT_EQ(loops.size(), 1u);
+        if (!loops.empty()) {
+            EXPECT_EQ(loops[0].Start, 0u);
+            EXPECT_EQ(loops[0].Size, 7u);
+        }
+    }
+
+    // Case 3: B: add; add; A: ldr; ldr; b.gt goto B; ret; add; add; goto A; (Should NOT be a loop)
+    {
+        std::vector<Instr> instrs(9, Instr{});
+        for (size_t i = 0; i < 9; ++i) instrs[i].Addr = 0x1000 + i * 4;
+        instrs[4].IsBranch = true;
+        instrs[4].BranchTarget = 0x1000; // backward branch to 0x1000 (B)
+        instrs[5].IsReturn = true;
+        instrs[8].IsBranch = true;
+        instrs[8].BranchTarget = 0x1008; // backward jump to 0x1008 (A)
+
+        std::vector<RegionSpan> loops;
+        walkRegions(instrs, bounds,
+                    [&](const RegionSpan &Span) {
+                        if (Span.Start == Span.AnalysisStart) loops.push_back(Span);
+                    },
+                    [](const RegionSpan &) {});
+
+        // Loop B [0, 4] is kept, while candidate A [2, 8] is excluded due to direct ret
+        EXPECT_EQ(loops.size(), 1u);
+        if (!loops.empty()) {
+            EXPECT_EQ(loops[0].Start, 0u);
+            EXPECT_EQ(loops[0].Size, 5u);
+        }
+    }
+}
+
+// ============================================================================
+// Facile Predictor Unit & Corner Case Tests
+// ============================================================================
+
+static facile::FacileResult runFacileAArch64(const AArch64TestContext &TC, const std::string &asm_code) {
+    initLLVMAArch64();
+    auto instrs = parseAsm(TC, asm_code);
+    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
+    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
+    std::vector<const MCInst *> MCInsts;
+    for (const auto &I : instrs) {
+        auto ExpectedInst = IB.createInstruction(I.Inst, {});
+        if (ExpectedInst) {
+            SimInstrs.push_back(std::move(*ExpectedInst));
+            MCInsts.push_back(&I.Inst);
+        }
+    }
+    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts);
+}
+
+TEST(FacileTest, EmptyInstructions) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
+    std::vector<const MCInst *> MCInsts;
+    auto Res = facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts);
+
+    EXPECT_EQ(Res.TotalInstructions, 0u);
+    EXPECT_EQ(Res.TotalMicroOps, 0u);
+    EXPECT_DOUBLE_EQ(Res.IssueBound, 0.0);
+    EXPECT_DOUBLE_EQ(Res.PortBound, 0.0);
+    EXPECT_DOUBLE_EQ(Res.PrecedenceBound, 0.0);
+    EXPECT_DOUBLE_EQ(Res.EstimatedCycles, 0.0);
+    EXPECT_DOUBLE_EQ(Res.EstimatedCPI, 0.0);
+}
+
+TEST(FacileTest, IndependentInstructionsIssueBound) {
+    AArch64TestContext TC;
+    std::string code = "add x0, x1, x2\nadd x3, x4, x5\nadd x6, x7, x8\nadd x9, x10, x11\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 4u);
+    EXPECT_DOUBLE_EQ(Res.PrecedenceBound, 0.0);
+    EXPECT_GT(Res.IssueBound, 0.0);
+    EXPECT_GT(Res.EstimatedCycles, 0.0);
+}
+
+TEST(FacileTest, SelfLoopDependency) {
+    AArch64TestContext TC;
+    std::string code = "add x0, x0, #1\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 1u);
+    EXPECT_GE(Res.PrecedenceBound, 1.0);
+    EXPECT_EQ(Res.DominantBottleneck, "Precedence Constraints (Dependency Chain)");
+}
+
+TEST(FacileTest, TwoInstructionLoopDependencyChain) {
+    AArch64TestContext TC;
+    std::string code = "add x0, x1, #1\nadd x1, x0, #1\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    EXPECT_NEAR(Res.PrecedenceBound, 2.0, 0.01);
+}
+
+TEST(FacileTest, FloatingPointDependencyChain) {
+    AArch64TestContext TC;
+    std::string code = "fadd d0, d0, d1\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 1u);
+    EXPECT_GT(Res.PrecedenceBound, 1.0);
+}
+
+TEST(FacileTest, DominantBottleneckSelection) {
+    AArch64TestContext TC;
+    std::string code = "add x0, x0, #1\nadd x0, x0, #1\nadd x0, x0, #1\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 3u);
+    EXPECT_NEAR(Res.PrecedenceBound, 3.0, 0.01);
+    EXPECT_EQ(Res.DominantBottleneck, "Precedence Constraints (Dependency Chain)");
+}
+
+TEST(FacileTest, LargeInstructionSequenceScale) {
+    AArch64TestContext TC;
+    std::string code;
+    for (int i = 0; i < 60; ++i) {
+        code += "add x" + std::to_string(i % 30) + ", x30, x30\n";
+    }
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 60u);
+    EXPECT_GT(Res.IssueBound, 0.0);
+    EXPECT_DOUBLE_EQ(Res.PrecedenceBound, 0.0);
+}
+
+TEST(FacileTest, VariantSchedClassResolution) {
+    AArch64TestContext TC;
+    std::string code = "add x0, x1, x2, lsl #2\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 1u);
+    EXPECT_GT(Res.IssueBound, 0.0);
+}
+
+TEST(FacileTest, MultipleIndependentChainsMaxSelection) {
+    AArch64TestContext TC;
+    std::string code = "add x0, x0, #1\nfadd d0, d0, d1\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    EXPECT_GT(Res.PrecedenceBound, 1.0);
+}
+
+TEST(FacileTest, NoLoopCarriedDependency) {
+    AArch64TestContext TC;
+    std::string code = "mov x0, #1\nadd x1, x0, #2\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    EXPECT_DOUBLE_EQ(Res.PrecedenceBound, 0.0);
+}
+
 
 

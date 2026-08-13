@@ -18,6 +18,33 @@ struct DependencyEdge {
     unsigned Distance; // 0 for intra-iteration, 1 for inter-iteration (loop-carried)
 };
 
+// Extract instruction latency with a minimum threshold of 1.0 cycle
+double getInstLatency(const llvm::mca::Instruction &Inst) {
+    double Lat = static_cast<double>(Inst.getLatency());
+    return std::max(Lat, 1.0);
+}
+
+// Resolve dynamic variant scheduling classes via subtarget info and MCInst if available
+const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI,
+                                                const llvm::MCInstrInfo &MCII,
+                                                unsigned SchedClass,
+                                                const llvm::MCInst *MCI) {
+    const llvm::MCSchedModel &SM = STI.getSchedModel();
+    const llvm::MCSchedClassDesc *SCDesc = SM.getSchedClassDesc(SchedClass);
+    unsigned PrevSchedClass = SchedClass;
+    unsigned CurrSchedClass = SchedClass;
+
+    while (SCDesc && SCDesc->isVariant()) {
+        if (MCI) {
+            CurrSchedClass = STI.resolveVariantSchedClass(CurrSchedClass, MCI, &MCII, SM.getProcessorID());
+        }
+        if (CurrSchedClass == PrevSchedClass) break;
+        PrevSchedClass = CurrSchedClass;
+        SCDesc = SM.getSchedClassDesc(CurrSchedClass);
+    }
+    return SCDesc;
+}
+
 // 1. Calculate Dispatch / Issue Width Limit
 double calculateIssueBound(const llvm::MCSchedModel &SM,
                             llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
@@ -46,18 +73,7 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
         const llvm::MCInst *MCI = (i < MCInsts.size()) ? MCInsts[i] : nullptr;
         const llvm::MCInstrDesc &MCID = MCII.get(Inst->getOpcode());
         
-        unsigned ResolvedSchedClass = MCID.getSchedClass();
-        const llvm::MCSchedClassDesc *SCDesc = SM.getSchedClassDesc(ResolvedSchedClass);
-        unsigned PrevSchedClass = ResolvedSchedClass;
-        
-        while (SCDesc && SCDesc->isVariant()) {
-            if (MCI) {
-                ResolvedSchedClass = STI.resolveVariantSchedClass(ResolvedSchedClass, MCI, &MCII, SM.getProcessorID());
-            }
-            if (ResolvedSchedClass == PrevSchedClass) break;
-            PrevSchedClass = ResolvedSchedClass;
-            SCDesc = SM.getSchedClassDesc(ResolvedSchedClass);
-        }
+        const llvm::MCSchedClassDesc *SCDesc = resolveSchedClass(STI, MCII, MCID.getSchedClass(), MCI);
         if (!SCDesc) continue;
 
         for (const llvm::MCWriteProcResEntry *WPR = STI.getWriteProcResBegin(SCDesc);
@@ -114,8 +130,7 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
             auto it = LastWriter.find(Reg);
             if (it != LastWriter.end()) {
                 size_t WriterIdx = it->second;
-                double Lat = static_cast<double>(SimInstrs[WriterIdx]->getLatency());
-                if (Lat < 1.0) Lat = 1.0;
+                double Lat = getInstLatency(*SimInstrs[WriterIdx]);
                 if (WriterIdx < i) {
                     Adj[WriterIdx].push_back({i, Lat, 0});
                 }
@@ -138,8 +153,7 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
         auto it = LastWriter.find(Reg);
         if (it != LastWriter.end()) {
             size_t WriterIdx = it->second;
-            double Lat = static_cast<double>(SimInstrs[WriterIdx]->getLatency());
-            if (Lat < 1.0) Lat = 1.0;
+            double Lat = getInstLatency(*SimInstrs[WriterIdx]);
             Adj[WriterIdx].push_back({ReaderIdx, Lat, 1});
         }
     }
@@ -193,8 +207,7 @@ bool isAchievableRatio(double mu,
 // 4. Calculate Maximum Cycle Ratio (MCR) for Precedence Constraints
 double calculatePrecedenceBound(
     size_t N,
-    const std::vector<std::vector<DependencyEdge>> &Adj,
-    llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs) {
+    const std::vector<std::vector<DependencyEdge>> &Adj) {
     
     if (N == 0) return 0.0;
 
@@ -211,13 +224,12 @@ double calculatePrecedenceBound(
     }
 
     // Determine upper bound for binary search.
-    // Any cycle must include at least one inter-iteration edge (Distance > 0) because
-    // intra-iteration edges form a DAG (lower -> higher index only, no back edges).
-    // Therefore MCR <= sum of all inter-iteration edge latencies.
+    // Any cycle includes intra-iteration edges and at least one inter-iteration edge.
+    // Therefore MCR <= sum of all edge latencies in the graph.
     double maxLatencySum = 0.0;
     for (size_t u = 0; u < N; ++u) {
         for (const auto &E : Adj[u]) {
-            if (E.Distance > 0 && E.Latency > 0.0) {
+            if (E.Latency > 0.0) {
                 maxLatencySum += E.Latency;
             }
         }
@@ -277,7 +289,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
 
     // 3. Precedence Constraints Limit
     auto Adj = buildDependencyGraph(SimInstrs);
-    Res.PrecedenceBound = calculatePrecedenceBound(SimInstrs.size(), Adj, SimInstrs);
+    Res.PrecedenceBound = calculatePrecedenceBound(SimInstrs.size(), Adj);
 
     // 4. Overall Max Bottleneck Prediction
     Res.EstimatedCycles = std::max({Res.IssueBound, Res.PortBound, Res.PrecedenceBound});
