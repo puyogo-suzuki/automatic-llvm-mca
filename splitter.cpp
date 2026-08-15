@@ -15,6 +15,7 @@ struct SimpleLoop {
     size_t h_idx;
     size_t l_idx;
     size_t size;
+    bool is_abab_merged = false;
 };
 
 // Step 1: Collect function start indices from binary function boundaries
@@ -142,14 +143,19 @@ std::vector<SimpleLoop> detectAndMergeAbabChains(std::vector<SimpleLoop> loops, 
     for (size_t i = 0; i < n_loops; ++i) {
         if (!is_abab[i]) continue;
         if (merged_abab.empty()) {
-            merged_abab.push_back(loops[i]);
+            SimpleLoop ml = loops[i];
+            ml.is_abab_merged = true;
+            merged_abab.push_back(ml);
         } else {
             auto &prev = merged_abab.back();
             if (loops[i].h_idx <= prev.l_idx) {
                 prev.l_idx = std::max(prev.l_idx, loops[i].l_idx);
                 prev.size = prev.l_idx - prev.h_idx + 1;
+                prev.is_abab_merged = true;
             } else {
-                merged_abab.push_back(loops[i]);
+                SimpleLoop ml = loops[i];
+                ml.is_abab_merged = true;
+                merged_abab.push_back(ml);
             }
         }
     }
@@ -187,7 +193,8 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries,
                 f_start + l.h_idx,
                 l.size,
                 f_start + l.h_idx,
-                l.size
+                l.size,
+                l.is_abab_merged
             });
             for (size_t i = l.h_idx; i <= l.l_idx; ++i) {
                 in_loop[i] = true;

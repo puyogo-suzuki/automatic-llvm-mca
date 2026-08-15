@@ -31,13 +31,17 @@ using namespace llvm::object;
 
 static void printResultCsv(uint64_t StartAddr, uint64_t EndAddr, uint64_t AnalysisStartAddr, uint64_t AnalysisEndAddr,
                            size_t Length, bool isLoop, const McaMetrics &M) {
-    std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f\n",
+    std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f",
                 StartAddr, EndAddr, AnalysisStartAddr, AnalysisEndAddr,
                 static_cast<unsigned long>(Length),
                 isLoop ? 1 : 0,
                 static_cast<unsigned long>(M.RetiredInstructions),
                 static_cast<unsigned long>(M.LoadInstructions),
                 static_cast<unsigned>(M.Cycles), M.MLP, M.MLP_R);
+    if (opts::FacileReason) {
+        std::printf(",%s", M.FacileReason.c_str());
+    }
+    std::printf("\n");
 }
 
 int main(int argc, char **argv) {
@@ -82,7 +86,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
+    if (opts::FacileReason) {
+        std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r,facile_reason\n");
+    } else {
+        std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
+    }
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(*Obj);
 
     for (const SectionRef &Section : Obj->sections()) {
@@ -110,6 +118,7 @@ int main(int argc, char **argv) {
             r.AnalysisSize = Span.AnalysisSize;
             r.SimulatedSize = Span.AnalysisSize;
             r.IsLoop = true;
+            r.IsAbabMerged = Span.IsAbabMerged;
             r.StartAddr = SectionInstrs[Span.Start].Addr;
             r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
             r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
@@ -124,6 +133,7 @@ int main(int argc, char **argv) {
             r.AnalysisSize = Span.AnalysisSize;
             r.SimulatedSize = Span.AnalysisSize;
             r.IsLoop = false;
+            r.IsAbabMerged = Span.IsAbabMerged;
             r.StartAddr = SectionInstrs[Span.Start].Addr;
             r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
             r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
@@ -179,6 +189,7 @@ int main(int argc, char **argv) {
                 M.Cycles = static_cast<uint64_t>(std::round(Res.EstimatedCycles));
                 M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, M.MLP_R, mlpLoop);
                 M.BaseCPI = Res.EstimatedCPI;
+                M.FacileReason = Res.FacileReason;
                 M.Valid = true;
                 r.Metrics = M;
                 r.Valid = true;

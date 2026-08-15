@@ -48,6 +48,7 @@ namespace opts {
 
     cl::opt<std::string> UpdateMlp("update-mlp", cl::desc("CSV file containing previous MCA results to reuse"), cl::init(""));
     cl::opt<bool> Facile("facile", cl::desc("Enable Facile static analytical throughput prediction (AArch64)"), cl::init(false));
+    cl::opt<bool> FacileReason("facile-reason", cl::desc("Output dominant bottleneck reason (inst, exec, prec) for Facile analysis"), cl::init(false));
     cl::opt<int> ChainThreshold("chain-threshold", cl::desc("Max chain threshold for merged loop region analysis"), cl::init(5));
     cl::opt<bool> CountOnly("count-only", cl::desc("Only count total generated regions without running MCA simulation"), cl::init(false));
     cl::opt<bool> DisableAlwaysHitLoadsHeuristic("disable-always-hit-loads-heuristic", cl::desc("Disable SeenBaseRegs hit filtering heuristic for loads"), cl::init(false));

@@ -47,6 +47,7 @@ struct RegionSpan {
     size_t Size;
     size_t AnalysisStart;
     size_t AnalysisSize;
+    bool IsAbabMerged = false;
 };
 
 struct McaMetrics {
@@ -56,6 +57,7 @@ struct McaMetrics {
     float MLP = 0.0f;
     float MLP_R = 0.0f;
     double BaseCPI = 0.0;
+    std::string FacileReason;
     bool Valid = false;
 };
 
@@ -197,6 +199,7 @@ struct McaRegion {
     size_t AnalysisSize;
     size_t SimulatedSize;
     bool IsLoop;
+    bool IsAbabMerged = false;
     McaMetrics Metrics;
     bool Valid = false;
     uint64_t StartAddr;

@@ -1145,5 +1145,16 @@ TEST(FacileTest, NoLoopCarriedDependency) {
     EXPECT_DOUBLE_EQ(Res.PrecedenceBound, 0.0);
 }
 
+TEST(FacileTest, FacileReasonValues) {
+    AArch64TestContext TC;
+    std::string prec_code = "add x0, x0, #1\n";
+    auto ResPrec = runFacileAArch64(TC, prec_code);
+    EXPECT_EQ(ResPrec.FacileReason, "prec");
+
+    std::string inst_code = "mov x0, #1\nadd x1, x2, #2\n";
+    auto ResInst = runFacileAArch64(TC, inst_code);
+    EXPECT_TRUE(ResInst.FacileReason == "inst" || ResInst.FacileReason == "exec");
+}
+
 
 

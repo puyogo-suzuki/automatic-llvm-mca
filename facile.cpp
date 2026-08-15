@@ -296,6 +296,14 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     Res.EstimatedCPI = Res.EstimatedCycles / static_cast<double>(Res.TotalInstructions);
     Res.DominantBottleneck = determineDominantBottleneck(Res.EstimatedCycles, Res.PrecedenceBound, Res.PortBound, Res.PortBottleneckName);
 
+    if (Res.EstimatedCycles == Res.PrecedenceBound && Res.PrecedenceBound > 0.0) {
+        Res.FacileReason = "prec";
+    } else if (Res.EstimatedCycles == Res.PortBound && Res.PortBound > Res.IssueBound) {
+        Res.FacileReason = "exec";
+    } else {
+        Res.FacileReason = "inst";
+    }
+
     return Res;
 }
 

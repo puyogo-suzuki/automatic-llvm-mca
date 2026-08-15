@@ -23,6 +23,7 @@ struct FacileResult {
     double EstimatedCPI = 0.0;
     std::string DominantBottleneck;
     std::string PortBottleneckName;
+    std::string FacileReason; // "inst", "exec", or "prec"
     unsigned TotalInstructions = 0;
     unsigned TotalMicroOps = 0;
 };
