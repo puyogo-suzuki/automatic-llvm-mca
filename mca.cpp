@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "a55_issue_stage.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64AddressingModes.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
 #include <algorithm>
@@ -438,9 +439,18 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     const unsigned SteadyIterations = computeSteadyIterations(STI, instrs.size(), iterations);
     mca::CircularSourceMgr CSM(Sequence, WarmupIterations + SteadyIterations);
     mca::CustomBehaviour CB(STI, CSM, MCII);
+    bool IsA55 = (STI.getCPU() == "cortex-a55");
     std::unique_ptr<mca::Pipeline> P;
-    if (STI.getSchedModel().isOutOfOrder()) P = MCAContext.createDefaultPipeline(PO, CSM, CB);
-    else P = MCAContext.createInOrderPipeline(PO, CSM, CB);
+    if (STI.getSchedModel().isOutOfOrder()) {
+        P = MCAContext.createDefaultPipeline(PO, CSM, CB);
+    } else if (IsA55) {
+        auto PRF_unique = std::make_unique<mca::RegisterFile>(STI.getSchedModel(), MRI);
+        mca::RegisterFile *PRF_ptr = PRF_unique.get();
+        MCAContext.addHardwareUnit(std::move(PRF_unique));
+        P = mca::createA55DecoupledPipeline(PO, CSM, CB, STI, MRI, *PRF_ptr);
+    } else {
+        P = MCAContext.createInOrderPipeline(PO, CSM, CB);
+    }
 
     mca::RegisterFile *PRF = nullptr;
     auto &hardware = MCAContext.*get(Context_Hardware_Tag{});
@@ -452,7 +462,6 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     }
 
     std::unique_ptr<BaseSteadyStateTracker> Tracker;
-    bool IsA55 = (STI.getCPU() == "cortex-a55");
     unsigned WarmupLimit = instrs.size() * WarmupIterations;
 
     if (IsA55 && ignoreLoopCarriedDep) {
@@ -489,6 +498,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
             // Cortex-A55's non-blocking branch predictor overlaps about half of the 
             // branch penalty/bubble under dual-issue (approx. 0.5 cycles per iteration).
             double correctedCycles = static_cast<double>(M.Cycles) - (static_cast<double>(NumSteadyIterations) * 0.5);
+            if (correctedCycles < 1.0) correctedCycles = 1.0;
             M.Cycles = static_cast<unsigned>(correctedCycles + 0.5);
         }
     }

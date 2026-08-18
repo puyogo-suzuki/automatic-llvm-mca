@@ -189,9 +189,8 @@ def CortexA55WriteFPALU_F4 : SchedWriteRes<[CortexA55UnitFPALU]> { let Latency =
 def CortexA55WriteFPALU_F5 : SchedWriteRes<[CortexA55UnitFPALU]> { let Latency = 5;}
 
 // FP Mul, Div, Sqrt. Div/Sqrt are not pipelined
-def : WriteRes<WriteFMul, [CortexA55UnitFPMAC]> { let Latency = 4; }
-
 let RetireOOO = 1 in {
+def : WriteRes<WriteFMul, [CortexA55UnitFPMAC]> { let Latency = 4; }
 def : WriteRes<WriteFDiv, [CortexA55UnitFPDIV]> { let Latency = 22;
                                             let ReleaseAtCycles = [29]; }
 def CortexA55WriteFMAC : SchedWriteRes<[CortexA55UnitFPMAC]> { let Latency = 4; }
@@ -249,6 +248,9 @@ def : ReadAdvance<ReadID, 1, [WriteImm,WriteI,
                               WriteISReg, WriteIEReg,WriteIS,
                               WriteID32,WriteID64,
                               WriteIM32,WriteIM64]>;
+
+// FP MAC Late Accumulate Read Advance (SOG Table 4 Note b)
+def CortexA55ReadFMAC : SchedReadAdvance<2, [CortexA55WriteFMAC, WriteFMul]>;
 
 //===----------------------------------------------------------------------===//
 // Subtarget-specific InstRWs.
@@ -367,8 +369,8 @@ def : InstRW<[CortexA55WriteFPALU_F4], (instregex "^(S|U)CVTF(S|U)(W|X)(H|S|D)")
 def : InstRW<[CortexA55WriteFPALU_F4], (instregex "^(S|U)CVTF(h|s|d)")>;
 def : InstRW<[CortexA55WriteFPALU_F4], (instregex "^(S|U)CVTFv")>;
 
-def : InstRW<[CortexA55WriteFMAC], (instregex "^FN?M(ADD|SUB).*")>;
-def : InstRW<[CortexA55WriteFMAC], (instregex "^FML(A|S).*")>;
+def : InstRW<[CortexA55WriteFMAC, ReadDefault, ReadDefault, CortexA55ReadFMAC], (instregex "^FN?M(ADD|SUB).*")>;
+def : InstRW<[CortexA55WriteFMAC, CortexA55ReadFMAC, ReadDefault, ReadDefault], (instregex "^FML(A|S).*")>;
 def : InstRW<[CortexA55WriteFDivHP], (instrs FDIVHrr)>;
 def : InstRW<[CortexA55WriteFDivSP], (instrs FDIVSrr)>;
 def : InstRW<[CortexA55WriteFDivDP], (instrs FDIVDrr)>;
