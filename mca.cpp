@@ -431,6 +431,10 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
             }
             MutableDesc.MaxLatency = MaxLatency;
         }
+        if (isCoalescedROBCPU(STI.getCPU())) {
+            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
+            MutableDesc.NumMicroOps = 1;
+        }
         
         Sequence.push_back(std::move(Inst));
     }

@@ -28,6 +28,10 @@ enum class MLPWindowAssignmentKind { Forward, MaxContaining };
 enum class IgnoreLoopCarriedMode { Default, Force, Disable };
 enum class MlpWindowLoopMode { Default, Force, Disable };
 
+inline bool isCoalescedROBCPU(llvm::StringRef CPU) {
+    return CPU.equals_insensitive("firestorm") || CPU.equals_insensitive("icestorm");
+}
+
 struct Instr {
     uint64_t Addr;
     llvm::MCInst Inst;

@@ -176,7 +176,12 @@ int main(int argc, char **argv) {
                 for (const auto &I : region_instrs) {
                     auto ExpectedInst = IB.createInstruction(I.Inst, {});
                     if (ExpectedInst) {
-                        SimInstrs.push_back(std::move(*ExpectedInst));
+                        std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
+                        if (isCoalescedROBCPU(TI.STI->getCPU())) {
+                            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
+                            MutableDesc.NumMicroOps = 1;
+                        }
+                        SimInstrs.push_back(std::move(Inst));
                         MCInsts.push_back(&I.Inst);
                     }
                 }

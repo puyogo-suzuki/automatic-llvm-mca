@@ -17,6 +17,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "facile.h"
+#include "custom_a55_sched.h"
 #include "llvm/MCA/InstrBuilder.h"
 #include "llvm/MCA/CustomBehaviour.h"
 
@@ -207,13 +208,21 @@ struct AArch64TestContext {
     std::unique_ptr<MCSubtargetInfo> STI;
     std::unique_ptr<MCInstrAnalysis> MCIA;
 
-    AArch64TestContext() : TT("aarch64-unknown-linux-gnu") {
+    AArch64TestContext(const std::string &cpu = "cortex-a76") : TT("aarch64-unknown-linux-gnu") {
         std::string Error;
         TheTarget = TargetRegistry::lookupTarget(TT, Error);
         MRI.reset(TheTarget->createMCRegInfo(TT));
         MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT, MCTargetOptions()));
         MCII.reset(TheTarget->createMCInstrInfo());
-        STI.reset(TheTarget->createMCSubtargetInfo(TT, "cortex-a76", ""));
+        if (cpu == "icestorm" || cpu == "firestorm") {
+            STI.reset(TheTarget->createMCSubtargetInfo(TT, "apple-m1", ""));
+            if (STI) {
+                llvm::overrideCortexA55SchedModel(*STI, cpu);
+                STI = llvm::wrapCustomSubtargetInfo(std::move(STI), cpu);
+            }
+        } else {
+            STI.reset(TheTarget->createMCSubtargetInfo(TT, cpu, ""));
+        }
         MCIA.reset(TheTarget->createMCInstrAnalysis(MCII.get()));
     }
 };
@@ -1155,6 +1164,44 @@ TEST(FacileTest, FacileReasonValues) {
     auto ResInst = runFacileAArch64(TC, inst_code);
     EXPECT_TRUE(ResInst.FacileReason == "inst" || ResInst.FacileReason == "exec");
 }
+
+TEST(FacileTest, FirestormCoalescedMOP) {
+    AArch64TestContext TC("firestorm");
+    std::string code = "ldp x0, x1, [x2]\nldp x3, x4, [x5]\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    // On Firestorm (Coalesced ROB / 8-MOP width), 2 MOPs = 2 micro-ops normalized
+    EXPECT_EQ(Res.TotalMicroOps, 2u);
+    EXPECT_DOUBLE_EQ(Res.IssueBound, 2.0 / 8.0);
+}
+
+TEST(FacileTest, IcestormCoalescedMOP) {
+    AArch64TestContext TC("icestorm");
+    std::string code = "ldp x0, x1, [x2]\nldp x3, x4, [x5]\n";
+    auto Res = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    // On Icestorm (Coalesced ROB / 4-MOP width), 2 MOPs = 2 micro-ops normalized
+    EXPECT_EQ(Res.TotalMicroOps, 2u);
+    EXPECT_DOUBLE_EQ(Res.IssueBound, 2.0 / 4.0);
+}
+
+TEST(MLPTest, FirestormMCASimulation) {
+    initLLVMAArch64();
+    AArch64TestContext TC("firestorm");
+    auto instrs = parseAsm(TC, "add x0, x1, x2\nadd x3, x4, x5\n");
+    ASSERT_FALSE(instrs.empty());
+
+    AArch64MLPAnalyzer analyzer;
+    mca::PipelineOptions PO(0, 0, 0, 0, 0, 0, true);
+    McaMetrics M = analyzeMcaRegion(instrs, *TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), PO,
+                                    10, 330, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                                    analyzer, false, -1, false);
+    EXPECT_TRUE(M.Valid);
+    EXPECT_GT(M.Cycles, 0u);
+}
+
 
 
 

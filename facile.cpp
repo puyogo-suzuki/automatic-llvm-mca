@@ -1,4 +1,5 @@
 #include "facile.h"
+#include "mca_common.h"
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -280,6 +281,14 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     if (SimInstrs.empty()) return Res;
 
     Res.TotalInstructions = SimInstrs.size();
+
+    // For Coalesced ROB CPUs (Apple Firestorm / Icestorm), normalize NumMicroOps to 1 (MOP-based)
+    if (isCoalescedROBCPU(STI.getCPU())) {
+        for (const auto &Inst : SimInstrs) {
+            llvm::mca::InstrDesc &MutableDesc = const_cast<llvm::mca::InstrDesc &>(Inst->getDesc());
+            MutableDesc.NumMicroOps = 1;
+        }
+    }
 
     // 1. Issue Limit
     Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps);
