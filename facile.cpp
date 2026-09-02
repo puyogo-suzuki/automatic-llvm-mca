@@ -4,6 +4,8 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <queue>
 #include <set>
@@ -46,16 +48,89 @@ const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI
     return SCDesc;
 }
 
+// Cortex-A78 Software Optimization Guide sec. 4.14 "Instruction fusion":
+// specific adjacent AArch64 instruction pairs execute as a single fused
+// operation on Cortex-A78 ("These instruction pairs must be adjacent to each
+// other in program code"). The second instruction of a fused pair consumes
+// no additional issue-width or execution-port resource. Confirmed this is
+// A78-specific: the Cortex-A76 SOG documents no equivalent CMP/CSEL or
+// CMP/B.cond fusion (only unrelated FP fused-multiply-accumulate), so this
+// must not be applied there.
+//   1. CMP/CMN (immediate) + B.cond      6. CMP (register) + CSET
+//   2. CMP/CMN (register) + B.cond       7. TST (immediate) + B.cond
+//   3. CMP (immediate) + CSEL            8. TST (register) + B.cond
+//   4. CMP (register) + CSEL             9. BICS (register) + B.cond
+//   5. CMP (immediate) + CSET            10. NOP + Any instruction
+// CMP/CMN/TST are flag-setting SUBS/ADDS/ANDS with a discarded (WZR/XZR)
+// destination; only those forms qualify, not general flag-setting ops with
+// a real destination register.
+bool isA78FusionCandidate(const llvm::MCSubtargetInfo &STI) {
+    return STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c";
+}
+
+// mca::Instruction::getDefs() elides writes to the discarded zero register
+// (nothing can ever depend on WZR/XZR's value, so the register-renaming
+// dependency tracker doesn't bother recording it) -- so whether a
+// SUBS/ADDS/ANDS is a true CMP/CMN/TST (destination discarded) vs. a general
+// flag-setting op with a real destination can only be checked on the raw
+// MCInst operand list, not on the mca::Instruction.
+bool writesZeroReg(const llvm::MCInst *MCI) {
+    if (!MCI || MCI->getNumOperands() == 0 || !MCI->getOperand(0).isReg())
+        return false;
+    llvm::MCRegister R = MCI->getOperand(0).getReg();
+    return R == llvm::AArch64::WZR || R == llvm::AArch64::XZR;
+}
+
+bool isA78FusibleProducer(const llvm::MCInstrInfo &MCII, const llvm::mca::Instruction &Inst,
+                          const llvm::MCInst *MCI) {
+    llvm::StringRef Name = MCII.getName(Inst.getOpcode());
+    bool IsCmpCmnTst = Name.starts_with_insensitive("SUBS") || Name.starts_with_insensitive("ADDS") ||
+                        Name.starts_with_insensitive("ANDS");
+    bool IsBics = Name.starts_with_insensitive("BICS");
+    if (IsBics) return true; // BICS(register)+B.cond: always the register form
+    if (!IsCmpCmnTst) return false;
+    return writesZeroReg(MCI);
+}
+
+bool isA78FusibleConsumer(const llvm::MCInstrInfo &MCII, const llvm::mca::Instruction &Inst) {
+    llvm::StringRef Name = MCII.getName(Inst.getOpcode());
+    // CSET is an alias for CSINC Wd, WZR, WZR, invert(cond) -- detecting the
+    // alias precisely would need operand inspection; only the plain CSEL
+    // form (which this codebase can verify directly) is matched here.
+    return Name.equals_insensitive("Bcc") || Name.starts_with_insensitive("CSEL");
+}
+
+// Returns a mask, one entry per instruction, true if that instruction is the
+// *second* half of an adjacent fused pair (and should be excluded from
+// issue-width/port-resource accounting).
+std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
+                                      const llvm::MCInstrInfo &MCII,
+                                      llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
+                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
+    std::vector<bool> Fused(SimInstrs.size(), false);
+    if (!isA78FusionCandidate(STI) || SimInstrs.size() < 2)
+        return Fused;
+    for (size_t i = 0; i + 1 < SimInstrs.size(); ++i) {
+        const llvm::MCInst *MCI = (i < MCInsts.size()) ? MCInsts[i] : nullptr;
+        if (isA78FusibleProducer(MCII, *SimInstrs[i], MCI) && isA78FusibleConsumer(MCII, *SimInstrs[i + 1]))
+            Fused[i + 1] = true;
+    }
+    return Fused;
+}
+
 // 1. Calculate Dispatch / Issue Width Limit
 double calculateIssueBound(const llvm::MCSchedModel &SM,
                             llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                             unsigned &TotalUops,
-                            unsigned DispatchWidthOverride) {
+                            unsigned DispatchWidthOverride,
+                            const std::vector<bool> &FusedMask) {
     unsigned IssueWidth = DispatchWidthOverride > 0 ? DispatchWidthOverride
                          : (SM.IssueWidth > 0 ? SM.IssueWidth : 1);
     TotalUops = 0;
-    for (const auto &Inst : SimInstrs) {
-        unsigned NumUops = Inst->getNumMicroOps();
+    for (size_t i = 0; i < SimInstrs.size(); ++i) {
+        if (i < FusedMask.size() && FusedMask[i])
+            continue;
+        unsigned NumUops = SimInstrs[i]->getNumMicroOps();
         TotalUops += (NumUops > 0 ? NumUops : 1);
     }
     return static_cast<double>(TotalUops) / static_cast<double>(IssueWidth);
@@ -66,12 +141,15 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
                                const llvm::MCInstrInfo &MCII,
                                llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                llvm::ArrayRef<const llvm::MCInst *> MCInsts,
-                               std::string &BottleneckPortName) {
+                               std::string &BottleneckPortName,
+                               const std::vector<bool> &FusedMask) {
     const llvm::MCSchedModel &SM = STI.getSchedModel();
     unsigned NumProcResources = SM.NumProcResourceKinds;
     std::vector<double> ProcResUsage(NumProcResources, 0.0);
 
     for (size_t i = 0; i < SimInstrs.size(); ++i) {
+        if (i < FusedMask.size() && FusedMask[i])
+            continue;
         const auto &Inst = SimInstrs[i];
         const llvm::MCInst *MCI = (i < MCInsts.size()) ? MCInsts[i] : nullptr;
         const llvm::MCInstrDesc &MCID = MCII.get(Inst->getOpcode());
@@ -293,11 +371,13 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
         }
     }
 
+    std::vector<bool> FusedMask = computeA78FusedMask(STI, MCII, SimInstrs, MCInsts);
+
     // 1. Issue Limit
-    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth);
+    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, FusedMask);
 
     // 2. Execution Ports Limit
-    Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName);
+    Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask);
 
     // 3. Precedence Constraints Limit
     auto Adj = buildDependencyGraph(SimInstrs);
