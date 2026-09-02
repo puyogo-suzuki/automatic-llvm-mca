@@ -21,7 +21,11 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MCA/Context.h"
+#include "llvm/MCA/HardwareUnits/RegisterFile.h"
+#include "llvm/MCA/Instruction.h"
+#include "llvm/MCA/SourceMgr.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
 
 enum class DependencyKind { None, IO, OOO, Dependency };
 enum class MLPWindowAssignmentKind { Forward, MaxContaining };
@@ -232,4 +236,77 @@ void walkRegions(llvm::ArrayRef<Instr> instrs, const FunctionBoundaries &boundar
 
 bool isNopInstruction(const llvm::MCInst &Inst, const llvm::MCInstrInfo &MCII);
 bool isAllNopRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCInstrInfo &MCII);
+
+// --- Shared private-member accessor hacks (Colvin/Gibbons "friend injection"
+// technique). Explicit template instantiation gives these friend functions
+// vague/COMDAT linkage, so it is safe for this header to be included by
+// multiple translation units. ---
+struct RegisterFile_RegisterMappings_Tag {};
+auto get_mappings(RegisterFile_RegisterMappings_Tag);
+
+template <typename Tag, auto M>
+struct RobStoreMappings {
+  friend auto get_mappings(Tag) {
+    return M;
+  }
+};
+template struct RobStoreMappings<RegisterFile_RegisterMappings_Tag, &llvm::mca::RegisterFile::RegisterMappings>;
+
+namespace mca_common_detail {
+
+template <typename Tag, typename Tag::type M>
+struct RobStore {
+  friend typename Tag::type get(Tag) { return M; }
+};
+
+struct ReadState_IsReady_Tag {
+  typedef bool llvm::mca::ReadState::*type;
+  friend type get(ReadState_IsReady_Tag);
+};
+template struct RobStore<ReadState_IsReady_Tag, &llvm::mca::ReadState::IsReady>;
+
+} // namespace mca_common_detail
+
+// Looks up the instruction currently mapped as the producer of `RegID` in
+// `PRF`, and returns its opcode name, or an empty StringRef if there is no
+// valid mapping. `SimInstrs` is the static (per-iteration) instruction
+// sequence, indexed by `WriteRef::getSourceIndex() % SimInstrs.size()`.
+inline llvm::StringRef a55GetProducerOpcodeName(const llvm::mca::RegisterFile &PRF,
+                                                llvm::MCPhysReg RegID,
+                                                const llvm::MCInstrInfo &MCII,
+                                                llvm::ArrayRef<llvm::mca::SourceMgr::UniqueInst> SimInstrs) {
+  auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
+  const auto &mappings = PRF.*member_ptr;
+  if (RegID >= mappings.size())
+    return {};
+  const llvm::mca::WriteRef &WR = mappings[RegID].first;
+  if (!WR.isValid() || SimInstrs.empty())
+    return {};
+  unsigned staticIID = WR.getSourceIndex() % SimInstrs.size();
+  const llvm::mca::Instruction *DepInst = SimInstrs[staticIID].get();
+  return MCII.getName(DepInst->getOpcode());
+}
+
+// Cortex-A55's zero-latency condition-flag bypass network: cmp -> csel/b.cc
+// same-cycle forwarding. Does not cover FP flag producers (FCMP/VMRS/VMSR).
+inline bool a55IsFlagBypassEligible(const llvm::mca::RegisterFile &PRF,
+                                    const llvm::MCInstrInfo &MCII,
+                                    llvm::ArrayRef<llvm::mca::SourceMgr::UniqueInst> SimInstrs) {
+  llvm::StringRef DepName = a55GetProducerOpcodeName(PRF, llvm::AArch64::NZCV, MCII, SimInstrs);
+  if (DepName.empty())
+    return false;
+  return !(DepName.starts_with_insensitive("FCMP") ||
+           DepName.starts_with_insensitive("VMRS") ||
+           DepName.starts_with_insensitive("VMSR"));
+}
+
+// A64 low-latency pointer forwarding: an LDR/LDUR base register produced by
+// ADRP is available without waiting for ADRP's full write-back latency.
+inline bool a55IsPointerForwardEligible(const llvm::mca::RegisterFile &PRF,
+                                        llvm::MCPhysReg BaseRegID,
+                                        const llvm::MCInstrInfo &MCII,
+                                        llvm::ArrayRef<llvm::mca::SourceMgr::UniqueInst> SimInstrs) {
+  llvm::StringRef DepName = a55GetProducerOpcodeName(PRF, BaseRegID, MCII, SimInstrs);
+  return DepName.equals_insensitive("ADRP");
+}
 #endif

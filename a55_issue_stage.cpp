@@ -1,4 +1,5 @@
 #include "a55_issue_stage.h"
+#include "mca_common.h"
 #include "llvm/MCA/Stages/EntryStage.h"
 #include "llvm/MCA/HWEventListener.h"
 
@@ -22,10 +23,23 @@ static unsigned findFirstWriteBackCycle(const InstRef &IR) {
   return FirstWBCycle;
 }
 
-static unsigned checkRegisterHazard(const RegisterFile &PRF,
-                                    const MCSubtargetInfo &STI,
-                                    const InstRef &IR) {
+// Member function (declared in a55_issue_stage.h): applies Cortex-A55's
+// same-cycle flag bypass (cmp -> csel/b.cc) and pointer-forwarding
+// (adrp -> ldr base) bypasses *before* consulting the register file's raw
+// RAW hazard, so they can actually suppress the stall they are meant to
+// suppress -- unlike the old Dispatched-event-based implementation, which
+// fired only after canExecute() had already gated the instruction on this
+// same hazard (see removed A55SteadyStateTracker::applyFlagTransferPenalty /
+// applyPointerForwarding in mca.cpp).
+unsigned A55DecoupledIssueStage::checkRegisterHazard(const InstRef &IR) const {
+  StringRef CurrName = MCII.getName(IR.getInstruction()->getOpcode());
+  bool IsLoadLike = CurrName.starts_with_insensitive("LDR") || CurrName.starts_with_insensitive("LDUR");
   for (const ReadState &RS : IR.getInstruction()->getUses()) {
+    MCPhysReg RegID = RS.getRegisterID();
+    if (RegID == AArch64::NZCV && a55IsFlagBypassEligible(PRF, MCII, SimInstrs))
+      continue;
+    if (IsLoadLike && a55IsPointerForwardEligible(PRF, RegID, MCII, SimInstrs))
+      continue;
     RegisterFile::RAWHazard Hazard = PRF.checkRAWHazards(STI, RS);
     if (Hazard.isValid())
       return Hazard.hasUnknownCycles() ? 1U : Hazard.CyclesLeft;
@@ -48,9 +62,11 @@ A55DecoupledIssueStage::A55DecoupledIssueStage(const MCSubtargetInfo &STI,
                                                const MCRegisterInfo &MRI,
                                                RegisterFile &PRF,
                                                CustomBehaviour &CB,
+                                               const MCInstrInfo &MCII,
+                                               ArrayRef<SourceMgr::UniqueInst> SimInstrs,
                                                std::unique_ptr<LSUnitBase> LSUB)
-    : STI(STI), MRI(MRI), PRF(PRF), RM(STI.getSchedModel()), CB(CB),
-      LSU_Owner(std::move(LSUB)), LSU(*LSU_Owner), LastWriteBackCycle(0) {}
+    : STI(STI), MRI(MRI), PRF(PRF), RM(STI.getSchedModel()), CB(CB), MCII(MCII),
+      SimInstrs(SimInstrs), LSU_Owner(std::move(LSUB)), LSU(*LSU_Owner), LastWriteBackCycle(0) {}
 
 bool A55DecoupledIssueStage::isFPInstruction(const InstRef &IR) const {
   const InstrDesc &Desc = IR.getInstruction()->getDesc();
@@ -85,7 +101,7 @@ bool A55DecoupledIssueStage::checkInterSlotDependency(const InstRef &Producer,
 }
 
 bool A55DecoupledIssueStage::canExecute(const InstRef &IR, StallInfo &SI) {
-  if (unsigned Cycles = checkRegisterHazard(PRF, STI, IR)) {
+  if (unsigned Cycles = checkRegisterHazard(IR)) {
     SI.update(IR, Cycles, StallInfo::StallKind::REGISTER_DEPS);
     return false;
   }
@@ -105,8 +121,17 @@ bool A55DecoupledIssueStage::canExecute(const InstRef &IR, StallInfo &SI) {
     return false;
   }
 
-  // Integer-to-Integer In-Order Commit enforcement
-  if (LastWriteBackCycle && !IR.getInstruction()->getRetireOOO()) {
+  // Integer-to-Integer In-Order Commit enforcement.
+  // Branches are modeled with zero latency/resources on A55 (non-blocking
+  // branch predictor, see analyzeMcaRegion() in mca.cpp) -- they produce no
+  // real register result to order writebacks against. Without this
+  // exclusion, a branch's own (deliberately zero) write-back cycle almost
+  // always looks "earlier" than whatever real instruction is still
+  // in-flight, tripping this DELAY check on every loop-closing branch and
+  // adding several unwarranted stall cycles per iteration on top of the
+  // documented single-cycle dispatch bubble.
+  bool IsBranch = MCII.get(IR.getInstruction()->getOpcode()).isBranch();
+  if (LastWriteBackCycle && !IsBranch && !IR.getInstruction()->getRetireOOO()) {
     unsigned NextWriteBackCycle = findFirstWriteBackCycle(IR);
     if (NextWriteBackCycle < LastWriteBackCycle) {
       SI.update(IR, LastWriteBackCycle - NextWriteBackCycle,
@@ -305,13 +330,15 @@ std::unique_ptr<Pipeline> createA55DecoupledPipeline(const PipelineOptions &Opts
                                                      CustomBehaviour &CB,
                                                      const MCSubtargetInfo &STI,
                                                      const MCRegisterInfo &MRI,
-                                                     RegisterFile &PRF) {
+                                                     RegisterFile &PRF,
+                                                     const MCInstrInfo &MCII,
+                                                     ArrayRef<SourceMgr::UniqueInst> SimInstrs) {
   auto P = std::make_unique<Pipeline>();
   auto Entry = std::make_unique<EntryStage>(SrcMgr);
   auto LSU = std::make_unique<LSUnit>(
       STI.getSchedModel(), Opts.LoadQueueSize, Opts.StoreQueueSize, Opts.AssumeNoAlias);
   auto Issue = std::make_unique<A55DecoupledIssueStage>(
-      STI, MRI, PRF, CB, std::move(LSU));
+      STI, MRI, PRF, CB, MCII, SimInstrs, std::move(LSU));
 
   Entry->setNextInSequence(Issue.get());
 

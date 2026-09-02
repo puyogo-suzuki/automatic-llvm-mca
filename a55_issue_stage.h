@@ -1,7 +1,9 @@
 #ifndef A55_ISSUE_STAGE_H
 #define A55_ISSUE_STAGE_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MCA/CustomBehaviour.h"
@@ -32,6 +34,8 @@ class A55DecoupledIssueStage final : public Stage {
   RegisterFile &PRF;
   ResourceManager RM;
   CustomBehaviour &CB;
+  const MCInstrInfo &MCII;
+  ArrayRef<SourceMgr::UniqueInst> SimInstrs;
   std::unique_ptr<LSUnitBase> LSU_Owner;
   LSUnitBase &LSU;
 
@@ -49,6 +53,7 @@ class A55DecoupledIssueStage final : public Stage {
   A55DecoupledIssueStage &operator=(const A55DecoupledIssueStage &) = delete;
 
   bool isFPInstruction(const InstRef &IR) const;
+  unsigned checkRegisterHazard(const InstRef &IR) const;
   bool canExecute(const InstRef &IR, StallInfo &SI);
   bool checkInterSlotDependency(const InstRef &Producer, const InstRef &Consumer) const;
   Error issue(InstRef &IR);
@@ -59,6 +64,7 @@ class A55DecoupledIssueStage final : public Stage {
 public:
   A55DecoupledIssueStage(const MCSubtargetInfo &STI, const MCRegisterInfo &MRI,
                          RegisterFile &PRF, CustomBehaviour &CB,
+                         const MCInstrInfo &MCII, ArrayRef<SourceMgr::UniqueInst> SimInstrs,
                          std::unique_ptr<LSUnitBase> LSUB);
 
   bool isAvailable(const InstRef &IR) const override;
@@ -74,7 +80,9 @@ std::unique_ptr<Pipeline> createA55DecoupledPipeline(const PipelineOptions &Opts
                                                      CustomBehaviour &CB,
                                                      const MCSubtargetInfo &STI,
                                                      const MCRegisterInfo &MRI,
-                                                     RegisterFile &PRF);
+                                                     RegisterFile &PRF,
+                                                     const MCInstrInfo &MCII,
+                                                     ArrayRef<SourceMgr::UniqueInst> SimInstrs);
 
 } // namespace mca
 } // namespace llvm

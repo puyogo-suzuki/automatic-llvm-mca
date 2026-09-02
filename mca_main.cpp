@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts);
+                facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts, TI.PO.DispatchWidth);
 
                 McaMetrics M;
                 M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size());

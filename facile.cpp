@@ -49,8 +49,10 @@ const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI
 // 1. Calculate Dispatch / Issue Width Limit
 double calculateIssueBound(const llvm::MCSchedModel &SM,
                             llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
-                            unsigned &TotalUops) {
-    unsigned IssueWidth = SM.IssueWidth > 0 ? SM.IssueWidth : 1;
+                            unsigned &TotalUops,
+                            unsigned DispatchWidthOverride) {
+    unsigned IssueWidth = DispatchWidthOverride > 0 ? DispatchWidthOverride
+                         : (SM.IssueWidth > 0 ? SM.IssueWidth : 1);
     TotalUops = 0;
     for (const auto &Inst : SimInstrs) {
         unsigned NumUops = Inst->getNumMicroOps();
@@ -276,7 +278,8 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      const llvm::MCInstrInfo &MCII,
                                      const llvm::MCRegisterInfo &MRI,
                                      llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
-                                     llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
+                                     llvm::ArrayRef<const llvm::MCInst *> MCInsts,
+                                     unsigned DispatchWidth) {
     FacileResult Res;
     if (SimInstrs.empty()) return Res;
 
@@ -291,7 +294,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     }
 
     // 1. Issue Limit
-    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps);
+    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth);
 
     // 2. Execution Ports Limit
     Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName);

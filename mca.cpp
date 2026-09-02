@@ -30,19 +30,10 @@
 using namespace llvm;
 using namespace llvm::object;
 
-#include "llvm/MCA/HardwareUnits/RegisterFile.h"
-
-// Private member accessor hacks
-struct RegisterFile_RegisterMappings_Tag {};
-auto get_mappings(RegisterFile_RegisterMappings_Tag);
-
-template <typename Tag, auto M>
-struct RobStoreMappings {
-  friend auto get_mappings(Tag) {
-    return M;
-  }
-};
-template struct RobStoreMappings<RegisterFile_RegisterMappings_Tag, &mca::RegisterFile::RegisterMappings>;
+// RegisterFile_RegisterMappings_Tag / get_mappings and
+// mca_common_detail::ReadState_IsReady_Tag / get(...) now live in
+// mca_common.h (shared with a55_issue_stage.cpp).
+using mca_common_detail::ReadState_IsReady_Tag;
 
 namespace {
 
@@ -50,12 +41,6 @@ template<typename Tag, typename Tag::type M>
 struct RobStore {
   friend typename Tag::type get(Tag) { return M; }
 };
-
-struct ReadState_IsReady_Tag {
-  typedef bool mca::ReadState::*type;
-  friend type get(ReadState_IsReady_Tag);
-};
-template struct RobStore<ReadState_IsReady_Tag, &mca::ReadState::IsReady>;
 
 struct Context_Hardware_Tag {
   typedef SmallVector<std::unique_ptr<mca::HardwareUnit>, 4> mca::Context::*type;
@@ -117,6 +102,14 @@ struct BaseSteadyStateTracker : mca::HWEventListener {
     virtual void onInstructionDispatched(const mca::HWInstructionEvent &Event) {}
 };
 
+// NOTE: A55's "flag bypass" (cmp -> csel/b.cc) and "pointer forwarding"
+// (adrp -> ldr base) used to be applied here, on the Dispatched event. That
+// event only fires from A55DecoupledIssueStage::issue(), i.e. AFTER the
+// instruction has already cleared canExecute()/checkRegisterHazard() for
+// this attempt -- so the override could never actually prevent the stall it
+// was meant to prevent. Both bypasses are now applied inside
+// A55DecoupledIssueStage::checkRegisterHazard() (a55_issue_stage.cpp),
+// before the hazard is computed, using the shared helpers in mca_common.h.
 struct A55SteadyStateTracker : public BaseSteadyStateTracker {
     const MCSubtargetInfo &STI;
     const MCRegisterInfo &MRI;
@@ -130,73 +123,6 @@ struct A55SteadyStateTracker : public BaseSteadyStateTracker {
                           mca::RegisterFile *PRF)
         : BaseSteadyStateTracker(WarmupRetiredLimit), STI(STI), MRI(MRI), MCII(MCII),
           SimInstrs(SimInstrs), PRF(PRF) {}
-
-    void onInstructionDispatched(const mca::HWInstructionEvent &Event) override {
-        if (!PRF) return;
-        mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
-        auto member_ptr = get_mappings(RegisterFile_RegisterMappings_Tag{});
-        auto &mappings = (*PRF).*member_ptr;
-
-        applyFlagTransferPenalty(Inst, mappings);
-        applyPointerForwarding(Inst, mappings);
-    }
-
-private:
-    template <typename MappingsType>
-    void applyFlagTransferPenalty(mca::Instruction &Inst, const MappingsType &mappings) {
-        // Flag-transfer penalty logic for NZCV:
-        bool from_fp = false;
-        if (AArch64::NZCV < mappings.size()) {
-            const mca::WriteRef &WR = mappings[AArch64::NZCV].first;
-            if (WR.isValid()) {
-                unsigned writerIID = WR.getSourceIndex();
-                if (!SimInstrs.empty()) {
-                    unsigned staticIID = writerIID % SimInstrs.size();
-                    const mca::Instruction *DepInst = SimInstrs[staticIID].get();
-                    StringRef DepName = MCII.getName(DepInst->getOpcode());
-                    if (DepName.starts_with_insensitive("FCMP") ||
-                        DepName.starts_with_insensitive("VMRS") ||
-                        DepName.starts_with_insensitive("VMSR")) {
-                        from_fp = true;
-                    }
-                }
-            }
-        }
-        for (mca::ReadState &RS : Inst.getUses()) {
-            if (RS.getRegisterID() == AArch64::NZCV) {
-                if (!from_fp) {
-                    RS.*get(ReadState_IsReady_Tag{}) = true;
-                    RS.setIndependentFromDef();
-                }
-            }
-        }
-    }
-
-    template <typename MappingsType>
-    void applyPointerForwarding(mca::Instruction &Inst, const MappingsType &mappings) {
-        // A64 low latency pointer forwarding bypass logic:
-        StringRef CurrName = MCII.getName(Inst.getOpcode());
-        if (CurrName.starts_with_insensitive("LDR") || CurrName.starts_with_insensitive("LDUR")) {
-            for (mca::ReadState &RS : Inst.getUses()) {
-                unsigned baseReg = RS.getRegisterID();
-                if (baseReg < mappings.size()) {
-                    const mca::WriteRef &WR = mappings[baseReg].first;
-                    if (WR.isValid()) {
-                        unsigned writerIID = WR.getSourceIndex();
-                        if (!SimInstrs.empty()) {
-                            unsigned staticIID = writerIID % SimInstrs.size();
-                            const mca::Instruction *DepInst = SimInstrs[staticIID].get();
-                            StringRef DepName = MCII.getName(DepInst->getOpcode());
-                            if (DepName.equals_insensitive("ADRP")) {
-                                RS.*get(ReadState_IsReady_Tag{}) = true;
-                                RS.setIndependentFromDef();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 };
 
 static void applyLoopCarriedIgnore(const mca::HWInstructionEvent &Event, unsigned LoopSize, unsigned &CurrentIteration, mca::RegisterFile *PRF) {
@@ -451,7 +377,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         auto PRF_unique = std::make_unique<mca::RegisterFile>(STI.getSchedModel(), MRI);
         mca::RegisterFile *PRF_ptr = PRF_unique.get();
         MCAContext.addHardwareUnit(std::move(PRF_unique));
-        P = mca::createA55DecoupledPipeline(PO, CSM, CB, STI, MRI, *PRF_ptr);
+        P = mca::createA55DecoupledPipeline(PO, CSM, CB, STI, MRI, *PRF_ptr, MCII, CSM.getInstructions());
     } else {
         P = MCAContext.createInOrderPipeline(PO, CSM, CB);
     }
