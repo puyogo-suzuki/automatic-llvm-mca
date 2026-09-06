@@ -134,6 +134,26 @@ struct SeenBaseRegs {
     void check_uses(const llvm::SmallVectorImpl<unsigned> &uses, const llvm::MCRegisterInfo &MRI);
 };
 
+// Tracks the most recent store to a given (base_reg, exact byte offset) pair,
+// so that a later load from the *exact same address* (not merely the same
+// 64-byte cache line) can be recognized as a store-to-load forwarding hit.
+// Unlike SeenBaseRegs (which matches at cache-line granularity and is used to
+// approximate "recently loaded" cache residency), this struct requires an
+// exact offset match, and it is armed by stores rather than by loads.
+// Entries for a base register are invalidated whenever that register is
+// redefined (its value -- and therefore the address it denotes -- may have
+// changed), mirroring SeenBaseRegs::reset.
+struct SeenStoreAddrs {
+    struct Element {
+        unsigned base_reg = 0;
+        int64_t offset = 0;
+    };
+    llvm::SmallVector<Element, 16> data;
+    bool test(unsigned reg, int64_t offset) const;
+    void set(unsigned reg, int64_t offset, const llvm::MCRegisterInfo &MRI);
+    void reset(unsigned reg, const llvm::MCRegisterInfo &MRI);
+};
+
 class MLPAnalyzer;
 
 std::vector<unsigned> getReturnRegisters(const llvm::MCRegisterInfo &MRI, const std::string &ArchName);
@@ -143,6 +163,11 @@ std::vector<MLPInstInfo> buildInstInfos(llvm::ArrayRef<Instr> instrs,
                                         const llvm::MCRegisterInfo& MRI,
                                         const MLPAnalyzer* Analyzer);
 void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_regs, const llvm::MCRegisterInfo &MRI);
+// Records this instruction's store (if any) into seen_store_addrs, then
+// invalidates any entries whose base register is redefined by this
+// instruction's outputs (any instruction, not just stores, since a register
+// redefinition changes the address a base_reg denotes).
+void updateSeenStoreAddrs(const MLPInstInfo &inst_info, SeenStoreAddrs &seen_store_addrs, const llvm::MCRegisterInfo &MRI);
 
 class MLPAnalyzer {
 public:
@@ -170,7 +195,8 @@ public:
                                            const llvm::MCSubtargetInfo& STI,
                                            const llvm::MCInstrInfo& MCII,
                                            const llvm::MCRegisterInfo& MRI,
-                                           DependencyKind depKind = DependencyKind::None) const;
+                                           DependencyKind depKind = DependencyKind::None,
+                                           bool mlpWindowLoop = false) const;
 };
 
 class RISCVMLPAnalyzer : public MLPAnalyzer {

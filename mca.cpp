@@ -420,7 +420,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
 
     McaMetrics M;
     M.RetiredInstructions = Tracker->SteadyRetired > 0 ? Tracker->SteadyRetired : Tracker->TotalRetired;
-    M.LoadInstructions = analyzer.countPotentialMissLoads(instrs, STI, MCII, MRI, depKind);
+    M.LoadInstructions = analyzer.countPotentialMissLoads(instrs, STI, MCII, MRI, depKind, mlpWindowLoop);
     M.Cycles = Tracker->SteadyCycles > 0 ? Tracker->SteadyCycles : Tracker->CurrentCycle;
     if (IsA55 && instrs.size() > 0) {
         unsigned NumSteadyIterations = Tracker->SteadyRetired / instrs.size();

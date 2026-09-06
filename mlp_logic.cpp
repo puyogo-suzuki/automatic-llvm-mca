@@ -158,7 +158,6 @@ int count_loads_ooo(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
                 }
             }
         }
-
         update_registers(j, is_load, base_reg, is_dep);
     }
     int total = count_indep + count_dep;
@@ -381,6 +380,61 @@ void updateSeenBaseRegs(const MLPInstInfo &inst_info, SeenBaseRegs &seen_base_re
   end_base_regs_set:
     for (unsigned reg : inst_info.io_regs.outputs) {
         seen_base_regs.reset(reg, MRI);
+    }
+}
+
+bool SeenStoreAddrs::test(unsigned reg, int64_t offset) const {
+    for (const auto &el : data) {
+        if (el.base_reg == reg && el.offset == offset)
+            return true;
+    }
+    return false;
+}
+
+void SeenStoreAddrs::set(unsigned reg, int64_t offset, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        bool found = false;
+        for (auto &el : data) {
+            if (el.base_reg == alias && el.offset == offset) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            Element el;
+            el.base_reg = alias;
+            el.offset = offset;
+            data.push_back(el);
+        }
+    }
+}
+
+void SeenStoreAddrs::reset(unsigned reg, const llvm::MCRegisterInfo &MRI) {
+    if (reg == 0) return;
+    for (llvm::MCRegAliasIterator AI(reg, &MRI, true); AI.isValid(); ++AI) {
+        unsigned alias = *AI;
+        data.erase(std::remove_if(data.begin(), data.end(),
+                                  [alias](const Element &el) {
+                                      return el.base_reg == alias;
+                                  }),
+                   data.end());
+    }
+}
+
+void updateSeenStoreAddrs(const MLPInstInfo &inst_info, SeenStoreAddrs &seen_store_addrs, const llvm::MCRegisterInfo &MRI) {
+    bool is_valid_store = inst_info.is_store() && inst_info.mem_info.valid();
+    if (is_valid_store && inst_info.mem_info.base_reg != 0 && inst_info.mem_info.is_constant_offset()) {
+        // Record the address this store writes to (base_reg + exact byte offset),
+        // using the base register's value as of *before* this instruction executes.
+        seen_store_addrs.set(inst_info.mem_info.base_reg, inst_info.mem_info.offset, MRI);
+    }
+    // Any instruction that redefines a register invalidates stored addresses keyed
+    // on the old value of that register (e.g. a writeback store/load that
+    // post/pre-increments its own base register, or an unrelated add/mov).
+    for (unsigned reg : inst_info.io_regs.outputs) {
+        seen_store_addrs.reset(reg, MRI);
     }
 }
 
@@ -811,17 +865,51 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     std::vector<unsigned> return_regs = getReturnRegisters(MRI, STI.getTargetTriple().getArchName().str());
     std::vector<int> load_indices;
     SeenBaseRegs global_seen_base_regs;
+    SeenStoreAddrs global_seen_store_addrs;
+
+    // When the forwarding-aware heuristic is enabled for a loop region, prime
+    // global_seen_base_regs/global_seen_store_addrs with one full warm-up pass
+    // over the region first, so that a store near the end of the (steady-state)
+    // loop body can be recognized as forwarding into a load near the start of
+    // the next iteration (loop wraparound).
+    if (opts::ForwardingAwareHitHeuristic && mlpWindowLoop) {
+        for (int i = 0; i < n; ++i) {
+            updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, MRI);
+            updateSeenStoreAddrs(inst_infos[i], global_seen_store_addrs, MRI);
+            if (inst_infos[i].is_call()) {
+                for (unsigned ret_reg : return_regs) {
+                    global_seen_base_regs.reset(ret_reg, MRI);
+                    global_seen_store_addrs.reset(ret_reg, MRI);
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < n; ++i) {
         bool is_hit = false;
         if (inst_infos[i].is_load()) {
-            if (inst_infos[i].mem_info.is_stack_access()) {
-                continue;
-            }
-            if (DepKind == DependencyKind::OOO) {
+            if (opts::ForwardingAwareHitHeuristic) {
                 unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
                 if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
-                    int64_t cache_line = inst_infos[i].mem_info.offset / 64;
-                    is_hit = global_seen_base_regs.test(base_reg, cache_line);
+                    if (global_seen_store_addrs.test(base_reg, inst_infos[i].mem_info.offset)) {
+                        // Exact-address store-to-load forwarding hit (applies to any
+                        // base register, not just stack/frame pointer).
+                        is_hit = true;
+                    } else if (DepKind == DependencyKind::OOO) {
+                        int64_t cache_line = inst_infos[i].mem_info.offset / 64;
+                        is_hit = global_seen_base_regs.test(base_reg, cache_line);
+                    }
+                }
+            } else {
+                if (!opts::NoStackExclusion && inst_infos[i].mem_info.is_stack_access()) {
+                    continue;
+                }
+                if (DepKind == DependencyKind::OOO) {
+                    unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
+                    if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
+                        int64_t cache_line = inst_infos[i].mem_info.offset / 64;
+                        is_hit = global_seen_base_regs.test(base_reg, cache_line);
+                    }
                 }
             }
             if (!is_hit) {
@@ -829,8 +917,12 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
             }
         }
         updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, MRI);
+        if (opts::ForwardingAwareHitHeuristic) {
+            updateSeenStoreAddrs(inst_infos[i], global_seen_store_addrs, MRI);
+        }
         if (inst_infos[i].is_call()) {
             for (unsigned ret_reg : return_regs) {
+                global_seen_store_addrs.reset(ret_reg, MRI);
                 global_seen_base_regs.reset(ret_reg, MRI);
             }
         }
@@ -910,24 +1002,78 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
                                            const llvm::MCSubtargetInfo& STI,
                                            const llvm::MCInstrInfo& MCII,
                                            const llvm::MCRegisterInfo& MRI,
-                                           DependencyKind depKind) const {
+                                           DependencyKind depKind,
+                                           bool mlpWindowLoop) const {
     if (depKind == DependencyKind::OOO) {
         int n = instrs.size();
         std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
         std::vector<unsigned> return_regs = getReturnRegisters(MRI, STI.getTargetTriple().getArchName().str());
 
         SeenBaseRegs seen_base_regs;
+        SeenStoreAddrs seen_store_addrs;
         size_t non_hit_count = 0;
+
+        // Prime the loop-carried state (see compute_mlp for the same rationale):
+        // a store near the end of a loop's steady-state body can forward into a
+        // load near the start of the next iteration.
+        if ((opts::ForwardingAwareHitHeuristic ||
+             (opts::StackOnlyMissLoadCount && opts::StackSpillOnly)) && mlpWindowLoop) {
+            for (int j = 0; j < n; ++j) {
+                updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
+                updateSeenStoreAddrs(inst_infos[j], seen_store_addrs, MRI);
+                if (inst_infos[j].is_call()) {
+                    for (unsigned ret_reg : return_regs) {
+                        seen_base_regs.reset(ret_reg, MRI);
+                        seen_store_addrs.reset(ret_reg, MRI);
+                    }
+                }
+            }
+        }
 
         for (int j = 0; j < n; ++j) {
             bool is_load = inst_infos[j].is_load() && inst_infos[j].mem_info.valid();
             unsigned base_reg = is_load ? inst_infos[j].mem_info.base_reg : 0;
-            
+
             bool is_hit = false;
-            if (is_load && !opts::DisableAlwaysHitLoadsHeuristic) {
-                if (inst_infos[j].mem_info.is_stack_access()) {
+            if (is_load && opts::StackOnlyMissLoadCount && !opts::DisableAlwaysHitLoadsHeuristic) {
+                // Diagnostic mode: keep only the stack/frame-pointer always-hit
+                // rule and drop the same-cache-line repeat-access rule, so the two
+                // components of the load_instructions filter can be told apart.
+                is_hit = inst_infos[j].mem_info.is_stack_access() &&
+                         (!opts::StackConstOffsetOnly ||
+                          inst_infos[j].mem_info.is_constant_offset()) &&
+                         (!opts::StackSpillOnly ||
+                          (inst_infos[j].mem_info.is_constant_offset() &&
+                           (seen_store_addrs.test(base_reg, inst_infos[j].mem_info.offset) ||
+                            (opts::StackLoopResident && mlpWindowLoop))));
+            } else if (is_load && opts::ForwardingAwareHitHeuristic && !opts::DisableAlwaysHitLoadsHeuristic) {
+                if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+                    if (seen_store_addrs.test(base_reg, inst_infos[j].mem_info.offset)) {
+                        // Exact-address store-to-load forwarding hit (applies to
+                        // any base register, not just sp/fp).
+                        is_hit = true;
+                    } else {
+                        int64_t cache_line = inst_infos[j].mem_info.offset / 64;
+                        is_hit = seen_base_regs.test(base_reg, cache_line);
+                    }
+                }
+            } else if (is_load && !opts::StackOnlyMissLoadCount && !opts::ForwardingAwareHitHeuristic) {
+                // Plain/default mode. Stack/frame-pointer accesses are unconditionally
+                // treated as always-hit (matches compute_mlp's 'mlp' column; a real
+                // hardware fact independent of -disable-always-hit-loads-heuristic),
+                // unless -no-stack-exclusion asks us not to special-case them.
+                //
+                // Same-cache-line repeat-access loads are, by contrast, counted as
+                // normal (potential-miss) loads by default now: this rule approximated
+                // in-order stall-on-use latency hiding, which does not generalize
+                // cleanly across analysis-window sizes (see 2026-09-06 investigation).
+                // Pass -disable-line-reuse-load-counting to opt back into excluding
+                // them (the pre-2026-09-06 default); -disable-always-hit-loads-heuristic
+                // still acts as a hard override that forces them to be counted either way.
+                if (!opts::NoStackExclusion && inst_infos[j].mem_info.is_stack_access()) {
                     is_hit = true;
-                } else if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
+                } else if (opts::DisableLineReuseLoadCounting && !opts::DisableAlwaysHitLoadsHeuristic &&
+                           base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
                     int64_t cache_line = inst_infos[j].mem_info.offset / 64;
                     is_hit = seen_base_regs.test(base_reg, cache_line);
                 }
@@ -942,9 +1088,14 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
             }
 
             updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
+            if (opts::ForwardingAwareHitHeuristic ||
+                (opts::StackOnlyMissLoadCount && opts::StackSpillOnly)) {
+                updateSeenStoreAddrs(inst_infos[j], seen_store_addrs, MRI);
+            }
             if (inst_infos[j].is_call()) {
                 for (unsigned ret_reg : return_regs) {
                     seen_base_regs.reset(ret_reg, MRI);
+                    seen_store_addrs.reset(ret_reg, MRI);
                 }
             }
         }
@@ -956,7 +1107,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
         const MCInst& Inst = I.Inst;
         const MCInstrDesc& MCID = MCII.get(Inst.getOpcode());
         MemAccessInfo mem_info = getMemAccessInfo(Inst, MCID, MRI, MCII);
-        if (mem_info.is_load() && !mem_info.is_stack_access()) {
+        if (mem_info.is_load() && (opts::NoStackExclusion || !mem_info.is_stack_access())) {
             count++;
         }
     }

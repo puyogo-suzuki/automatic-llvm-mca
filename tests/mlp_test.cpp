@@ -1202,6 +1202,107 @@ TEST(MLPTest, FirestormMCASimulation) {
     EXPECT_GT(M.Cycles, 0u);
 }
 
+// --- Scratch verification tests for --forwarding-aware-hit-heuristic ---
+// (temporary, added only to sanity-check the SeenStoreAddrs/updateSeenStoreAddrs
+// logic added to mlp_logic.cpp; not part of the requested deliverable itself)
+namespace {
+struct ScopedForwardingFlag {
+    bool old;
+    explicit ScopedForwardingFlag(bool val) : old(opts::ForwardingAwareHitHeuristic) {
+        opts::ForwardingAwareHitHeuristic = val;
+    }
+    ~ScopedForwardingFlag() { opts::ForwardingAwareHitHeuristic = old; }
+};
+}
+
+TEST(MLPTest, ForwardingAwareExactAddressHit) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    ScopedForwardingFlag guard(true);
+    auto instrs = parseAsm(TC, "str x1, [sp, #16]\nldr x2, [sp, #16]");
+    ASSERT_EQ(instrs.size(), 2u);
+    AArch64MLPAnalyzer analyzer;
+    size_t loads = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI, DependencyKind::OOO, false);
+    // The load reads exactly the address just stored to: should be a forwarding hit.
+    EXPECT_EQ(loads, 0u);
+}
+
+TEST(MLPTest, ForwardingAwareNoPriorStoreIsMiss) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    ScopedForwardingFlag guard(true);
+    // No store anywhere in the block: under the new heuristic, a bare sp-relative
+    // load is no longer automatically assumed to hit (unlike the old is_stack_access
+    // blanket rule).
+    auto instrs = parseAsm(TC, "ldr x2, [sp, #16]");
+    ASSERT_EQ(instrs.size(), 1u);
+    AArch64MLPAnalyzer analyzer;
+    size_t loads = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI, DependencyKind::OOO, false);
+    EXPECT_EQ(loads, 1u);
+
+    // Sanity check: with the flag off (legacy behavior), the same load is
+    // still treated as an unconditional stack-access hit.
+    opts::ForwardingAwareHitHeuristic = false;
+    size_t loads_legacy = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI, DependencyKind::OOO, false);
+    EXPECT_EQ(loads_legacy, 0u);
+}
+
+TEST(MLPTest, ForwardingAwareDifferentOffsetIsMiss) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    ScopedForwardingFlag guard(true);
+    // Store and load target different exact offsets (still same 64B cache line):
+    // exact-address forwarding must not fire.
+    auto instrs = parseAsm(TC, "str x1, [sp, #16]\nldr x2, [sp, #24]");
+    ASSERT_EQ(instrs.size(), 2u);
+    AArch64MLPAnalyzer analyzer;
+    size_t loads = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI, DependencyKind::OOO, false);
+    EXPECT_EQ(loads, 1u);
+}
+
+TEST(MLPTest, ForwardingAwareLoopWraparoundForwarding) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    ScopedForwardingFlag guard(true);
+    // The load appears *before* the store in program order, but this is a loop
+    // region (mlpWindowLoop=true): the store at the end of one iteration should
+    // forward into the load at the start of the next.
+    auto instrs = parseAsm(TC, "ldr x2, [sp, #16]\nstr x1, [sp, #16]");
+    ASSERT_EQ(instrs.size(), 2u);
+    AArch64MLPAnalyzer analyzer;
+    size_t loads_loop = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI, DependencyKind::OOO, /*mlpWindowLoop=*/true);
+    EXPECT_EQ(loads_loop, 0u);
+
+    // Without loop wraparound priming, the same sequence should NOT forward
+    // (the store hasn't happened yet by the time the load executes).
+    size_t loads_no_loop = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI, DependencyKind::OOO, /*mlpWindowLoop=*/false);
+    EXPECT_EQ(loads_no_loop, 1u);
+}
+
+TEST(MLPTest, ForwardingAwareComputeMlpExcludesForwardedLoad) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    ScopedForwardingFlag guard(true);
+    // compute_mlp's *load_indices* filtering (the loop over the whole region that
+    // decides which loads are scored at all) honors forwarding: the forwarded
+    // "ldr x2, [sp, #16]" is excluded from load_indices, leaving only the real
+    // "ldr x0, [x9, #0]" to be scored. However count_loads_ooo's own per-load
+    // windowed scan (used to compute *that* load's score) does not consult
+    // is_stack_access/forwarding at all -- this is a pre-existing characteristic
+    // shared with the legacy is_stack_access path (see e.g.
+    // AArch64CacheHitBaseRegister above, where an uncompleted same-cache-line
+    // repeat load is likewise not treated as a hit within the window scan), not
+    // something introduced by the forwarding heuristic. So the forwarded load
+    // still contributes to the surviving load's window score (val=2), even
+    // though it correctly does not get its own MLP score.
+    auto instrs = parseAsm(TC, "ldr x0, [x9, #0]\nstr x1, [sp, #16]\nldr x2, [sp, #16]");
+    ASSERT_EQ(instrs.size(), 3u);
+    float ratio = 0.0f;
+    AArch64MLPAnalyzer analyzer;
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward, *TC.STI, *TC.MCII, *TC.MRI, ratio, /*mlpWindowLoop=*/false);
+    EXPECT_NEAR(val, 2.0, 0.01);
+}
+
 
 
 

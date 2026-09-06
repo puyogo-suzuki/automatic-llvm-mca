@@ -52,6 +52,55 @@ namespace opts {
     cl::opt<int> ChainThreshold("chain-threshold", cl::desc("Max chain threshold for merged loop region analysis"), cl::init(5));
     cl::opt<bool> CountOnly("count-only", cl::desc("Only count total generated regions without running MCA simulation"), cl::init(false));
     cl::opt<bool> DisableAlwaysHitLoadsHeuristic("disable-always-hit-loads-heuristic", cl::desc("Disable SeenBaseRegs hit filtering heuristic for loads"), cl::init(false));
+    cl::opt<bool> ForwardingAwareHitHeuristic("forwarding-aware-hit-heuristic",
+        cl::desc("Replace the blanket stack/frame-pointer always-hit assumption with an "
+                 "exact-address store-to-load forwarding check (applies to any base register, "
+                 "not just sp/fp)"),
+        cl::init(false));
+    cl::opt<bool> StackOnlyMissLoadCount("stack-only-miss-load-count",
+        cl::desc("In countPotentialMissLoads only (the load_instructions column), exclude "
+                 "stack/frame-pointer accesses but keep same-cache-line repeat accesses. "
+                 "Diagnostic knob that decomposes the two always-hit heuristics; does not "
+                 "affect the MLP computation itself."),
+        cl::init(false));
+    cl::opt<bool> StackConstOffsetOnly("stack-const-offset-only",
+        cl::desc("With -stack-only-miss-load-count, additionally require a constant "
+                 "(immediate) offset for the stack always-hit rule, so register-indexed "
+                 "stack accesses (large local arrays) are still counted as possible misses."),
+        cl::init(false));
+    cl::opt<bool> StackSpillOnly("stack-spill-only",
+        cl::desc("With -stack-only-miss-load-count, only treat a stack/frame-pointer load "
+                 "as an always-hit when a store to the exact same (base_reg, offset) is "
+                 "seen in the analyzed region (a provable spill/reload pair)."),
+        cl::init(false));
+    cl::opt<bool> StackLoopResident("stack-loop-resident",
+        cl::desc("With -stack-only-miss-load-count -stack-spill-only, additionally treat a "
+                 "constant-offset stack load inside a steady-state loop region as an "
+                 "always-hit: the same slot is touched every iteration, so it is L1 "
+                 "resident from the second iteration on."),
+        cl::init(false));
+    cl::opt<bool> NoStackExclusion("no-stack-exclusion",
+        cl::desc("Do not give stack/frame-pointer (sp/wsp/x29/w29/fp) loads any special "
+                 "always-hit treatment: treat them exactly like ordinary loads in both the "
+                 "MLP computation (compute_mlp, the 'mlp' column) and the potential-miss "
+                 "load count (countPotentialMissLoads, the 'load_instructions' column), "
+                 "subjecting them to the same OOO/dependency same-cache-line heuristics as "
+                 "any other load. Takes effect only where the blanket stack always-hit "
+                 "check would otherwise fire; -forwarding-aware-hit-heuristic already does "
+                 "not special-case stack accesses, so it takes precedence when combined."),
+        cl::init(false));
+    cl::opt<bool> DisableLineReuseLoadCounting("disable-line-reuse-load-counting",
+        cl::desc("In countPotentialMissLoads only (the load_instructions column, plain mode "
+                 "i.e. neither -stack-only-miss-load-count nor -forwarding-aware-hit-heuristic "
+                 "given), also treat a load as always-hit when it repeats a same-cache-line "
+                 "access already seen in the analyzed window (the pre-2026-09-06 default). "
+                 "By default (this flag absent) such loads are counted normally: this rule's "
+                 "window-length sensitivity does not generalize reliably to a much larger "
+                 "real sampling interval, unlike the stack/frame-pointer always-hit rule "
+                 "(which remains unconditional regardless of this flag; see "
+                 "-no-stack-exclusion to turn that off instead). "
+                 "-disable-always-hit-loads-heuristic always overrides this flag off."),
+        cl::init(false));
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

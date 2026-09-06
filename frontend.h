@@ -57,6 +57,13 @@ namespace opts {
     extern llvm::cl::opt<int> ChainThreshold;
     extern llvm::cl::opt<bool> CountOnly;
     extern llvm::cl::opt<bool> DisableAlwaysHitLoadsHeuristic;
+    extern llvm::cl::opt<bool> ForwardingAwareHitHeuristic;
+    extern llvm::cl::opt<bool> StackOnlyMissLoadCount;
+    extern llvm::cl::opt<bool> StackConstOffsetOnly;
+    extern llvm::cl::opt<bool> StackSpillOnly;
+    extern llvm::cl::opt<bool> StackLoopResident;
+    extern llvm::cl::opt<bool> NoStackExclusion;
+    extern llvm::cl::opt<bool> DisableLineReuseLoadCounting;
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

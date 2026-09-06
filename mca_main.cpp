@@ -190,7 +190,7 @@ int main(int argc, char **argv) {
 
                 McaMetrics M;
                 M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size());
-                M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind);
+                M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind, mlpLoop);
                 M.Cycles = static_cast<uint64_t>(std::round(Res.EstimatedCycles));
                 M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, M.MLP_R, mlpLoop);
                 M.BaseCPI = Res.EstimatedCPI;
@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
                     McaMetrics M;
                     M.RetiredInstructions = it->second.RetiredInstructions;
                     M.Cycles = it->second.Cycles;
-                    M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind);
+                    M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind, mlpLoop);
                     float mlp_r = 0.0f;
                     M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, mlp_r, mlpLoop);
                     M.MLP_R = mlp_r;
