@@ -101,6 +101,16 @@ namespace opts {
                  "-no-stack-exclusion to turn that off instead). "
                  "-disable-always-hit-loads-heuristic always overrides this flag off."),
         cl::init(false));
+    cl::opt<bool> MlpStackOnlyExclusion("mlp-stack-only-exclusion",
+        cl::desc("Diagnostic flag: in compute_mlp (the 'mlp' column) plain mode (i.e. "
+                 "-forwarding-aware-hit-heuristic not given), stop treating a same-cache-line "
+                 "repeat access as always-hit (so such loads are counted normally in the MLP "
+                 "average). Stack/frame-pointer always-hit exclusion in compute_mlp is "
+                 "unaffected (remains unconditional regardless of this flag; see "
+                 "-no-stack-exclusion to turn that off instead). Mirrors "
+                 "-disable-line-reuse-load-counting's rationale but for the MLP column rather "
+                 "than the load_instructions column; not yet the default pending validation."),
+        cl::init(false));
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

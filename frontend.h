@@ -64,6 +64,7 @@ namespace opts {
     extern llvm::cl::opt<bool> StackLoopResident;
     extern llvm::cl::opt<bool> NoStackExclusion;
     extern llvm::cl::opt<bool> DisableLineReuseLoadCounting;
+    extern llvm::cl::opt<bool> MlpStackOnlyExclusion;
 }
 
 bool initializeFrontend(int argc, char **argv, const char *Overview,

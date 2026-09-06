@@ -845,7 +845,89 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
     return info;
 }
 
-float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width, 
+// ---------------------------------------------------------------------------
+// Always-hit heuristic diagnostic/ablation flags -- status as of 2026-09-06
+// ---------------------------------------------------------------------------
+// countPotentialMissLoads (the load_instructions column) and compute_mlp (the
+// mlp column) both need to decide, per load, whether to treat it as an
+// unconditional cache hit ("always-hit") and therefore exclude it from their
+// respective counts/averages. A day of investigation accumulated several
+// diagnostic command-line flags around this decision; their current status,
+// so a future reader does not have to reconstruct it from git history:
+//
+//   -disable-always-hit-loads-heuristic
+//       Pre-existing hard override that forces the *entire* always-hit
+//       heuristic off wherever it is checked (including the per-window
+//       count_loads_ooo scoring used by compute_mlp). KEEP as-is; do not
+//       remove or fold into the flags below.
+//
+//   -forwarding-aware-hit-heuristic
+//       Replaces the blanket stack/frame-pointer always-hit rule with an
+//       exact-address store-to-load forwarding check, for any base register
+//       (not just sp/fp). VALIDATED, NOT ADOPTED: measured no improvement
+//       over the plain-mode heuristic below. Left in place for future
+//       ablation experiments; do not remove.
+//
+//   -stack-only-miss-load-count (+ -stack-const-offset-only,
+//   -stack-spill-only, -stack-loop-resident)
+//       countPotentialMissLoads-only diagnostic family that decomposes the
+//       stack-exclusion and line-reuse-exclusion rules so each can be
+//       studied in isolation. Diagnostic only, never a production default.
+//
+//   -no-stack-exclusion
+//       Removes stack/frame-pointer always-hit treatment entirely, in both
+//       countPotentialMissLoads and compute_mlp. VALIDATED, NOT ADOPTED:
+//       measured worse across every benchmark tested. Kept for ablation.
+//
+//   -disable-line-reuse-load-counting
+//       countPotentialMissLoads-only. ADOPTED DESIGN as of 2026-09-06: the
+//       production default for countPotentialMissLoads' plain mode is to
+//       keep the stack exclusion unconditional but *stop* excluding
+//       same-cache-line repeat ("line reuse") accesses -- that rule's
+//       window-length sensitivity does not generalize to a much larger real
+//       sampling interval. Passing this flag restores the pre-2026-09-06
+//       behavior of also excluding line-reuse loads.
+//
+//   -mlp-stack-only-exclusion
+//       compute_mlp's analogue of -disable-line-reuse-load-counting, for the
+//       'mlp' column's plain mode. STILL PENDING VALIDATION (unlike its
+//       countPotentialMissLoads counterpart above), so it is not yet the
+//       default: passing it opts out of the line-reuse always-hit rule in
+//       compute_mlp.
+//
+// Both functions share the same "plain mode" decision -- i.e. the case where
+// neither -stack-only-miss-load-count (which only exists for
+// countPotentialMissLoads) nor -forwarding-aware-hit-heuristic is in effect:
+// a stack/frame-pointer access is unconditionally always-hit (unless
+// -no-stack-exclusion), and a same-cache-line repeat access is always-hit
+// only when the caller opts into the line-reuse rule (via
+// -disable-line-reuse-load-counting or -mlp-stack-only-exclusion,
+// respectively -- see each call site below for how that flag is threaded
+// through). classifyPlainModeAlwaysHit() centralizes that shared decision so
+// it isn't duplicated between the two functions.
+enum class PlainModeAlwaysHit {
+    Miss,        // not an always-hit: counts as a potential-miss / MLP load
+    StackAccess, // unconditional stack/frame-pointer always-hit
+    LineReuse,   // same-cache-line repeat access (only when enabled by caller)
+};
+
+static PlainModeAlwaysHit classifyPlainModeAlwaysHit(const MLPInstInfo &inst_info,
+                                                     unsigned base_reg,
+                                                     const SeenBaseRegs &seen_base_regs,
+                                                     bool lineReuseExclusionEnabled) {
+    if (!opts::NoStackExclusion && inst_info.mem_info.is_stack_access()) {
+        return PlainModeAlwaysHit::StackAccess;
+    }
+    if (lineReuseExclusionEnabled && base_reg != 0 && inst_info.mem_info.is_constant_offset()) {
+        int64_t cache_line = inst_info.mem_info.offset / 64;
+        if (seen_base_regs.test(base_reg, cache_line)) {
+            return PlainModeAlwaysHit::LineReuse;
+        }
+    }
+    return PlainModeAlwaysHit::Miss;
+}
+
+float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                               DependencyKind DepKind, 
                               MLPWindowAssignmentKind AssignKind, 
                               const llvm::MCSubtargetInfo& STI,
@@ -901,16 +983,20 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
                     }
                 }
             } else {
-                if (!opts::NoStackExclusion && inst_infos[i].mem_info.is_stack_access()) {
+                // Plain mode: see classifyPlainModeAlwaysHit's doc comment above
+                // compute_mlp for the full rationale.
+                unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
+                bool lineReuseExclusionEnabled = !opts::MlpStackOnlyExclusion && DepKind == DependencyKind::OOO;
+                PlainModeAlwaysHit hit = classifyPlainModeAlwaysHit(
+                    inst_infos[i], base_reg, global_seen_base_regs, lineReuseExclusionEnabled);
+                if (hit == PlainModeAlwaysHit::StackAccess) {
+                    // Skip this load entirely: it is not added to load_indices, and
+                    // (via this `continue`) it is also never recorded into
+                    // global_seen_base_regs below, unlike countPotentialMissLoads'
+                    // plain mode which still records stack-access loads.
                     continue;
                 }
-                if (DepKind == DependencyKind::OOO) {
-                    unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
-                    if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
-                        int64_t cache_line = inst_infos[i].mem_info.offset / 64;
-                        is_hit = global_seen_base_regs.test(base_reg, cache_line);
-                    }
-                }
+                is_hit = (hit == PlainModeAlwaysHit::LineReuse);
             }
             if (!is_hit) {
                 load_indices.push_back(i);
@@ -1058,25 +1144,18 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
                     }
                 }
             } else if (is_load && !opts::StackOnlyMissLoadCount && !opts::ForwardingAwareHitHeuristic) {
-                // Plain/default mode. Stack/frame-pointer accesses are unconditionally
-                // treated as always-hit (matches compute_mlp's 'mlp' column; a real
-                // hardware fact independent of -disable-always-hit-loads-heuristic),
-                // unless -no-stack-exclusion asks us not to special-case them.
-                //
-                // Same-cache-line repeat-access loads are, by contrast, counted as
-                // normal (potential-miss) loads by default now: this rule approximated
-                // in-order stall-on-use latency hiding, which does not generalize
-                // cleanly across analysis-window sizes (see 2026-09-06 investigation).
-                // Pass -disable-line-reuse-load-counting to opt back into excluding
-                // them (the pre-2026-09-06 default); -disable-always-hit-loads-heuristic
-                // still acts as a hard override that forces them to be counted either way.
-                if (!opts::NoStackExclusion && inst_infos[j].mem_info.is_stack_access()) {
-                    is_hit = true;
-                } else if (opts::DisableLineReuseLoadCounting && !opts::DisableAlwaysHitLoadsHeuristic &&
-                           base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
-                    int64_t cache_line = inst_infos[j].mem_info.offset / 64;
-                    is_hit = seen_base_regs.test(base_reg, cache_line);
-                }
+                // Plain/default mode: see classifyPlainModeAlwaysHit's doc comment
+                // above compute_mlp for the full rationale. This mirrors compute_mlp's
+                // own plain-mode branch, except a stack-access always-hit here still
+                // falls through to record the load into seen_base_regs below (via the
+                // unconditional updateSeenBaseRegs call further down), whereas
+                // compute_mlp skips that recording for stack accesses via `continue`.
+                // -disable-always-hit-loads-heuristic still acts as a hard override
+                // that forces the line-reuse rule off (loads counted either way).
+                bool lineReuseExclusionEnabled = opts::DisableLineReuseLoadCounting &&
+                                                  !opts::DisableAlwaysHitLoadsHeuristic;
+                is_hit = classifyPlainModeAlwaysHit(inst_infos[j], base_reg, seen_base_regs,
+                                                     lineReuseExclusionEnabled) != PlainModeAlwaysHit::Miss;
             }
 
             if (is_load) {
