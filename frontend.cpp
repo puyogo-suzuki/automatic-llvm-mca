@@ -51,7 +51,17 @@ namespace opts {
     cl::opt<bool> FacileReason("facile-reason", cl::desc("Output dominant bottleneck reason (inst, exec, prec) for Facile analysis"), cl::init(false));
     cl::opt<int> ChainThreshold("chain-threshold", cl::desc("Max chain threshold for merged loop region analysis"), cl::init(5));
     cl::opt<bool> CountOnly("count-only", cl::desc("Only count total generated regions without running MCA simulation"), cl::init(false));
-    cl::opt<bool> DisableAlwaysHitLoadsHeuristic("disable-always-hit-loads-heuristic", cl::desc("Disable SeenBaseRegs hit filtering heuristic for loads"), cl::init(false));
+    cl::opt<bool> DisableAlwaysHitLoadsHeuristic("disable-always-hit-loads-heuristic",
+        cl::desc("Disable the same-cache-line 'line reuse' always-hit heuristic: by default "
+                 "a load that repeats a same-base-register+cache-line access already seen in "
+                 "the analyzed window is treated as an unconditional cache hit and excluded "
+                 "from both the load_instructions/BB_LD_RETIRED count (countPotentialMissLoads) "
+                 "and the BB_MLP potential-miss averaging (compute_mlp). Passing this flag "
+                 "turns that exclusion off, so such loads are counted normally; it is a "
+                 "diagnostic escape hatch for generating 'no exclusion at all' reference data. "
+                 "Stack/frame-pointer always-hit exclusion is unrelated and unconditional "
+                 "regardless of this flag; see -no-stack-exclusion to turn that off instead."),
+        cl::init(false));
     cl::opt<bool> ForwardingAwareHitHeuristic("forwarding-aware-hit-heuristic",
         cl::desc("Replace the blanket stack/frame-pointer always-hit assumption with an "
                  "exact-address store-to-load forwarding check (applies to any base register, "
@@ -88,28 +98,6 @@ namespace opts {
                  "any other load. Takes effect only where the blanket stack always-hit "
                  "check would otherwise fire; -forwarding-aware-hit-heuristic already does "
                  "not special-case stack accesses, so it takes precedence when combined."),
-        cl::init(false));
-    cl::opt<bool> DisableLineReuseLoadCounting("disable-line-reuse-load-counting",
-        cl::desc("In countPotentialMissLoads only (the load_instructions column, plain mode "
-                 "i.e. neither -stack-only-miss-load-count nor -forwarding-aware-hit-heuristic "
-                 "given), also treat a load as always-hit when it repeats a same-cache-line "
-                 "access already seen in the analyzed window (the pre-2026-09-06 default). "
-                 "By default (this flag absent) such loads are counted normally: this rule's "
-                 "window-length sensitivity does not generalize reliably to a much larger "
-                 "real sampling interval, unlike the stack/frame-pointer always-hit rule "
-                 "(which remains unconditional regardless of this flag; see "
-                 "-no-stack-exclusion to turn that off instead). "
-                 "-disable-always-hit-loads-heuristic always overrides this flag off."),
-        cl::init(false));
-    cl::opt<bool> MlpStackOnlyExclusion("mlp-stack-only-exclusion",
-        cl::desc("Diagnostic flag: in compute_mlp (the 'mlp' column) plain mode (i.e. "
-                 "-forwarding-aware-hit-heuristic not given), stop treating a same-cache-line "
-                 "repeat access as always-hit (so such loads are counted normally in the MLP "
-                 "average). Stack/frame-pointer always-hit exclusion in compute_mlp is "
-                 "unaffected (remains unconditional regardless of this flag; see "
-                 "-no-stack-exclusion to turn that off instead). Mirrors "
-                 "-disable-line-reuse-load-counting's rationale but for the MLP column rather "
-                 "than the load_instructions column; not yet the default pending validation."),
         cl::init(false));
 }
 
