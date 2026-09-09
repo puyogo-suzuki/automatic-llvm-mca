@@ -62,11 +62,6 @@ namespace opts {
                  "Stack/frame-pointer always-hit exclusion is unrelated and unconditional "
                  "regardless of this flag; see -no-stack-exclusion to turn that off instead."),
         cl::init(false));
-    cl::opt<bool> ForwardingAwareHitHeuristic("forwarding-aware-hit-heuristic",
-        cl::desc("Replace the blanket stack/frame-pointer always-hit assumption with an "
-                 "exact-address store-to-load forwarding check (applies to any base register, "
-                 "not just sp/fp)"),
-        cl::init(false));
     cl::opt<bool> StackOnlyMissLoadCount("stack-only-miss-load-count",
         cl::desc("In countPotentialMissLoads only (the load_instructions column), exclude "
                  "stack/frame-pointer accesses but keep same-cache-line repeat accesses. "
@@ -96,8 +91,7 @@ namespace opts {
                  "load count (countPotentialMissLoads, the 'load_instructions' column), "
                  "subjecting them to the same OOO/dependency same-cache-line heuristics as "
                  "any other load. Takes effect only where the blanket stack always-hit "
-                 "check would otherwise fire; -forwarding-aware-hit-heuristic already does "
-                 "not special-case stack accesses, so it takes precedence when combined."),
+                 "check would otherwise fire."),
         cl::init(false));
 }
 

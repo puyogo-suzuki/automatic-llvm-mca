@@ -187,7 +187,7 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
 // 3. Build Read-After-Write (RAW) Register Dependency Graph
 std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs) {
-    
+
     size_t N = SimInstrs.size();
     std::vector<std::vector<DependencyEdge>> Adj(N);
     std::map<unsigned, size_t> LastWriter;

@@ -865,12 +865,6 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
 // Other diagnostic/ablation flags around this decision, kept for future
 // ablation experiments but never a production default:
 //
-//   -forwarding-aware-hit-heuristic
-//       Replaces the blanket stack/frame-pointer always-hit rule with an
-//       exact-address store-to-load forwarding check, for any base register
-//       (not just sp/fp). VALIDATED, NOT ADOPTED: measured no improvement
-//       over the plain-mode heuristic below.
-//
 //   -stack-only-miss-load-count (+ -stack-const-offset-only,
 //   -stack-spill-only, -stack-loop-resident)
 //       countPotentialMissLoads-only diagnostic family that decomposes the
@@ -883,14 +877,13 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
 //       measured worse across every benchmark tested. Kept for ablation.
 //
 // Both functions share the same "plain mode" decision -- i.e. the case where
-// neither -stack-only-miss-load-count (which only exists for
-// countPotentialMissLoads) nor -forwarding-aware-hit-heuristic is in effect:
-// a stack/frame-pointer access is unconditionally always-hit (unless
-// -no-stack-exclusion), and a same-cache-line repeat access is always-hit
-// unless the caller opts out via -disable-always-hit-loads-heuristic (see
-// each call site below for how that flag is threaded through).
-// classifyPlainModeAlwaysHit() centralizes that shared decision so it isn't
-// duplicated between the two functions.
+// -stack-only-miss-load-count (which only exists for countPotentialMissLoads)
+// is not in effect: a stack/frame-pointer access is unconditionally
+// always-hit (unless -no-stack-exclusion), and a same-cache-line repeat
+// access is always-hit unless the caller opts out via
+// -disable-always-hit-loads-heuristic (see each call site below for how that
+// flag is threaded through). classifyPlainModeAlwaysHit() centralizes that
+// shared decision so it isn't duplicated between the two functions.
 enum class PlainModeAlwaysHit {
     Miss,        // not an always-hit: counts as a potential-miss / MLP load
     StackAccess, // unconditional stack/frame-pointer always-hit
@@ -933,68 +926,31 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
     std::vector<unsigned> return_regs = getReturnRegisters(MRI, STI.getTargetTriple().getArchName().str());
     std::vector<int> load_indices;
     SeenBaseRegs global_seen_base_regs;
-    SeenStoreAddrs global_seen_store_addrs;
-
-    // When the forwarding-aware heuristic is enabled for a loop region, prime
-    // global_seen_base_regs/global_seen_store_addrs with one full warm-up pass
-    // over the region first, so that a store near the end of the (steady-state)
-    // loop body can be recognized as forwarding into a load near the start of
-    // the next iteration (loop wraparound).
-    if (opts::ForwardingAwareHitHeuristic && mlpWindowLoop) {
-        for (int i = 0; i < n; ++i) {
-            updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, MRI);
-            updateSeenStoreAddrs(inst_infos[i], global_seen_store_addrs, MRI);
-            if (inst_infos[i].is_call()) {
-                for (unsigned ret_reg : return_regs) {
-                    global_seen_base_regs.reset(ret_reg, MRI);
-                    global_seen_store_addrs.reset(ret_reg, MRI);
-                }
-            }
-        }
-    }
 
     for (int i = 0; i < n; ++i) {
         bool is_hit = false;
         if (inst_infos[i].is_load()) {
-            if (opts::ForwardingAwareHitHeuristic) {
-                unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
-                if (base_reg != 0 && inst_infos[i].mem_info.is_constant_offset()) {
-                    if (global_seen_store_addrs.test(base_reg, inst_infos[i].mem_info.offset)) {
-                        // Exact-address store-to-load forwarding hit (applies to any
-                        // base register, not just stack/frame pointer).
-                        is_hit = true;
-                    } else if (DepKind == DependencyKind::OOO) {
-                        int64_t cache_line = inst_infos[i].mem_info.offset / 64;
-                        is_hit = global_seen_base_regs.test(base_reg, cache_line);
-                    }
-                }
-            } else {
-                // Plain mode: see classifyPlainModeAlwaysHit's doc comment above
-                // compute_mlp for the full rationale.
-                unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
-                bool lineReuseExclusionEnabled = !opts::DisableAlwaysHitLoadsHeuristic && DepKind == DependencyKind::OOO;
-                PlainModeAlwaysHit hit = classifyPlainModeAlwaysHit(
-                    inst_infos[i], base_reg, global_seen_base_regs, lineReuseExclusionEnabled);
-                if (hit == PlainModeAlwaysHit::StackAccess) {
-                    // Skip this load entirely: it is not added to load_indices, and
-                    // (via this `continue`) it is also never recorded into
-                    // global_seen_base_regs below, unlike countPotentialMissLoads'
-                    // plain mode which still records stack-access loads.
-                    continue;
-                }
-                is_hit = (hit == PlainModeAlwaysHit::LineReuse);
+            // Plain mode: see classifyPlainModeAlwaysHit's doc comment above
+            // compute_mlp for the full rationale.
+            unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
+            bool lineReuseExclusionEnabled = !opts::DisableAlwaysHitLoadsHeuristic && DepKind == DependencyKind::OOO;
+            PlainModeAlwaysHit hit = classifyPlainModeAlwaysHit(
+                inst_infos[i], base_reg, global_seen_base_regs, lineReuseExclusionEnabled);
+            if (hit == PlainModeAlwaysHit::StackAccess) {
+                // Skip this load entirely: it is not added to load_indices, and
+                // (via this `continue`) it is also never recorded into
+                // global_seen_base_regs below, unlike countPotentialMissLoads'
+                // plain mode which still records stack-access loads.
+                continue;
             }
+            is_hit = (hit != PlainModeAlwaysHit::Miss);
             if (!is_hit) {
                 load_indices.push_back(i);
             }
         }
         updateSeenBaseRegs(inst_infos[i], global_seen_base_regs, MRI);
-        if (opts::ForwardingAwareHitHeuristic) {
-            updateSeenStoreAddrs(inst_infos[i], global_seen_store_addrs, MRI);
-        }
         if (inst_infos[i].is_call()) {
             for (unsigned ret_reg : return_regs) {
-                global_seen_store_addrs.reset(ret_reg, MRI);
                 global_seen_base_regs.reset(ret_reg, MRI);
             }
         }
@@ -1085,11 +1041,11 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
         SeenStoreAddrs seen_store_addrs;
         size_t non_hit_count = 0;
 
-        // Prime the loop-carried state (see compute_mlp for the same rationale):
-        // a store near the end of a loop's steady-state body can forward into a
-        // load near the start of the next iteration.
-        if ((opts::ForwardingAwareHitHeuristic ||
-             (opts::StackOnlyMissLoadCount && opts::StackSpillOnly)) && mlpWindowLoop) {
+        // Prime the loop-carried state: with -stack-spill-only, a store near
+        // the end of a loop's steady-state body can be recognized as a
+        // spill/reload pair with a load near the start of the next iteration.
+        bool storeAddrTrackingNeeded = opts::StackOnlyMissLoadCount && opts::StackSpillOnly;
+        if (storeAddrTrackingNeeded && mlpWindowLoop) {
             for (int j = 0; j < n; ++j) {
                 updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
                 updateSeenStoreAddrs(inst_infos[j], seen_store_addrs, MRI);
@@ -1118,18 +1074,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
                           (inst_infos[j].mem_info.is_constant_offset() &&
                            (seen_store_addrs.test(base_reg, inst_infos[j].mem_info.offset) ||
                             (opts::StackLoopResident && mlpWindowLoop))));
-            } else if (is_load && opts::ForwardingAwareHitHeuristic && !opts::DisableAlwaysHitLoadsHeuristic) {
-                if (base_reg != 0 && inst_infos[j].mem_info.is_constant_offset()) {
-                    if (seen_store_addrs.test(base_reg, inst_infos[j].mem_info.offset)) {
-                        // Exact-address store-to-load forwarding hit (applies to
-                        // any base register, not just sp/fp).
-                        is_hit = true;
-                    } else {
-                        int64_t cache_line = inst_infos[j].mem_info.offset / 64;
-                        is_hit = seen_base_regs.test(base_reg, cache_line);
-                    }
-                }
-            } else if (is_load && !opts::StackOnlyMissLoadCount && !opts::ForwardingAwareHitHeuristic) {
+            } else if (is_load && !opts::StackOnlyMissLoadCount) {
                 // Plain/default mode: see classifyPlainModeAlwaysHit's doc comment
                 // above compute_mlp for the full rationale. This mirrors compute_mlp's
                 // own plain-mode branch, except a stack-access always-hit here still
@@ -1150,8 +1095,7 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
             }
 
             updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
-            if (opts::ForwardingAwareHitHeuristic ||
-                (opts::StackOnlyMissLoadCount && opts::StackSpillOnly)) {
+            if (storeAddrTrackingNeeded) {
                 updateSeenStoreAddrs(inst_infos[j], seen_store_addrs, MRI);
             }
             if (inst_infos[j].is_call()) {
