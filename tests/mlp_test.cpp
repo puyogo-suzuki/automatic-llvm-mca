@@ -217,6 +217,11 @@ struct AArch64TestContext {
         if (cpu == "icestorm" || cpu == "firestorm") {
             STI.reset(TheTarget->createMCSubtargetInfo(TT, "apple-m1", ""));
             if (STI) {
+                // Only this branch installs our re-generated sched-class
+                // tables, so only this branch needs MCInstrDesc::SchedClass
+                // remapped onto our numbering.  The else-branch below keeps
+                // libLLVM's stock model, which the stock indices already match.
+                llvm::remapSchedClassIndices(*MCII, cpu);
                 llvm::overrideCortexA55SchedModel(*STI, cpu);
                 STI = llvm::wrapCustomSubtargetInfo(std::move(STI), cpu);
             }
@@ -824,6 +829,122 @@ TEST(MLPTest, AArch64ExplicitSPCacheHit) {
     EXPECT_EQ(val, 1.0f);
 }
 
+// -----------------------------------------------------------------------------
+// -line-reuse-in-order: extend the same-cache-line (line reuse) always-hit
+// heuristic to the non-OOO code paths used by the in-order small core
+// (cortex-a55, --dependency dependency). Off by default, so the default
+// non-OOO behaviour (stack exclusion only) must be preserved.
+// -----------------------------------------------------------------------------
+namespace {
+struct LineReuseInOrderFlagGuard {
+    bool saved_line_reuse = opts::LineReuseInOrder;
+    bool saved_disable = opts::DisableAlwaysHitLoadsHeuristic;
+    ~LineReuseInOrderFlagGuard() {
+        opts::LineReuseInOrder = saved_line_reuse;
+        opts::DisableAlwaysHitLoadsHeuristic = saved_disable;
+    }
+};
+}  // namespace
+
+TEST(MLPTest, AArch64LineReuseInOrderLoadCount) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a55");
+    LineReuseInOrderFlagGuard guard;
+    // Two loads off the same base register in the same 64-byte line, with the
+    // first load's result consumed in between (so the stall has actually
+    // happened): the second load is then a guaranteed hit under the
+    // stall-on-use in-order argument.
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nadd x5, x1, #1\nldr x2, [x0, #16]");
+    ASSERT_EQ(instrs.size(), 3u);
+    AArch64MLPAnalyzer analyzer;
+
+    opts::LineReuseInOrder = false;
+    EXPECT_EQ(analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                               DependencyKind::Dependency, false), 2u);
+
+    opts::LineReuseInOrder = true;
+    EXPECT_EQ(analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                               DependencyKind::Dependency, false), 1u);
+
+    // The master opt-out still wins over the new flag.
+    opts::DisableAlwaysHitLoadsHeuristic = true;
+    EXPECT_EQ(analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                               DependencyKind::Dependency, false), 2u);
+}
+
+TEST(MLPTest, AArch64LineReuseInOrderCacheLineBoundary) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a55");
+    LineReuseInOrderFlagGuard guard;
+    // Offsets 8 and 72 are in different cache lines, so nothing is excluded
+    // even with the flag on.
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nldr x2, [x0, #72]");
+    ASSERT_EQ(instrs.size(), 2u);
+    AArch64MLPAnalyzer analyzer;
+
+    opts::LineReuseInOrder = true;
+    EXPECT_EQ(analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                               DependencyKind::Dependency, false), 2u);
+}
+
+TEST(MLPTest, AArch64LineReuseInOrderComputeMlp) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a55");
+    LineReuseInOrderFlagGuard guard;
+    // ldr x1 is a potential miss with a stall distance of 3; ldr x2 reuses x0's
+    // (now resident) line and is a guaranteed hit with a stall distance of 1,
+    // which should drop out of the harmonic average once the flag is on
+    // (1/((1/3+1/1)/2) = 1.5 -> 3.0).
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nnop\nnop\nadd x5, x1, #1\nldr x2, [x0, #16]\nadd x6, x2, #1");
+    ASSERT_EQ(instrs.size(), 6u);
+    AArch64MLPAnalyzer analyzer;
+    float ratio = 0.0f;
+
+    opts::LineReuseInOrder = false;
+    float base = analyzer.compute_mlp(instrs, 8, DependencyKind::Dependency,
+                                      MLPWindowAssignmentKind::Forward,
+                                      *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    opts::LineReuseInOrder = true;
+    float excl = analyzer.compute_mlp(instrs, 8, DependencyKind::Dependency,
+                                      MLPWindowAssignmentKind::Forward,
+                                      *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    // Dropping the short-distance guaranteed-hit load raises the average
+    // stall distance over the remaining potential-miss loads.
+    EXPECT_GT(excl, base);
+}
+
+TEST(MLPTest, AArch64LineReuseInOrderNoOpForOOO) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    LineReuseInOrderFlagGuard guard;
+    auto instrs = parseAsm(TC, "ldr x1, [x0, #8]\nadd x5, x1, #1\nldr x2, [x0, #16]");
+    ASSERT_EQ(instrs.size(), 3u);
+    AArch64MLPAnalyzer analyzer;
+
+    opts::LineReuseInOrder = false;
+    size_t ooo_off = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                                      DependencyKind::OOO, false);
+    opts::LineReuseInOrder = true;
+    size_t ooo_on = analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                                     DependencyKind::OOO, false);
+    EXPECT_EQ(ooo_off, 1u);
+    EXPECT_EQ(ooo_on, ooo_off);
+}
+
+TEST(MLPTest, AArch64LineReuseInOrderKeepsStackExclusion) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a55");
+    LineReuseInOrderFlagGuard guard;
+    // Stack loads stay excluded in the new tracking path as well.
+    auto instrs = parseAsm(TC, "ldr x1, [sp, #8]\nldr x2, [x0, #16]");
+    ASSERT_EQ(instrs.size(), 2u);
+    AArch64MLPAnalyzer analyzer;
+
+    opts::LineReuseInOrder = true;
+    EXPECT_EQ(analyzer.countPotentialMissLoads(instrs, *TC.STI, *TC.MCII, *TC.MRI,
+                                               DependencyKind::Dependency, false), 1u);
+}
+
 TEST(MLPTest, RISCVExplicitSPCacheHit) {
     initLLVMRISCV();
     RISCVTestContext TC;
@@ -1047,6 +1168,103 @@ static facile::FacileResult runFacileAArch64(const AArch64TestContext &TC, const
         }
     }
     return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts);
+}
+
+// Same as runFacileAArch64 but also supplies the per-instruction
+// MemAccessInfo array, enabling facile's store->load memory RAW edges.
+static facile::FacileResult runFacileAArch64Mem(const AArch64TestContext &TC, const std::string &asm_code) {
+    initLLVMAArch64();
+    auto instrs = parseAsm(TC, asm_code);
+    auto Analyzer = MLPAnalyzer::create(*TC.STI);
+    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
+    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
+    std::vector<const MCInst *> MCInsts;
+    std::vector<MemAccessInfo> MemInfos;
+    for (const auto &I : instrs) {
+        auto ExpectedInst = IB.createInstruction(I.Inst, {});
+        if (ExpectedInst) {
+            SimInstrs.push_back(std::move(*ExpectedInst));
+            MCInsts.push_back(&I.Inst);
+            const MCInstrDesc &MCID = TC.MCII->get(I.Inst.getOpcode());
+            MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, MCID, *TC.MRI, *TC.MCII));
+        }
+    }
+    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, 0, MemInfos);
+}
+
+// A value that round-trips through memory across the backedge is a real
+// loop-carried recurrence.  The store and the load index the same base with
+// DIFFERENT registers (x1 vs x2), so a one-iteration lag cannot be ruled out
+// and the edge must be created.  This is the shape of 456.hmmer's P7Viterbi
+// D-state recurrence, which the register-only graph cannot see at all.
+TEST(FacileTest, MemoryLoopCarriedRecurrence) {
+    initLLVMAArch64();
+    AArch64TestContext TC("firestorm");
+    std::string code =
+        "ldr w3, [x5, x1]\n"
+        "add w3, w3, #1\n"
+        "str w3, [x5, x2, lsl #2]\n";
+    auto WithMem = runFacileAArch64Mem(TC, code);
+    auto NoMem = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(WithMem.TotalInstructions, 3u);
+    // Without memory edges there is no cycle at all in the graph.
+    EXPECT_DOUBLE_EQ(NoMem.PrecedenceBound, 0.0);
+    // With them the recurrence is store(1) + load(3) + add(1) = 5 cycles.
+    EXPECT_GT(WithMem.PrecedenceBound, 0.0);
+    EXPECT_EQ(WithMem.FacileReason, "prec");
+}
+
+// Dependence-distance test: identical subscript expressions with a
+// loop-varying index are an array read-modify-write (a[i] = f(a[i])).  Their
+// dependence distance is 0, so there must be NO loop-carried edge -- the next
+// iteration reads a[i+1], which this iteration's store did not write.
+TEST(FacileTest, MemoryReadModifyWriteHasNoLoopCarriedEdge) {
+    initLLVMAArch64();
+    AArch64TestContext TC("firestorm");
+    std::string code =
+        "ldr w0, [x1, x2, lsl #2]\n"
+        "add w0, w0, #1\n"
+        "str w0, [x1, x2, lsl #2]\n"
+        "add x2, x2, #1\n";
+    auto WithMem = runFacileAArch64Mem(TC, code);
+    auto NoMem = runFacileAArch64(TC, code);
+
+    EXPECT_EQ(WithMem.TotalInstructions, 4u);
+    // x2's own self-recurrence (add x2, x2, #1) is the only cycle, and the
+    // memory edges must not add to it.
+    EXPECT_DOUBLE_EQ(WithMem.PrecedenceBound, NoMem.PrecedenceBound);
+}
+
+// Same base register, both accesses constant-offset with DIFFERENT
+// displacements: provably disjoint, so no edge (this is what keeps stack
+// spill/reload and struct-field traffic from generating false recurrences).
+TEST(FacileTest, MemoryDistinctConstantOffsetsDoNotAlias) {
+    initLLVMAArch64();
+    AArch64TestContext TC("firestorm");
+    std::string code =
+        "ldr w0, [x1, #8]\n"
+        "add w0, w0, #1\n"
+        "str w0, [x1, #16]\n";
+    auto WithMem = runFacileAArch64Mem(TC, code);
+    auto NoMem = runFacileAArch64(TC, code);
+
+    EXPECT_DOUBLE_EQ(WithMem.PrecedenceBound, NoMem.PrecedenceBound);
+    EXPECT_DOUBLE_EQ(WithMem.PrecedenceBound, 0.0);
+}
+
+// Different base registers are assumed not to alias, matching the
+// AssumeNoAlias convention the rest of the tool uses.
+TEST(FacileTest, MemoryDifferentBaseRegistersDoNotAlias) {
+    initLLVMAArch64();
+    AArch64TestContext TC("firestorm");
+    std::string code =
+        "ldr w0, [x1, x3]\n"
+        "add w0, w0, #1\n"
+        "str w0, [x2, x3, lsl #2]\n";
+    auto WithMem = runFacileAArch64Mem(TC, code);
+    EXPECT_DOUBLE_EQ(WithMem.PrecedenceBound, 0.0);
 }
 
 TEST(FacileTest, EmptyInstructions) {

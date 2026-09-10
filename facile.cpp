@@ -242,6 +242,226 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     return Adj;
 }
 
+// ---------------------------------------------------------------------------
+// Memory (store -> load) RAW dependences.
+//
+// WHY THIS EXISTS.  buildDependencyGraph() above tracks only REGISTER RAW
+// dependences, and it deliberately extends the published Facile model by
+// adding *inter-iteration* (loop-carried) register edges in its Pass 2, so
+// that calculatePrecedenceBound() computes a Maximum-Cycle-Ratio recurrence
+// bound on steady-state loop throughput rather than a single basic block's
+// critical path.  Once loop-carried register recurrences are modelled,
+// omitting loop-carried MEMORY recurrences is an inconsistency: a value that
+// round-trips through memory (store in iteration k, load in iteration k+1) is
+// just as much a recurrence, and bounds throughput just as hard.  Facile as
+// published assumes basic blocks are compute-bound and that "loads and stores
+// may or may not alias" is unknowable (sec. 3.3), which is defensible for
+// single-block throughput but not for the loop-recurrence bound this tool
+// actually computes.
+//
+// WHY IT MATTERS ASYMMETRICALLY, AND WHY IT SHOWED UP AS A FireStorm-ONLY
+// ERROR.  EstimatedCycles = max(IssueBound, PortBound, PrecedenceBound).  A
+// missing precedence bound is invisible on a narrow core, because IssueBound
+// (uops / issue width) is larger anyway and still wins the max; it becomes
+// visible exactly on the WIDEST core of a pair, whose IssueBound is smallest.
+// 456.hmmer's P7Viterbi inner loop is the textbook case.  The block at
+// 0xcc2c..0xcd18 (59 instructions, 17 loads, 10 stores) carries the serial
+// HMMER D-state recurrence
+//     str w2, [x5, x0, lsl #2]   ; dc[k]        (iteration k)
+//     ...
+//     ldr w3, [x5, x1]           ; dc[k-1]      (iteration k+1)
+//     add w3, w3, w2  /  cmp  /  csel  /  cmp  /  csel  /  str
+// i.e. a memory round trip plus a 5-deep flag/select chain, which no register
+// edge can see because the value never stays in a register across the
+// backedge.  Measured on real M1 (macbook/456.hmmer): IceStorm needs 15.9
+// cycles for the block and its IssueBound of 59/4 = 14.75 already covers that,
+// so IceStorm's prediction (15) is accidentally right.  FireStorm needs 11.7
+// cycles but its IssueBound is only 59/8 = 7.375, so the model predicted 7 --
+// and the missing cycles are precisely the ones that show up in FireStorm's
+// MAP_STALL_DISPATCH counter (30% of its cycles on hmmer, versus 4.5% on
+// IceStorm, the largest such ratio in the 24-benchmark suite): the mapper
+// cannot dispatch because the scheduler is backed up behind a recurrence the
+// model does not know about.  Dougall Johnson's measured port throughputs
+// cannot explain that gap and were confirmed innocent: on FireStorm every
+// resource bound for this block is at or below the issue bound (LDR TP 0.333
+// on u8-10 -> 17/3 = 5.67; STR TP 0.5 on u7/8 -> 10/2 = 5; CMP/CSEL TP 0.333
+// on u1-3 -> 18/3 = 6; ADD TP 0.167 on u1-6 -> 12/6 = 2).  The bottleneck is
+// a dependence, not a port.
+//
+// MAY-ALIAS RULE.  Deliberately the same conservative-but-cheap rule the MLP
+// analyser's SeenStoreAddrs already uses, with no new tunable:
+//   * different base register            -> assume no alias (the same
+//     AssumeNoAlias-style assumption the rest of the tool makes; without it
+//     every store would fence every load and the bound would explode);
+//   * same base register, BOTH accesses constant-offset -> alias iff the
+//     offsets are equal (this is what keeps stack spill/reload traffic and
+//     struct-field access from generating false edges);
+//   * same base register, at least one register-indexed (LDRWroX / STRWroX,
+//     i.e. an a[i]-style access) -> may alias.  hmmer's recurrence is exactly
+//     this case: str [x5, x0, lsl #2] vs. ldr [x5, x1].
+//   * a base register redefined between the two accesses breaks the match,
+//     since the register no longer denotes the same address; for a
+//     loop-carried edge the base must be loop-invariant (never redefined in
+//     the region).  This mirrors SeenStoreAddrs::reset().
+//
+// EDGE LATENCY.  The producer's own latency, exactly as the register RAW path
+// does (getInstLatency of the store, i.e. the .td WriteST latency = 1 cycle on
+// both M1 models).  The load's own latency then applies on the load's outgoing
+// edge, so a store->load round trip costs WriteST + WriteLD = 1 + 3 = 4
+// cycles, i.e. store-to-load forwarding is modelled as no slower than an L1
+// hit.  That is the optimistic end of the plausible range and introduces NO
+// new constant; a larger, separately-measured store-forwarding latency would
+// only raise the bound further, so this errs toward under- rather than
+// over-prediction.
+// ---------------------------------------------------------------------------
+
+// Index register of an AArch64 register-offset access (LDRWroX / STRWroX and
+// friends), or 0 for constant-offset forms.  getMemAccessInfo() records only
+// the base register for these forms, but distinguishing a[i] from a[j] needs
+// the index too -- see sameAddressExpr() below.  Mirrors mlp_logic.cpp's
+// register-offset detection (operand 1 = base, operand 2 = index).
+unsigned getIndexReg(const llvm::MCInstrInfo &MCII, const llvm::MCInst *MCI) {
+    if (!MCI) return 0;
+    llvm::StringRef Name = MCII.getName(MCI->getOpcode());
+    if (Name.find_insensitive("ro") == llvm::StringRef::npos) return 0;
+    if (MCI->getNumOperands() < 3 || !MCI->getOperand(2).isReg()) return 0;
+    return MCI->getOperand(2).getReg();
+}
+
+// Do two accesses compute the SAME address expression (same base, same index
+// register, same displacement)?  This is the classic dependence-distance
+// (ZIV/SIV) test: if two accesses in a loop have identical subscript
+// expressions and that subscript advances every iteration, then the
+// dependence distance between them is 0 -- they touch the same address WITHIN
+// an iteration and can never touch the same address ACROSS iterations.  The
+// canonical case is an array read-modify-write,
+//     ldr w0, [x1, x2, lsl #2]   ; t = a[i]
+//     ...
+//     str w0, [x1, x2, lsl #2]   ; a[i] = f(t)
+// where the next iteration reads a[i+1], which the previous iteration's store
+// to a[i] did not write.  Such a pair must NOT get a loop-carried edge.
+// hmmer's real recurrence is precisely the opposite case -- the store indexes
+// with x0 (k) and the load with x1 (4*(k-1)), so the expressions differ, a
+// one-iteration lag cannot be ruled out, and the edge is kept.
+bool sameAddressExpr(const MemAccessInfo &A, unsigned IdxA,
+                     const MemAccessInfo &B, unsigned IdxB) {
+    return A.base_reg == B.base_reg && A.offset == B.offset &&
+           A.is_constant_offset() == B.is_constant_offset() && IdxA == IdxB;
+}
+
+bool mayAlias(const MemAccessInfo &A, const MemAccessInfo &B) {
+    if (!A.valid() || !B.valid()) return false;
+    if (A.is_pc_relative() || B.is_pc_relative()) return false;
+    if (A.base_reg == 0 || B.base_reg == 0) return false;
+    if (A.base_reg != B.base_reg) return false;
+    if (A.is_constant_offset() && B.is_constant_offset())
+        return A.offset == B.offset;
+    return true;
+}
+
+// Does instruction `i` write a register overlapping `BaseReg`?  Uses the raw
+// MCInst/MCInstrDesc rather than mca::Instruction::getDefs() so that
+// sub-register writes (w4 redefining x4) and writeback base updates are both
+// caught via MCRegisterInfo::regsOverlap.
+bool definesReg(const llvm::MCInstrInfo &MCII, const llvm::MCRegisterInfo &MRI,
+                const llvm::MCInst *MCI, unsigned BaseReg) {
+    if (!MCI) return true; // unknown instruction: assume it clobbers
+    const llvm::MCInstrDesc &MCID = MCII.get(MCI->getOpcode());
+    for (unsigned k = 0, e = MCID.getNumDefs(); k < e && k < MCI->getNumOperands(); ++k) {
+        const llvm::MCOperand &Op = MCI->getOperand(k);
+        if (Op.isReg() && Op.getReg() != 0 && MRI.regsOverlap(Op.getReg(), BaseReg))
+            return true;
+    }
+    for (llvm::MCPhysReg R : MCID.implicit_defs()) {
+        if (MRI.regsOverlap(R, BaseReg)) return true;
+    }
+    return false;
+}
+
+void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
+                           const llvm::MCRegisterInfo &MRI,
+                           llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
+                           llvm::ArrayRef<const llvm::MCInst *> MCInsts,
+                           llvm::ArrayRef<MemAccessInfo> MemInfos,
+                           std::vector<std::vector<DependencyEdge>> &Adj) {
+    size_t N = SimInstrs.size();
+    if (MemInfos.size() < N || MCInsts.size() < N) return;
+
+    bool HasStore = false, HasLoad = false;
+    for (size_t i = 0; i < N && !(HasStore && HasLoad); ++i) {
+        const MemAccessInfo &M = MemInfos[i];
+        if (!M.valid() || M.is_pc_relative() || M.base_reg == 0) continue;
+        HasStore |= M.is_store();
+        HasLoad |= M.is_load();
+    }
+    if (!HasStore || !HasLoad) return;
+
+    std::vector<unsigned> IdxRegs(N, 0);
+    for (size_t i = 0; i < N; ++i)
+        IdxRegs[i] = getIndexReg(MCII, MCInsts[i]);
+
+    // Prefix counts of register redefinitions, memoized per register, so the
+    // "does this register still hold the same value" test is O(1) per pair.
+    // Redef[r][i] = number of instructions at index < i writing a register
+    // overlapping r.  Always reached through countRedefs() so a missing row is
+    // built rather than default-constructed empty.
+    std::map<unsigned, std::vector<unsigned>> Redef;
+    auto countRedefs = [&](unsigned R) -> const std::vector<unsigned> & {
+        auto It = Redef.find(R);
+        if (It != Redef.end()) return It->second;
+        std::vector<unsigned> &P = Redef[R];
+        P.assign(N + 1, 0);
+        for (size_t i = 0; i < N; ++i)
+            P[i + 1] = P[i] + (definesReg(MCII, MRI, MCInsts[i], R) ? 1 : 0);
+        return P;
+    };
+
+    // Register unchanged strictly between indices lo and hi (exclusive both ends).
+    auto stableBetween = [&](unsigned R, size_t lo, size_t hi) {
+        if (hi <= lo + 1) return true;
+        const std::vector<unsigned> &P = countRedefs(R);
+        return P[hi] == P[lo + 1];
+    };
+    auto loopInvariant = [&](unsigned R) { return countRedefs(R)[N] == 0; };
+
+    for (size_t j = 0; j < N; ++j) {
+        const MemAccessInfo &L = MemInfos[j];
+        if (!L.valid() || !L.is_load() || L.is_pc_relative() || L.base_reg == 0)
+            continue;
+
+        // Pass 1: nearest preceding aliasing store in the same iteration.
+        bool FoundIntra = false;
+        for (size_t i = j; i-- > 0;) {
+            const MemAccessInfo &S = MemInfos[i];
+            if (!S.is_store() || !mayAlias(S, L)) continue;
+            if (!stableBetween(L.base_reg, i, j)) break; // base changed: earlier matches are stale
+            Adj[i].push_back({j, getInstLatency(*SimInstrs[i]), 0});
+            FoundIntra = true;
+            break;
+        }
+        if (FoundIntra) continue;
+
+        // Pass 2: loop-carried.  A load with no preceding aliasing store in the
+        // region reads a value that, in steady state, the region's LAST
+        // aliasing store produced in the previous iteration -- the memory
+        // analogue of the LastWriter -> FirstReader edge in
+        // buildDependencyGraph()'s Pass 2.  Requires a loop-invariant base.
+        if (!loopInvariant(L.base_reg)) continue;
+        for (size_t i = N; i-- > 0;) {
+            const MemAccessInfo &S = MemInfos[i];
+            if (!S.is_store() || !mayAlias(S, L)) continue;
+            // Dependence-distance test (see sameAddressExpr): identical
+            // subscript expressions with a loop-varying index cannot alias
+            // across iterations, so no loop-carried edge.
+            if (sameAddressExpr(S, IdxRegs[i], L, IdxRegs[j]) &&
+                IdxRegs[j] != 0 && !loopInvariant(IdxRegs[j]))
+                break;
+            Adj[i].push_back({j, getInstLatency(*SimInstrs[i]), 1});
+            break;
+        }
+    }
+}
+
 // Check if a cycle ratio mu is achievable using SPFA negative cycle detection on transformed weights: c = mu * distance - latency
 bool isAchievableRatio(double mu,
                        size_t N,
@@ -357,7 +577,8 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      const llvm::MCRegisterInfo &MRI,
                                      llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts,
-                                     unsigned DispatchWidth) {
+                                     unsigned DispatchWidth,
+                                     llvm::ArrayRef<MemAccessInfo> MemInfos) {
     FacileResult Res;
     if (SimInstrs.empty()) return Res;
 
@@ -381,6 +602,8 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
 
     // 3. Precedence Constraints Limit
     auto Adj = buildDependencyGraph(SimInstrs);
+    if (!MemInfos.empty())
+        addMemoryDependencies(MCII, MRI, SimInstrs, MCInsts, MemInfos, Adj);
     Res.PrecedenceBound = calculatePrecedenceBound(SimInstrs.size(), Adj);
 
     // 4. Overall Max Bottleneck Prediction

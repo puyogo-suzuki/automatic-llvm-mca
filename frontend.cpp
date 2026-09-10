@@ -49,6 +49,18 @@ namespace opts {
     cl::opt<std::string> UpdateMlp("update-mlp", cl::desc("CSV file containing previous MCA results to reuse"), cl::init(""));
     cl::opt<bool> Facile("facile", cl::desc("Enable Facile static analytical throughput prediction (AArch64)"), cl::init(false));
     cl::opt<bool> FacileReason("facile-reason", cl::desc("Output dominant bottleneck reason (inst, exec, prec) for Facile analysis"), cl::init(false));
+    cl::opt<bool> NoFacileMemoryDeps("no-facile-memory-deps",
+        cl::desc("Disable store->load memory RAW edges in the --facile precedence-constraint "
+                 "(Maximum Cycle Ratio) graph, restoring the register-dependences-only "
+                 "behaviour. The edges are on by default: the graph already carries "
+                 "loop-carried REGISTER recurrences, so omitting loop-carried MEMORY "
+                 "recurrences was an inconsistency that made the model blind to any value "
+                 "that round-trips through memory across a backedge (e.g. 456.hmmer's "
+                 "P7Viterbi D-state recurrence). A missing precedence bound is masked by "
+                 "IssueWidth on narrow cores and only becomes visible on the widest core of "
+                 "a pair, which is why it presented as a FireStorm-specific "
+                 "under-prediction. This flag exists to A/B the effect."),
+        cl::init(false));
     cl::opt<int> ChainThreshold("chain-threshold", cl::desc("Max chain threshold for merged loop region analysis"), cl::init(5));
     cl::opt<bool> CountOnly("count-only", cl::desc("Only count total generated regions without running MCA simulation"), cl::init(false));
     cl::opt<bool> DisableAlwaysHitLoadsHeuristic("disable-always-hit-loads-heuristic",
@@ -61,6 +73,19 @@ namespace opts {
                  "diagnostic escape hatch for generating 'no exclusion at all' reference data. "
                  "Stack/frame-pointer always-hit exclusion is unrelated and unconditional "
                  "regardless of this flag; see -no-stack-exclusion to turn that off instead."),
+        cl::init(false));
+    cl::opt<bool> LineReuseInOrder("line-reuse-in-order",
+        cl::desc("Also apply the same-cache-line 'line reuse' always-hit heuristic in the "
+                 "non-OOO code paths (--dependency dependency|io|none, i.e. the in-order "
+                 "small-core configuration such as cortex-a55), which otherwise only apply "
+                 "the stack/frame-pointer always-hit rule. The heuristic's physical "
+                 "justification is a stall-on-use IN-ORDER pipeline: once a real miss stalls "
+                 "the machine, a later load to the same cache line is guaranteed resident, so "
+                 "it is a guaranteed hit. That argument applies literally to an in-order core, "
+                 "so this flag exists to A/B-test whether extending the exclusion to the "
+                 "in-order path improves CPI-Stack accuracy. Ignored under "
+                 "-disable-always-hit-loads-heuristic, and a no-op for --dependency ooo "
+                 "(which already enables the heuristic unconditionally)."),
         cl::init(false));
     cl::opt<bool> StackOnlyMissLoadCount("stack-only-miss-load-count",
         cl::desc("In countPotentialMissLoads only (the load_instructions column), exclude "
@@ -130,6 +155,13 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     MCTargetOptions MCOPT;
     TI.MAI.reset(TI.TheTarget->createMCAsmInfo(*TI.MRI, TT, MCOPT));
     TI.MCII.reset(TI.TheTarget->createMCInstrInfo());
+    // The MCInstrDesc array just handed to us is libLLVM's, so its SchedClass
+    // indices use stock AArch64.td numbering, while overrideCortexA55SchedModel()
+    // below installs sched-class tables re-generated with
+    // ModifiedTarget/AArch64/*.td - a different numbering, in which 1051 of the
+    // 9131 shared opcodes disagree.  Remap before anything reads a SchedClass.
+    if (TI.MCII)
+        llvm::remapSchedClassIndices(*TI.MCII, TI.CPU);
     TI.STI.reset(TI.TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
     if (TI.STI) {
         llvm::overrideCortexA55SchedModel(*TI.STI, TI.CPU);

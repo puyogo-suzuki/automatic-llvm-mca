@@ -173,6 +173,9 @@ int main(int argc, char **argv) {
                 mca::InstrBuilder IB(*TI.STI, *TI.MCII, *TI.MRI, TI.MCIA.get(), IM, 0);
                 std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
                 std::vector<const MCInst *> MCInsts;
+                // Index-aligned with SimInstrs/MCInsts: the memory-access
+                // descriptor facile uses for store->load precedence edges.
+                std::vector<MemAccessInfo> MemInfos;
                 for (const auto &I : region_instrs) {
                     auto ExpectedInst = IB.createInstruction(I.Inst, {});
                     if (ExpectedInst) {
@@ -183,10 +186,14 @@ int main(int argc, char **argv) {
                         }
                         SimInstrs.push_back(std::move(Inst));
                         MCInsts.push_back(&I.Inst);
+                        if (!opts::NoFacileMemoryDeps) {
+                            const MCInstrDesc &MCID = TI.MCII->get(I.Inst.getOpcode());
+                            MemInfos.push_back(TI.Analyzer->getMemAccessInfo(I.Inst, MCID, *TI.MRI, *TI.MCII));
+                        }
                     }
                 }
 
-                facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts, TI.PO.DispatchWidth);
+                facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts, TI.PO.DispatchWidth, MemInfos);
 
                 McaMetrics M;
                 M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size());

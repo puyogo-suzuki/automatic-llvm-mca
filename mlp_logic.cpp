@@ -860,7 +860,11 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
 //     seen in the analyzed window): also excluded by default as of
 //     2026-09-08 (validated via shuffle-testing on real hardware data across
 //     two ARM cores to improve CPI-Stack model accuracy);
-//     -disable-always-hit-loads-heuristic turns this off.
+//     -disable-always-hit-loads-heuristic turns this off. NOTE: line reuse is
+//     enabled by default only in the OOO code paths (--dependency ooo). The
+//     non-OOO / in-order paths (--dependency dependency|io|none, i.e. the
+//     cortex-a55 small-core configuration) apply only the stack rule unless
+//     -line-reuse-in-order is passed; see that flag's description.
 //
 // Other diagnostic/ablation flags around this decision, kept for future
 // ablation experiments but never a production default:
@@ -933,7 +937,8 @@ float MLPAnalyzer::compute_mlp(llvm::ArrayRef<Instr> instrs, int width,
             // Plain mode: see classifyPlainModeAlwaysHit's doc comment above
             // compute_mlp for the full rationale.
             unsigned base_reg = inst_infos[i].mem_info.valid() ? inst_infos[i].mem_info.base_reg : 0;
-            bool lineReuseExclusionEnabled = !opts::DisableAlwaysHitLoadsHeuristic && DepKind == DependencyKind::OOO;
+            bool lineReuseExclusionEnabled = !opts::DisableAlwaysHitLoadsHeuristic &&
+                                             (DepKind == DependencyKind::OOO || opts::LineReuseInOrder);
             PlainModeAlwaysHit hit = classifyPlainModeAlwaysHit(
                 inst_infos[i], base_reg, global_seen_base_regs, lineReuseExclusionEnabled);
             if (hit == PlainModeAlwaysHit::StackAccess) {
@@ -1102,6 +1107,40 @@ size_t MLPAnalyzer::countPotentialMissLoads(llvm::ArrayRef<Instr> instrs,
                 for (unsigned ret_reg : return_regs) {
                     seen_base_regs.reset(ret_reg, MRI);
                     seen_store_addrs.reset(ret_reg, MRI);
+                }
+            }
+        }
+        return non_hit_count;
+    }
+
+    // Non-OOO (in-order) path. By default this only applies the stack/frame-pointer
+    // always-hit rule and walks the instructions without any cache-line tracking
+    // state. With -line-reuse-in-order it additionally applies the same
+    // line-reuse always-hit rule as the OOO path above, reusing the same
+    // SeenBaseRegs machinery and the same classifyPlainModeAlwaysHit() decision so
+    // the two paths cannot drift apart. The load set itself (which instructions are
+    // considered loads at all) is deliberately identical between the two variants,
+    // so -line-reuse-in-order changes nothing except the line-reuse exclusion.
+    if (opts::LineReuseInOrder && !opts::DisableAlwaysHitLoadsHeuristic) {
+        int n = instrs.size();
+        std::vector<MLPInstInfo> inst_infos = buildInstInfos(instrs, STI, MCII, MRI, this);
+        std::vector<unsigned> return_regs = getReturnRegisters(MRI, STI.getTargetTriple().getArchName().str());
+
+        SeenBaseRegs seen_base_regs;
+        size_t non_hit_count = 0;
+        for (int j = 0; j < n; ++j) {
+            if (inst_infos[j].mem_info.is_load()) {
+                unsigned base_reg = inst_infos[j].mem_info.valid() ? inst_infos[j].mem_info.base_reg : 0;
+                if (classifyPlainModeAlwaysHit(inst_infos[j], base_reg, seen_base_regs,
+                                               /*lineReuseExclusionEnabled=*/true) ==
+                    PlainModeAlwaysHit::Miss) {
+                    non_hit_count++;
+                }
+            }
+            updateSeenBaseRegs(inst_infos[j], seen_base_regs, MRI);
+            if (inst_infos[j].is_call()) {
+                for (unsigned ret_reg : return_regs) {
+                    seen_base_regs.reset(ret_reg, MRI);
                 }
             }
         }

@@ -54,9 +54,11 @@ namespace opts {
     extern llvm::cl::opt<std::string> UpdateMlp;
     extern llvm::cl::opt<bool> Facile;
     extern llvm::cl::opt<bool> FacileReason;
+    extern llvm::cl::opt<bool> NoFacileMemoryDeps;
     extern llvm::cl::opt<int> ChainThreshold;
     extern llvm::cl::opt<bool> CountOnly;
     extern llvm::cl::opt<bool> DisableAlwaysHitLoadsHeuristic;
+    extern llvm::cl::opt<bool> LineReuseInOrder;
     extern llvm::cl::opt<bool> StackOnlyMissLoadCount;
     extern llvm::cl::opt<bool> StackConstOffsetOnly;
     extern llvm::cl::opt<bool> StackSpillOnly;

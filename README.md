@@ -67,6 +67,7 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 *   `<elf-binary>` — Path to the ELF binary to analyze.
 *   `mlp-objdump` — Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address.
 *   `--facile` — Enable Facile static analytical throughput prediction (AArch64). Calculates analytical throughput bounds for Issue, Execution Ports, and Precedence Constraints without cycle-by-cycle simulation overhead.
+*   `--no-facile-memory-deps` — Drop store→load memory RAW edges from the `--facile` precedence graph (register dependences only). See "Memory dependences in the precedence graph" below.
 *   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `firestorm`, `icestorm`).
 *   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `aarch64-linux-gnu`).
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).
@@ -110,9 +111,34 @@ When passing `--facile` to `mca_tool`, the tool computes steady-state basic-bloc
 Facile calculates three independent throughput limits from LLVM's machine scheduling model and takes their maximum ($\max$):
 1. **Issue Limit**: Dispatch width bottleneck ($\sum \text{uops} / \text{IssueWidth}$).
 2. **Execution Ports Limit**: Contention on execution unit resource ports ($\max_p \text{ResourceCycles}(p) / \text{NumUnits}(p)$).
-3. **Precedence Constraints Limit**: Maximum Cycle Ratio (MCR) of loop-carried Read-After-Write (RAW) register dependency chains.
+3. **Precedence Constraints Limit**: Maximum Cycle Ratio (MCR) of loop-carried Read-After-Write (RAW) dependency chains, over both **register** and **memory** (store→load) dependences.
 
 $$\text{Facile Throughput (Cycles/Iter)} = \max\left( \text{Issue Limit},\; \text{Execution Ports Limit},\; \text{Precedence Limit} \right)$$
+
+#### Memory dependences in the precedence graph
+
+Facile as published analyses a basic block in isolation and assumes aliasing is
+statically unknowable (sec. 3.3). This tool goes further — it adds
+*inter-iteration* edges so the third limit is a genuine loop-recurrence bound —
+and therefore must also model recurrences that round-trip through **memory**,
+not just through registers. `addMemoryDependencies()` in `facile.cpp` adds a
+store→load edge under a deliberately conservative may-alias rule (different
+base register ⇒ no alias; same base with both displacements constant ⇒ alias
+only on an exact offset match; same base with a register index ⇒ may alias; a
+base redefined in between breaks the match), plus the classic
+dependence-distance test that suppresses the loop-carried edge when both
+accesses have identical subscript expressions over a loop-varying index (an
+`a[i] = f(a[i])` read-modify-write has dependence distance 0). Edge latency is
+the store's own `WriteST` latency, exactly as the register path uses the
+producer's latency — no new constant is introduced.
+
+Pass `--no-facile-memory-deps` to restore the register-only behaviour. Because a
+missing precedence bound is masked whenever the issue or port limit is larger,
+this matters most on the **widest** core modelled with the **coarsest** port
+table — in practice Apple FireStorm, where 456.hmmer's P7Viterbi D-state
+recurrence moves the hot block's prediction from 7 to 12 cycles against 11.7
+measured on real M1 hardware (Cortex-A76/A78 and IceStorm are unchanged on that
+block: their port/issue limits already exceeded the recurrence).
 
 ### Reference & Citation
 * **Paper**: *Facile: Fast, Accurate, and Interpretable Basic-Block Throughput Prediction*

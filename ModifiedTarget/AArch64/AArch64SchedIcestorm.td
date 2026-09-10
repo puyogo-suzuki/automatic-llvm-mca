@@ -19,7 +19,25 @@
 def IcestormModel : SchedMachineModel {
   let IssueWidth = 4;           // 4 MOPs per cycle decode / dispatch / retire
   let MicroOpBufferSize = 60;   // Coalesced Retire Queue (ROB) = 60 entries
-  let LoadLatency = 3;          // L1 hit latency (3 cycles measured by Dougall Johnson)
+  let LoadLatency = 4;
+  // L1 load-to-use latency.  Dougall Johnson's Firestorm/Icestorm pages
+  // (https://dougallj.github.io/applecpu/firestorm.html, "Complex Latencies")
+  // state verbatim: "Loads may be passed to the base address of other loads
+  // with 3c latency (which is nice for linked lists), but chaining with ALU
+  // operations gives a latency of 4c. (Although the second destination
+  // register in an LDP always has 4c latency.)"  The 3c figure is therefore
+  // the SPECIAL CASE of a load feeding another load's base address, not the
+  // general case: general load->consumer latency is 4c on BOTH cores, measured
+  // 4.0047-4.0057 for every GPR addressing mode (base, base+imm, base+reg,
+  // base+reg lsl #N, wreg sxtw).  This model previously used 3 for all loads,
+  // i.e. it applied the pointer-chase special case universally and so
+  // understated every load->ALU dependence by 1c.
+  // NOTE (2026-09-10): correcting this is metric-neutral on all four datasets
+  // (eval_estimation.py byte-identical for data / 0818_a78 / 0907_a78 /
+  // macbook).  Almost every hot block in SPEC is bound by IssueWidth or by an
+  // execution resource rather than by the precedence bound, so the load
+  // latency does not reach the answer - the same masking that the
+  // --no-facile-memory-deps note describes.  Kept as a source-fidelity fix.
   let MispredictPenalty = 16;
   let CompleteModel = 0;
 
@@ -78,13 +96,13 @@ def : WriteRes<WriteID32, [IceUnitI1]> { let Latency = 10; }
 def : WriteRes<WriteID64, [IceUnitI1]> { let Latency = 10; }
 def : WriteRes<WriteBr, [IceUnitI0]> { let Latency = 1; }
 def : WriteRes<WriteBrReg, [IceUnitI0]> { let Latency = 1; }
-def : WriteRes<WriteLD, [IceUnitMem, IceLoadBuffer]> { let Latency = 3; }
+def : WriteRes<WriteLD, [IceUnitMem, IceLoadBuffer]> { let Latency = 4; }
 def : WriteRes<WriteST, [IceUnitMem, IceStoreBuffer]> { let Latency = 1; }
 def : WriteRes<WriteSTP, [IceUnitMem, IceStoreBuffer]> { let Latency = 1; }
 def : WriteRes<WriteAdr, [IceUnitI]> { let Latency = 1; }
-def : WriteRes<WriteLDIdx, [IceUnitMem, IceLoadBuffer]> { let Latency = 3; }
+def : WriteRes<WriteLDIdx, [IceUnitMem, IceLoadBuffer]> { let Latency = 4; }
 def : WriteRes<WriteSTIdx, [IceUnitMem, IceStoreBuffer]> { let Latency = 1; }
-def : WriteRes<WriteLDHi, [IceUnitMem, IceLoadBuffer]> { let Latency = 3; }
+def : WriteRes<WriteLDHi, [IceUnitMem, IceLoadBuffer]> { let Latency = 4; }
 def : WriteRes<WriteSys, [IceUnitI0]> { let Latency = 10; }
 def : WriteRes<WriteBarrier, [IceUnitMem]> { let Latency = 10; }
 def : WriteRes<WriteHint, [IceUnitI0]> { let Latency = 1; }

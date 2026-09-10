@@ -18,7 +18,25 @@
 def FirestormModel : SchedMachineModel {
   let IssueWidth = 8;           // 8 MOPs per cycle decode / dispatch
   let MicroOpBufferSize = 330;  // Coalesced Retire Queue (ROB) = 330 entries
-  let LoadLatency = 3;          // L1 hit latency (3 cycles measured by Dougall Johnson)
+  let LoadLatency = 4;
+  // L1 load-to-use latency.  Dougall Johnson's Firestorm/Icestorm pages
+  // (https://dougallj.github.io/applecpu/firestorm.html, "Complex Latencies")
+  // state verbatim: "Loads may be passed to the base address of other loads
+  // with 3c latency (which is nice for linked lists), but chaining with ALU
+  // operations gives a latency of 4c. (Although the second destination
+  // register in an LDP always has 4c latency.)"  The 3c figure is therefore
+  // the SPECIAL CASE of a load feeding another load's base address, not the
+  // general case: general load->consumer latency is 4c on BOTH cores, measured
+  // 4.0047-4.0057 for every GPR addressing mode (base, base+imm, base+reg,
+  // base+reg lsl #N, wreg sxtw).  This model previously used 3 for all loads,
+  // i.e. it applied the pointer-chase special case universally and so
+  // understated every load->ALU dependence by 1c.
+  // NOTE (2026-09-10): correcting this is metric-neutral on all four datasets
+  // (eval_estimation.py byte-identical for data / 0818_a78 / 0907_a78 /
+  // macbook).  Almost every hot block in SPEC is bound by IssueWidth or by an
+  // execution resource rather than by the precedence bound, so the load
+  // latency does not reach the answer - the same masking that the
+  // --no-facile-memory-deps note describes.  Kept as a source-fidelity fix.
   let MispredictPenalty = 16;
   let CompleteModel = 0;
 
@@ -76,14 +94,14 @@ def : WriteRes<WriteID32, [FireUnitI4]> { let Latency = 11; } // Worst-case inte
 def : WriteRes<WriteID64, [FireUnitI4]> { let Latency = 11; } // Worst-case integer divide (7-11c)
 def : WriteRes<WriteBr, [FireUnitBranch]> { let Latency = 1; }
 def : WriteRes<WriteBrReg, [FireUnitBranch]> { let Latency = 1; }
-def : WriteRes<WriteLD, [FireUnitMem, FireLoadBuffer]> { let Latency = 3; }
+def : WriteRes<WriteLD, [FireUnitMem, FireLoadBuffer]> { let Latency = 4; }
 def : WriteRes<WriteST, [FireUnitMem, FireStoreBuffer]> { let Latency = 1; }
 def : WriteRes<WriteSTP, [FireUnitMem, FireStoreBuffer]> { let Latency = 1; }
 def : WriteRes<WriteAdr, [FireUnitI]> { let Latency = 1; }
-def : WriteRes<WriteLDIdx, [FireUnitMem, FireLoadBuffer]> { let Latency = 3; }
+def : WriteRes<WriteLDIdx, [FireUnitMem, FireLoadBuffer]> { let Latency = 4; }
 def : WriteRes<WriteSTIdx, [FireUnitMem, FireStoreBuffer]> { let Latency = 1; }
 
-def : WriteRes<WriteLDHi, [FireUnitMem, FireLoadBuffer]> { let Latency = 3; }
+def : WriteRes<WriteLDHi, [FireUnitMem, FireLoadBuffer]> { let Latency = 4; }
 def : WriteRes<WriteSys, [FireUnitI0]> { let Latency = 10; }
 def : WriteRes<WriteBarrier, [FireUnitMem]> { let Latency = 10; }
 def : WriteRes<WriteHint, [FireUnitI0]> { let Latency = 1; }
@@ -115,6 +133,32 @@ def : InstRW<[WriteAdr], (instrs ADR, ADRP)>;
 def : InstRW<[WriteLD], (instrs LDRBui, LDRHui, LDRWui, LDRXui, LDRBroX, LDRHroX, LDRWroX, LDRXroX, LDPWi, LDPXi)>;
 // 4. Scalar Stores (u7-u8) - 1 cycle latency
 def : InstRW<[WriteST], (instrs STRBui, STRHui, STRWui, STRXui, STRBroX, STRHroX, STRWroX, STRXroX, STPWi, STPXi)>;
+// 5. Vector floating-point multiply / multiply-accumulate, and add/sub.
+// AArch64 gives the SIMD FP data-processing instructions Sched<[WriteVq]> /
+// Sched<[WriteVd]>, i.e. the generic 2c vector-ALU write, NOT WriteFMul /
+// WriteF.  Without these two rules every vector FP op on Firestorm simulated
+// at 2c: sched class #809 (FMLAv2f64_FMLSv2f64) resolved to latency 2 here
+// while Icestorm gave it 4, #1640 (FMULv2f64) 2 vs 4, #1619 (FADDv2f64) 2 vs 3.
+// Icestorm already carries the equivalent overrides (AArch64SchedIcestorm.td
+// rules 7-8); Firestorm was simply missing them, so the P-core - the one that
+// actually runs vectorised SPEC FP code - was the less faithful of the two.
+// Dougall Johnson's firestorm-simd.html gives, for EVERY element size and for
+// both the vector and by-element forms:
+//   FMUL / FNMUL / FMLA / FMLS   4c, throughput 0.25 (u11-14)
+//   FADD / FSUB                  3c, throughput 0.25 (u11-14)
+// (icestorm-simd.html: identical latencies, throughput 0.5.)  So FMUL-family
+// -> WriteFMul (4c) and FADD/FSUB -> WriteF (3c) reproduce the source exactly.
+// The SCALAR forms (FMULDrr, FMADDDrrr, ...) already resolve correctly through
+// their own Sched<[WriteFMul]>; these rules fix the vector / by-element forms.
+// NOTE (2026-09-10): metric-neutral on all four datasets - eval_estimation.py
+// is identical to 3 decimal places on all 20 CPI/SF numbers with and without
+// these two lines.  Reason: these SPEC binaries are gcc-4.6 -O2 base builds
+// with essentially no autovectorisation, so vector-form FP mul/mac/add/sub is
+// only 2875 of 6744507 static instructions (0.043%), against 48859 SCALAR
+// fmadd/fmsub/fnmadd/fnmsub.  Kept as a source-fidelity fix and for symmetry
+// with Icestorm; it will start to matter for any -march=armv8-a+simd build.
+def : InstRW<[WriteFMul], (instregex "^F(MUL|MLA|MLS|NMUL|NMLA|NMLS)[v_].*")>;
+def : InstRW<[WriteF], (instregex "^F(ADD|SUB)v.*")>;
 
 def : ReadAdvance<ReadI, 0>;
 def : ReadAdvance<ReadISReg, 0>;
