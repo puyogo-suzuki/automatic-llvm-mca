@@ -177,7 +177,16 @@ def : ReadAdvance<ReadI, 0>;
 def : ReadAdvance<ReadISReg, 0>;
 def : ReadAdvance<ReadIEReg, 0>;
 def : ReadAdvance<ReadIM, 0>;
-def : ReadAdvance<ReadIMA, 0>;
+// MADD / MSUB accumulator (addend) forwarding.  Dougall Johnson's
+// "Complex Latencies" note, identical on firestorm.html and icestorm.html:
+// "MADD's output can be passed to its third operand (the addend) with 1c
+// latency, but if it's chained with other instructions it has 3c latency."
+// AArch64 gives MADD/MSUB Sched<[WriteIM32/64, ReadIM, ReadIM, ReadIMA]>, so
+// the addend is exactly the ReadIMA slot and the 1c figure is expressible as
+// a 2-cycle ReadAdvance off the 3c WriteIM32/WriteIM64 latency -- RESTRICTED
+// to a multiply producer, because the quoted 1c applies only when a MADD
+// feeds a MADD's addend; anything else chained off MADD still sees 3c.
+def : ReadAdvance<ReadIMA, 2, [WriteIM32, WriteIM64]>;
 def : ReadAdvance<ReadID, 0>;
 def : ReadAdvance<ReadST, 0>;
 def : ReadAdvance<ReadExtrHi, 0>;

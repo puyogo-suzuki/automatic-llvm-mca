@@ -1,6 +1,7 @@
 #include "facile.h"
 #include "mca_common.h"
 #include "llvm/MC/MCSchedule.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -24,6 +25,102 @@ struct DependencyEdge {
 // Extract instruction latency with a minimum threshold of 1.0 cycle
 double getInstLatency(const llvm::mca::Instruction &Inst) {
     double Lat = static_cast<double>(Inst.getLatency());
+    return std::max(Lat, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Latency to put on a RAW dependency edge  (Writer defines Reg) -> (Reader
+// reads Reg through use slot Use).
+//
+// Refines two coarse approximations that the plain getInstLatency(Writer)
+// form made.  Both are cases where the scheduling model already carries the
+// right number and facile was simply not reading it.
+//
+// (a) PER-DEFINITION latency.  mca::Instruction::getLatency() is
+//     InstrDesc::MaxLatency, i.e. the MAXIMUM over all of an instruction's
+//     writes, so every out-edge of a multi-def instruction was charged the
+//     slowest one.  AArch64 pre/post-index memory ops are exactly that shape:
+//     `ldr x2, [x1], #8` is Sched<[WriteAdr, WriteLD]> - 1c for the x1 base
+//     update, 4c for the x2 load result - so the base-pointer recurrence that
+//     every post-increment / stride loop carries (x1 -> x1 across the
+//     backedge, distance 1) was being given the LOAD's 4c and produced a
+//     precedence bound of 4 cycles/iteration for a loop whose address
+//     recurrence really closes in 1.  WriteState::getLatency() is that
+//     individual write's own latency.
+//
+// (b) READADVANCE (operand bypass / late forwarding).  A scheduling model
+//     states, per (consumer sched class, consumer operand slot, producer
+//     write-resource), how many cycles earlier than write-back that operand
+//     is actually needed.  MCA's own RegisterFile::addRegisterRead applies it
+//     via WriteState::addUser(IID, Use, ReadAdvance), giving an effective
+//     dependence latency of WS.getLatency() - ReadAdvance.  facile never
+//     consulted it, so all operands of a multi-input instruction were assumed
+//     to need the producer's result at the same (worst) cycle - the textbook
+//     way to over-predict a multiply-accumulate recurrence.
+//
+//     The case that actually matters here is the ACCUMULATOR of a
+//     multiply-accumulate.  Arm Cortex-A78 Software Optimization Guide
+//     (r1p2, PJDOC-466751330-9691) Table 3-24 lists
+//        "FP multiply accumulate | FMADD, FMSUB, FNMADD, FNMSUB |
+//         Execution Latency 4 (2) | Throughput 2 | Pipeline V"
+//     with note 3: "FP multiply-accumulate pipelines support late-forwarding
+//     of accumulate operands from similar uOPs, allowing a typical sequence
+//     of multiply-accumulate uOPs to issue one every N cycles (accumulate
+//     latency N shown in parentheses)."  Table 3-7 likewise gives
+//     "Multiply accumulate, W-form / X-form | MADD, MSUB | 2(1)".
+//     AArch64SchedNeoverseN2.td (the model installed for cortex-a78) encodes
+//     precisely that:
+//        def N2Wr_FMA : SchedWriteRes<[N2UnitV]> { let Latency = 4; }
+//        def N2Rd_FMA : SchedReadAdvance<2, [WriteFMul, N2Wr_FMA]>;
+//        def : InstRW<[N2Wr_FMA, ReadDefault, ReadDefault, N2Rd_FMA],
+//                     (instregex "^FN?M(ADD|SUB)[HSD]rrr$")>;
+//     (AArch64SchedNeoverseN1.td, used for cortex-a76, is identical.)  So an
+//     FMADD -> FMADD accumulator recurrence - the shape of every FP
+//     reduction, dot product and stencil accumulation in SPEC FP - really
+//     closes in 2 cycles, and facile was calling it 4: a clean 2x
+//     over-prediction of the precedence bound on the exact loops where the
+//     precedence bound is the binding constraint.
+//
+//     Apple's two models declare ReadAdvance 0 everywhere, so (b) is a no-op
+//     for icestorm/firestorm today; it is what makes it POSSIBLE to encode
+//     the forwarding paths Dougall Johnson documents for them ("MADD's output
+//     can be passed to its third operand (the addend) with 1c latency, but if
+//     it's chained with other instructions it has 3c latency", "Loads may be
+//     passed to the base address of other loads with 3c latency ... but
+//     chaining with ALU operations gives a latency of 4c"), which are
+//     per-operand facts that no WriteRes latency can express.
+//
+// The 1-cycle floor is kept from getInstLatency(): a dependent operation can
+// never issue in the same cycle as its producer in this model, and MCA's own
+// zero-latency writes (register-renamed MOVs) already relied on it.
+// ---------------------------------------------------------------------------
+double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
+                      const llvm::mca::Instruction &Writer,
+                      const llvm::mca::ReadState &Use,
+                      unsigned Reg) {
+    const llvm::mca::WriteState *WS = nullptr;
+    for (const llvm::mca::WriteState &W : Writer.getDefs()) {
+        if (W.getRegisterID() == Reg) {
+            WS = &W;
+            break;
+        }
+    }
+    if (!WS) // implicit/elided def: fall back to the instruction-wide latency
+        return getInstLatency(Writer);
+
+    double Lat = static_cast<double>(WS->getLatency());
+
+    const llvm::MCSchedModel &SM = STI.getSchedModel();
+    const llvm::mca::ReadDescriptor &RD = Use.getDescriptor();
+    if (const llvm::MCSchedClassDesc *SC = SM.getSchedClassDesc(RD.SchedClassID)) {
+        // Variant classes carry no ReadAdvance entries of their own; MCA's
+        // InstrBuilder has already stored the RESOLVED class id in RD, so a
+        // still-variant descriptor here means the model has nothing to say.
+        if (!SC->isVariant())
+            Lat -= static_cast<double>(
+                STI.getReadAdvanceCycles(SC, RD.UseIndex, WS->getWriteResourceID()));
+    }
+
     return std::max(Lat, 1.0);
 }
 
@@ -186,33 +283,39 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
 
 // 3. Build Read-After-Write (RAW) Register Dependency Graph
 std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
+    const llvm::MCSubtargetInfo &STI,
     llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs) {
 
     size_t N = SimInstrs.size();
     std::vector<std::vector<DependencyEdge>> Adj(N);
     std::map<unsigned, size_t> LastWriter;
-    std::map<unsigned, size_t> FirstReader;
+    // Instruction index + the index of the USE SLOT within that instruction's
+    // getUses(), so that the loop-carried edge built in Pass 2 can be given
+    // the same per-operand ReadAdvance treatment as the intra-iteration ones.
+    std::map<unsigned, std::pair<size_t, size_t>> FirstReader;
     std::set<unsigned> DefinedRegs;
 
     // Pass 1: Intra-iteration dependencies & Live-In reads
     for (size_t i = 0; i < N; ++i) {
         const auto &Inst = SimInstrs[i];
 
+        size_t UseSlot = 0;
         for (const auto &Op : Inst->getUses()) {
             unsigned Reg = Op.getRegisterID();
+            size_t ThisSlot = UseSlot++;
             if (Reg == 0) continue;
 
             if (DefinedRegs.find(Reg) == DefinedRegs.end()) {
                 if (FirstReader.find(Reg) == FirstReader.end()) {
-                    FirstReader[Reg] = i;
+                    FirstReader[Reg] = {i, ThisSlot};
                 }
             }
 
             auto it = LastWriter.find(Reg);
             if (it != LastWriter.end()) {
                 size_t WriterIdx = it->second;
-                double Lat = getInstLatency(*SimInstrs[WriterIdx]);
                 if (WriterIdx < i) {
+                    double Lat = getEdgeLatency(STI, *SimInstrs[WriterIdx], Op, Reg);
                     Adj[WriterIdx].push_back({i, Lat, 0});
                 }
             }
@@ -230,11 +333,15 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     // Pass 2: Loop-carried dependencies (LastWriter -> FirstReader across iterations)
     for (const auto &entry : FirstReader) {
         unsigned Reg = entry.first;
-        size_t ReaderIdx = entry.second;
+        size_t ReaderIdx = entry.second.first;
+        size_t ReaderSlot = entry.second.second;
         auto it = LastWriter.find(Reg);
         if (it != LastWriter.end()) {
             size_t WriterIdx = it->second;
-            double Lat = getInstLatency(*SimInstrs[WriterIdx]);
+            const auto &Uses = SimInstrs[ReaderIdx]->getUses();
+            double Lat = (ReaderSlot < Uses.size())
+                             ? getEdgeLatency(STI, *SimInstrs[WriterIdx], Uses[ReaderSlot], Reg)
+                             : getInstLatency(*SimInstrs[WriterIdx]);
             Adj[WriterIdx].push_back({ReaderIdx, Lat, 1});
         }
     }
@@ -601,7 +708,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask);
 
     // 3. Precedence Constraints Limit
-    auto Adj = buildDependencyGraph(SimInstrs);
+    auto Adj = buildDependencyGraph(STI, SimInstrs);
     if (!MemInfos.empty())
         addMemoryDependencies(MCII, MRI, SimInstrs, MCInsts, MemInfos, Adj);
     Res.PrecedenceBound = calculatePrecedenceBound(SimInstrs.size(), Adj);
