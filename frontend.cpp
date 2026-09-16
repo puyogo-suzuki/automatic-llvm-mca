@@ -200,6 +200,35 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     }
     TI.PO.AssumeNoAlias = true;
 
+    // Macro-op (Mop) decode/dispatch cap, a SECOND front-end constraint
+    // independent of PO.DispatchWidth above (which is the uop cap). Every one
+    // of these cores' SOGs states this as "the dispatch stage can process up
+    // to N Mops per cycle and dispatch up to M uops per cycle" - two
+    // independent numbers, and since AArch64 averages ~1.1-1.3 uops/inst, the
+    // Mop cap is the tighter (~1.75x) of the two and was previously never
+    // modeled (facile.cpp's calculateIssueBound() only ever saw the uop
+    // number). See frontend.h's MopDispatchWidth comment for why this can't
+    // come from llvm::MCSchedModel itself.
+    //   cortex-a76 (+ae, neoverse-n1): A76 SOG (PJDOC-466751330-7215) sec 4.1
+    //     p.41, "The dispatch stage can process up to 4 Mops per cycle".
+    //   cortex-a78 (+ae, c): A78 SOG sec 4.1 p.51-52 ("6 MOPs per cycle").
+    //   cortex-a720 (+ae): A720 SOG sec 4.1 ("5 MOPs per cycle").
+    // Left at 0 (= not applied, see calculateIssueBound()) for
+    // cortex-a710/a715/neoverse-n2 (grouped above only by SHARED uop
+    // DispatchWidth=10; their own SOGs have not been consulted for the Mop
+    // number - do not assume it also equals 5) and for cortex-x1/x1c/
+    // neoverse-v1 (SOG not yet consulted), and for Apple icestorm/firestorm
+    // (computeFacilePrediction() already forces NumMicroOps=1 for
+    // coalesced-ROB CPUs, so PO.DispatchWidth there already IS a Mop-level
+    // width and must not get a second, redundant cap).
+    if (TI.STI->getCPU() == "cortex-a76" || TI.STI->getCPU() == "cortex-a76ae" || TI.STI->getCPU() == "neoverse-n1") {
+        TI.MopDispatchWidth = 4;
+    } else if (TI.STI->getCPU() == "cortex-a78" || TI.STI->getCPU() == "cortex-a78ae" || TI.STI->getCPU() == "cortex-a78c") {
+        TI.MopDispatchWidth = 6;
+    } else if (TI.STI->getCPU() == "cortex-a720" || TI.STI->getCPU() == "cortex-a720ae") {
+        TI.MopDispatchWidth = 5;
+    }
+
     TI.TargetAddress = 0;
     if (!opts::TargetAddressStr.empty()) {
         TI.TargetAddress = std::stoull(opts::TargetAddressStr, nullptr, 16);

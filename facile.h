@@ -44,13 +44,22 @@ struct FacileResult {
 // the precedence-constraint graph. Pass an empty ArrayRef to get the old
 // register-dependences-only behaviour. See the long note above
 // addMemoryDependencies() in facile.cpp for why these edges are needed.
+//
+// `MopWidth`, when nonzero, is the CPU's SOG-documented macro-op (Mop)
+// decode/dispatch cap in Mops/cycle - a SECOND, independent front-end bound
+// from `DispatchWidth` (which is the uop cap). See frontend.h's
+// TargetInfo::MopDispatchWidth comment and calculateIssueBound()'s comment in
+// facile.cpp for why this can't be derived from DispatchWidth or from
+// STI.getSchedModel() and must be passed in explicitly. 0 = not known for
+// this CPU, or not applicable (Apple's coalesced-ROB cores) - skips the bound.
 FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      const llvm::MCInstrInfo &MCII,
                                      const llvm::MCRegisterInfo &MRI,
                                      llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts = {},
                                      unsigned DispatchWidth = 0,
-                                     llvm::ArrayRef<MemAccessInfo> MemInfos = {});
+                                     llvm::ArrayRef<MemAccessInfo> MemInfos = {},
+                                     unsigned MopWidth = 0);
 
 void printFacileResult(const FacileResult &Res, llvm::StringRef CPUName, llvm::raw_ostream &OS);
 

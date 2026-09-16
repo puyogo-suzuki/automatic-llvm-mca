@@ -30,6 +30,18 @@ struct TargetInfo {
     std::unique_ptr<llvm::MCInstrAnalysis> MCIA;
     std::unique_ptr<llvm::mca::Context> MCAContext;
     llvm::mca::PipelineOptions PO;
+    // SOG-documented Macro-op (Mop) decode/dispatch cap, a SECOND front-end
+    // constraint independent of PO.DispatchWidth (which this tool sets to the
+    // uop cap - see initializeFrontend()). Neither llvm::MCSchedModel nor
+    // TargetSchedule.td has any field for this: TargetSchedule.td's own
+    // comment on IssueWidth is "Max micro-ops that may be scheduled per
+    // cycle" - LLVM's scheduling model has no concept of a macro-op stage at
+    // all, so this cannot be expressed via the .td tables and must be
+    // supplied out-of-band, the same way isA78FusionCandidate() (facile.cpp)
+    // and overrideCortexA55SchedModel() (custom_a55_sched.cpp) already key
+    // CPU-specific behavior off STI->getCPU() rather than any .td field.
+    // 0 = not known for this CPU; calculateIssueBound() then skips the bound.
+    unsigned MopDispatchWidth = 0;
     int WindowWidthVal = 4;
     uint64_t TargetAddress = 0;
     std::unique_ptr<MLPAnalyzer> Analyzer;

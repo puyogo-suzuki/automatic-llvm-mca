@@ -216,21 +216,43 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
 }
 
 // 1. Calculate Dispatch / Issue Width Limit
+//
+// TWO INDEPENDENT front-end bounds, both documented for every Arm core this
+// tool models via a locally-modified InstRW-bearing .td (Cortex-A76/A78/A720):
+// their Software Optimization Guides each state a pair of numbers of the form
+// "the dispatch stage can process up to N Mops per cycle and dispatch up to
+// M uops per cycle" (e.g. A76 SOG sec 4.1 p.41: N=4, M=8). A Mop
+// (macro-operation) is what one non-fused instruction decodes into 1:1 (the
+// SOGs describe splitting only going the OTHER way, Mop -> up to two uops,
+// at the dispatch stage - see frontend.cpp's MopDispatchWidth comment); M
+// (the uop cap) is what DispatchWidthOverride already carries. Since AArch64
+// averages ~1.1-1.3 uops/instruction, N/4 is normally the TIGHTER of the two
+// bounds and was, before this change, never computed at all - only the uop
+// bound M was. MopWidth==0 (a CPU this hasn't been verified for, or Apple's
+// coalesced-ROB cores where DispatchWidthOverride is already a Mop-level
+// width) skips this second bound entirely, leaving prior behavior unchanged.
 double calculateIssueBound(const llvm::MCSchedModel &SM,
                             llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                             unsigned &TotalUops,
                             unsigned DispatchWidthOverride,
+                            unsigned MopWidth,
                             const std::vector<bool> &FusedMask) {
     unsigned IssueWidth = DispatchWidthOverride > 0 ? DispatchWidthOverride
                          : (SM.IssueWidth > 0 ? SM.IssueWidth : 1);
     TotalUops = 0;
+    unsigned NumMops = 0;
     for (size_t i = 0; i < SimInstrs.size(); ++i) {
         if (i < FusedMask.size() && FusedMask[i])
             continue;
         unsigned NumUops = SimInstrs[i]->getNumMicroOps();
         TotalUops += (NumUops > 0 ? NumUops : 1);
+        ++NumMops; // one Mop per non-fused instruction (see comment above)
     }
-    return static_cast<double>(TotalUops) / static_cast<double>(IssueWidth);
+    double UopBound = static_cast<double>(TotalUops) / static_cast<double>(IssueWidth);
+    double MopBound = MopWidth > 0
+                         ? static_cast<double>(NumMops) / static_cast<double>(MopWidth)
+                         : 0.0;
+    return std::max(UopBound, MopBound);
 }
 
 // 2. Calculate Execution Ports Contention Bound
@@ -685,7 +707,8 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts,
                                      unsigned DispatchWidth,
-                                     llvm::ArrayRef<MemAccessInfo> MemInfos) {
+                                     llvm::ArrayRef<MemAccessInfo> MemInfos,
+                                     unsigned MopWidth) {
     FacileResult Res;
     if (SimInstrs.empty()) return Res;
 
@@ -702,7 +725,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     std::vector<bool> FusedMask = computeA78FusedMask(STI, MCII, SimInstrs, MCInsts);
 
     // 1. Issue Limit
-    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, FusedMask);
+    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, MopWidth, FusedMask);
 
     // 2. Execution Ports Limit
     Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask);
