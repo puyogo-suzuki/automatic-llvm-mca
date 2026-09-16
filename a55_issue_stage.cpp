@@ -197,6 +197,33 @@ void A55DecoupledIssueStage::drainDecodeWindow() {
   if (DecodeWindow.empty())
     return;
 
+  // Cortex-A55 SOG v3 sec. 3.2 "Dual-issue": the core issues AT MOST an
+  // (instruction-0, instruction-1) PAIR per cycle -- the whole section is
+  // framed as the conditions under which a single older/younger pair may go
+  // together (Table 1 "Instruction-0 dual issue conditions", Table 2
+  // "Instruction-1 dual issue conditions"); there is no instruction-2.
+  // AArch64SchedA55.td encodes the same fact as `let IssueWidth = 2`.
+  //
+  // WHY THIS GUARD IS NEEDED HERE AND NOT ONLY ON SLOT 1.  drainDecodeWindow()
+  // is called more than once per cycle: once from cycleStart(), and then AGAIN
+  // from execute() for every instruction EntryStage hands over, because
+  // isAvailable() re-opens (DecodeWindow.size() < 2) as soon as a drain empties
+  // the window. NumIssued is only reset in cycleStart(), so it correctly
+  // accumulates across those repeated calls -- but only the slot-1 branch below
+  // ever tested it. Slot 0 was therefore issued unconditionally on every call,
+  // making the effective per-cycle issue width unbounded (limited only by
+  // register hazards and ResourceManager unit counts) instead of 2. Any
+  // dependency-free run of instructions that happens to spread across distinct
+  // pipelines could then all issue in one cycle: e.g. the 4-instruction loop at
+  // 0x1a584 in 444.namd (str/add/cmp/b.gt -> LS + ALU + ALU + BR) simulated at
+  // 12 instructions in 4 cycles = IPC 3, and post-correction the emitted CSV
+  // row read 8 retired instructions in 1 cycle (IPC 8) on a core that cannot
+  // exceed IPC 2. Capping here restores the documented dual-issue limit; the
+  // un-issued instructions simply stay buffered in DecodeWindow for the next
+  // cycle.
+  if (NumIssued >= 2)
+    return;
+
   bool IssuedSlot0 = false;
   bool IssuedSlot1 = false;
 
