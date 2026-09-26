@@ -214,13 +214,34 @@ struct AArch64TestContext {
         MRI.reset(TheTarget->createMCRegInfo(TT));
         MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT, MCTargetOptions()));
         MCII.reset(TheTarget->createMCInstrInfo());
-        if (cpu == "icestorm" || cpu == "firestorm") {
-            STI.reset(TheTarget->createMCSubtargetInfo(TT, "apple-m1", ""));
+        // This branch is what frontend.cpp's initTarget() does for EVERY CPU:
+        // install the locally re-generated sched-class tables from
+        // ModifiedTarget/AArch64/*.td, remap MCInstrDesc::SchedClass onto their
+        // numbering, and wrap the STI so resolveVariantSchedClass() reaches the
+        // locally generated resolver (without that wrapper no SchedWriteVariant
+        // in ModifiedTarget can resolve at all).
+        //
+        // The test harness historically took it only for icestorm/firestorm, so
+        // every other CPU here ran against libLLVM's STOCK model rather than the
+        // one the tool actually uses.  For "cortex-a720" that gap was material:
+        // stock LLVM maps cortex-a720 to NeoverseN2Model, so an A720 scheduling
+        // test would have been silently answered by N2's numbers - including
+        // N2's own zero-latency MOVs, which would have made the A720 sec. 4.12
+        // tests below pass whether or not AArch64SchedA720.td had been touched.
+        // cortex-a720/-a720ae are therefore added here.
+        //
+        // The remaining CPUs are deliberately left on stock tables for now:
+        // flipping them all over is a strictly larger change that alters results
+        // this suite already pins (MLPTest.AArch64IndexRegisterExclusion, on the
+        // default cortex-a76, computes MLP 4.0 rather than 2.0 under the local
+        // N1 tables).  That divergence is real and worth its own investigation,
+        // but it is not this change's subject.
+        if (cpu == "icestorm" || cpu == "firestorm" ||
+            cpu == "cortex-a720" || cpu == "cortex-a720ae") {
+            const std::string llvm_cpu =
+                (cpu == "icestorm" || cpu == "firestorm") ? "apple-m1" : cpu;
+            STI.reset(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
             if (STI) {
-                // Only this branch installs our re-generated sched-class
-                // tables, so only this branch needs MCInstrDesc::SchedClass
-                // remapped onto our numbering.  The else-branch below keeps
-                // libLLVM's stock model, which the stock indices already match.
                 llvm::remapSchedClassIndices(*MCII, cpu);
                 llvm::overrideCortexA55SchedModel(*STI, cpu);
                 STI = llvm::wrapCustomSubtargetInfo(std::move(STI), cpu);
@@ -1196,7 +1217,7 @@ static facile::FacileResult runFacileAArch64Mem(const AArch64TestContext &TC, co
 // A value that round-trips through memory across the backedge is a real
 // loop-carried recurrence.  The store and the load index the same base with
 // DIFFERENT registers (x1 vs x2), so a one-iteration lag cannot be ruled out
-// and the edge must be created.  This is the shape of 456.hmmer's P7Viterbi
+// and the edge must be created.  This is the shape of a memory-carried
 // D-state recurrence, which the register-only graph cannot see at all.
 TEST(FacileTest, MemoryLoopCarriedRecurrence) {
     initLLVMAArch64();
@@ -1418,4 +1439,274 @@ TEST(MLPTest, FirestormMCASimulation) {
                                     analyzer, false, -1, false);
     EXPECT_TRUE(M.Valid);
     EXPECT_GT(M.Cycles, 0u);
+}
+
+// ============================================================================
+// Cortex-A720 instruction fusion (A720 SOG 109720 Issue 7.0 sec. 4.11)
+//
+// These tests exist mainly to prove the A720 table is NOT A78's table.  Each
+// one runs the same instruction pair on both cores and asserts they disagree
+// where the two SOGs disagree.  TotalMicroOps is the observable: a fused pair
+// contributes only its surviving half to calculateIssueBound().
+// ============================================================================
+
+// Baseline: the rows the two SOGs share really do fuse on A720.
+TEST(FacileTest, A720FusionCmpImmediateBcond) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a720");
+    auto Res = runFacileAArch64(TC, "cmp w0, #1\nb.eq .Lt\n.Lt:\n");
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    EXPECT_EQ(Res.TotalMicroOps, 1u); // b.eq absorbed into the cmp
+}
+
+TEST(FacileTest, A720FusionCmpImmediateCset) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a720");
+    auto Res = runFacileAArch64(TC, "cmp w0, #1\ncset w1, eq\n");
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    EXPECT_EQ(Res.TotalMicroOps, 1u);
+}
+
+TEST(FacileTest, A720FusionCmpRegisterCsel) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a720");
+    auto Res = runFacileAArch64(TC, "cmp w0, w1\ncsel w2, w3, w4, eq\n");
+    EXPECT_EQ(Res.TotalInstructions, 2u);
+    EXPECT_EQ(Res.TotalMicroOps, 1u);
+}
+
+// DIFFERENCE (1): A78 sec. 4.14 item 10 is "NOP + Any instruction"; A720
+// sec. 4.11 has no such row.  92,102 static pairs in the benchmark corpus hit this,
+// so getting it wrong would be the single largest modelling error of a
+// naively-widened A78 gate.
+TEST(FacileTest, A720DoesNotFuseNopWithAnything) {
+    initLLVMAArch64();
+    AArch64TestContext A78("cortex-a78");
+    AArch64TestContext A720("cortex-a720");
+    const std::string Code = "nop\nadd x0, x1, x2\n";
+    EXPECT_EQ(runFacileAArch64(A78, Code).TotalMicroOps, 1u);  // A78: fused
+    EXPECT_EQ(runFacileAArch64(A720, Code).TotalMicroOps, 2u); // A720: not
+}
+
+// DIFFERENCE (2): A720 prints "CMP/CMN (register Rn != ZR) + B.cond"; A78
+// prints the same row unqualified.
+TEST(FacileTest, A720CmpRegisterWithZeroRnIsNotFused) {
+    initLLVMAArch64();
+    AArch64TestContext A78("cortex-a78");
+    AArch64TestContext A720("cortex-a720");
+    const std::string Code = "cmp wzr, w1\nb.eq .Lt\n.Lt:\n";
+    EXPECT_EQ(runFacileAArch64(A78, Code).TotalMicroOps, 1u);  // A78: fused
+    EXPECT_EQ(runFacileAArch64(A720, Code).TotalMicroOps, 2u); // A720: Rn==ZR
+    // The qualifier is printed on the REGISTER row only, which is consistent:
+    // the immediate form encodes Rn in a GPR32sp/GPR64sp slot, where that bit
+    // pattern means SP rather than ZR, so "CMP (immediate) with Rn == ZR" is
+    // not an encodable instruction at all (`cmp wzr, #1` is rejected by the
+    // assembler).  A normal immediate CMP is unaffected and still fuses:
+    EXPECT_EQ(runFacileAArch64(A720, "cmp w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+}
+
+// DIFFERENCE (3): A720 prints "BICS ZR (register)", A78 prints "BICS
+// (register)" -- so a BICS with a real destination fuses on A78 only.
+TEST(FacileTest, A720BicsRequiresZeroDestination) {
+    initLLVMAArch64();
+    AArch64TestContext A78("cortex-a78");
+    AArch64TestContext A720("cortex-a720");
+    const std::string RealDest = "bics w2, w0, w1\nb.eq .Lt\n.Lt:\n";
+    EXPECT_EQ(runFacileAArch64(A78, RealDest).TotalMicroOps, 1u);  // A78: fused
+    EXPECT_EQ(runFacileAArch64(A720, RealDest).TotalMicroOps, 2u); // A720: not
+    // BICS ZR is the form A720 does list.
+    EXPECT_EQ(runFacileAArch64(A720, "bics wzr, w0, w1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+}
+
+// The A720 table is not a cross product either: CSEL/CSET are listed with CMP
+// only, and TST/BICS only with B.cond.
+TEST(FacileTest, A720TableIsNotACrossProduct) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a720");
+    // CMN + CSEL is absent from sec. 4.11 (the CSEL row says "CMP").
+    EXPECT_EQ(runFacileAArch64(TC, "cmn w0, #1\ncsel w2, w3, w4, eq\n").TotalMicroOps, 2u);
+    // TST + CSEL is absent too (TST appears only on the B.cond row)...
+    EXPECT_EQ(runFacileAArch64(TC, "tst w0, #1\ncsel w2, w3, w4, eq\n").TotalMicroOps, 2u);
+    // ...while TST + B.cond is listed and does fuse.
+    EXPECT_EQ(runFacileAArch64(TC, "tst w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    // CMN + B.cond is listed and does fuse.
+    EXPECT_EQ(runFacileAArch64(TC, "cmn w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+}
+
+// A flag-setting op with a real destination is not a CMP/CMN/TST at all.
+TEST(FacileTest, A720FlagSettingWithRealDestinationIsNotFused) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a720");
+    EXPECT_EQ(runFacileAArch64(TC, "subs w5, w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 2u);
+}
+
+// Fusion must stay off cores whose SOGs document no such table.
+TEST(FacileTest, A720FusionDoesNotLeakToOtherCores) {
+    initLLVMAArch64();
+    AArch64TestContext A76("cortex-a76");
+    EXPECT_EQ(runFacileAArch64(A76, "cmp w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 2u);
+}
+
+// ============================================================================
+// Cortex-A720 zero-latency instructions (A720 SOG 109720 Issue 7.0 sec. 4.12)
+//
+// AArch64SchedA720.td now models sec. 4.12 with an A720-local A720ZeroMove
+// predicate selecting A720Write_0c (Latency 0, SchedWriteRes<[]>), and
+// facile.cpp's getEdgeLatency() drops the max(Lat,1.0) floor for A720.  Two
+// observables are used below:
+//
+//   PrecedenceBound - the cost of a loop-carried recurrence.  Putting the MOV
+//     INSIDE the recurrence makes its dependence latency directly readable:
+//     the cycle costs (producer latency + MOV latency), so a zero-latency MOV
+//     shows up as the producer's latency alone.
+//   PortBound - sec. 4.12's other half, "do not utilize the scheduling and
+//     execution resources of the machine".  A720Write_0c lists no ProcResource,
+//     so a block of qualifying moves has to show ZERO port pressure while the
+//     same moves in a non-qualifying form occupy their pipeline.
+//
+// These numbers are derived from the SOG, not fitted: no measured Cortex-A720
+// dataset is available, so nothing here is an accuracy claim.
+// ============================================================================
+
+// MOV Xd, Xn (encoded ORRXrs with Rn == XZR) inside a recurrence.  The cycle is
+// add(1c) -> mov -> add, so A720 must show 1.0 and a core without the model
+// must show 2.0.  cortex-a76 (NeoverseN1Model) is the control: N1 has no
+// zero-latency-MOV section in its SOG and is explicitly excluded from
+// isZeroLatencyMovTarget().
+TEST(FacileTest, A720ZeroLatencyMovGpr) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    AArch64TestContext A76("cortex-a76");
+    const std::string Code = "add x0, x1, #1\nmov x1, x0\n";
+    EXPECT_NEAR(runFacileAArch64(A720, Code).PrecedenceBound, 1.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(A76,  Code).PrecedenceBound, 2.0, 0.01);
+}
+
+// Same shape, but the ORR is a real logical OR (Rn != ZR), which sec. 4.12 does
+// not list.  A720ZeroMove's CheckIsReg1Zero must reject it: 1c + 1c = 2.0.
+TEST(FacileTest, A720ZeroLatencyOrrRequiresZeroRn) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    EXPECT_NEAR(runFacileAArch64(A720, "add x0, x1, #1\norr x1, x0, x2\n").PrecedenceBound,
+                2.0, 0.01);
+}
+
+// Rn IS ZR but the source is shifted, so the result is not a copy of any
+// register and cannot be renamed away.  CheckImmOperand<3, 0> must reject it.
+TEST(FacileTest, A720ZeroLatencyOrrRequiresNoShift) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    EXPECT_NEAR(runFacileAArch64(A720, "add x0, x1, #1\norr x1, xzr, x0, lsl #1\n").PrecedenceBound,
+                2.0, 0.01);
+}
+
+// FMOV Dd, Dn / FMOV Sd, Sn - the forms stock LLVM's NeoverseZeroMove does NOT
+// cover (N2 and V1 give FMOVDr/FMOVSr an unconditional 2-cycle V write), and
+// the reason A720 needed its own predicate.  The recurrence is fadd(3c) -> fmov
+// -> fadd, so zero latency shows as 3.0 and the unmodelled case would be 5.0.
+TEST(FacileTest, A720ZeroLatencyFmovFpToFp) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    EXPECT_NEAR(runFacileAArch64(A720, "fadd d0, d1, d2\nfmov d1, d0\n").PrecedenceBound,
+                3.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(A720, "fadd s0, s1, s2\nfmov s1, s0\n").PrecedenceBound,
+                3.0, 0.01);
+}
+
+// FMOV Hd, Hn is deliberately absent from sec. 4.12 and so from A720ZeroMove;
+// it keeps the SOG's normal "FP move, register" latency.  This pins the
+// distinction, which is the easiest thing to get wrong by pattern-matching
+// FMOV[HSD]r as a family (NeoverseN3 draws the same line).
+TEST(FacileTest, A720FmovHalfPrecisionIsNotZeroLatency) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    const double H = runFacileAArch64(A720, "fadd h0, h1, h2\nfmov h1, h0\n").PrecedenceBound;
+    const double D = runFacileAArch64(A720, "fadd d0, d1, d2\nfmov d1, d0\n").PrecedenceBound;
+    EXPECT_NEAR(D, 3.0, 0.01); // fadd's 3c alone: the D-form copy is eliminated
+    EXPECT_GT(H, D);           // the H-form copy still carries a dependence
+    // Deliberately not an absolute for H.  FMOVHr is bound to this model's
+    // generic WriteFCopy, which is 1c, while the A720 SOG's Table 3-12
+    // "FP move, register" is 2c - a pre-existing discrepancy in the hand-written
+    // WriteRes block that is not this change's subject (WriteFCopy covers many
+    // more instructions than FMOVHr).  What matters here is only that the H form
+    // is NOT eliminated.
+}
+
+// MOV Vd, Vn (vector), encoded ORRv16i8/ORRv8i8 with Rn == Rm.
+TEST(FacileTest, A720ZeroLatencyMovVector) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    // The recurrence is add(2c) -> mov -> add, so an eliminated copy leaves the
+    // vector add's 2 cycles alone.  Absolute values, not a GT: under a broken
+    // model where the "zero" arm still costs a cycle the GT form would still
+    // hold and the test would not discriminate.
+    EXPECT_NEAR(runFacileAArch64(A720, "add v0.16b, v1.16b, v2.16b\nmov v1.16b, v0.16b\n").PrecedenceBound,
+                2.0, 0.01);
+    // A real vector ORR of two different registers is not a move:
+    // CheckSameRegOperand<1, 2> must reject it, leaving the SOG's 2c
+    // "ASIMD logical" (Table 3-14), for 2 + 2 = 4.
+    EXPECT_NEAR(runFacileAArch64(A720, "add v0.16b, v1.16b, v2.16b\norr v1.16b, v0.16b, v2.16b\n").PrecedenceBound,
+                4.0, 0.01);
+}
+
+// THE IMMEDIATE-RANGE DIFFERENCE.  sec. 4.12 says MOV Xd, #{12{1'b0},imm[3:0]},
+// i.e. a MOVZ immediate of 0..15 - NOT just 0, which is all stock LLVM's
+// NeoverseZeroMove accepts (CheckImmOperand<1, 0>).  Read through PortBound,
+// because a move-immediate has no source register and so cannot sit in a
+// recurrence: a qualifying MOVZ occupies no pipeline at all, a non-qualifying
+// one occupies the I pipes.
+TEST(FacileTest, A720MovzZeroLatencyImmediateRange) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    auto PortOf = [&](const std::string &Code) {
+        return runFacileAArch64(A720, Code).PortBound;
+    };
+    // imm 0 and imm 15 are both inside sec. 4.12's imm[3:0].
+    EXPECT_DOUBLE_EQ(PortOf("mov x0, #0\nmov x1, #0\nmov x2, #0\nmov x3, #0\n"), 0.0);
+    EXPECT_DOUBLE_EQ(PortOf("mov x0, #15\nmov x1, #15\nmov x2, #15\nmov x3, #15\n"), 0.0);
+    // imm 16 is the first value outside it, and must cost a pipeline slot.
+    EXPECT_GT(PortOf("mov x0, #16\nmov x1, #16\nmov x2, #16\nmov x3, #16\n"), 0.0);
+    EXPECT_GT(PortOf("mov x0, #4096\nmov x1, #4096\nmov x2, #4096\nmov x3, #4096\n"), 0.0);
+    // A shifted MOVZ is excluded even though its imm16 field is in range: the
+    // value produced is large, not imm[3:0].
+    EXPECT_GT(PortOf("movz x0, #1, lsl #16\nmovz x1, #1, lsl #16\n"
+                     "movz x2, #1, lsl #16\nmovz x3, #1, lsl #16\n"), 0.0);
+}
+
+// MOV Hd/Sd/Dd from WZR/XZR and the MOVI zero idioms, likewise read through
+// PortBound (all are sources-free or ZR-sourced, so none can form a cycle).
+TEST(FacileTest, A720ZeroLatencyGprToFpAndMoviIdioms) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    auto PortOf = [&](const std::string &Code) {
+        return runFacileAArch64(A720, Code).PortBound;
+    };
+    // FMOVWSr / FMOVXDr with Rn == ZR: sec. 4.12's MOV Sd,WZR and MOV Dd,XZR.
+    EXPECT_DOUBLE_EQ(PortOf("fmov s0, wzr\nfmov s1, wzr\nfmov d2, xzr\nfmov d3, xzr\n"), 0.0);
+    // The same opcodes with a real GPR source are ordinary 3c/M0 transfers.
+    EXPECT_GT(PortOf("fmov s0, w4\nfmov s1, w4\nfmov d2, x4\nfmov d3, x4\n"), 0.0);
+    // MOVI Dd,#0 and MOVI Vd.2D,#0.
+    EXPECT_DOUBLE_EQ(PortOf("movi d0, #0\nmovi d1, #0\nmovi v2.2d, #0\nmovi v3.2d, #0\n"), 0.0);
+    // A non-zero MOVI is an ordinary ASIMD move-immediate.
+    EXPECT_GT(PortOf("movi v0.4s, #1\nmovi v1.4s, #1\nmovi v2.4s, #1\nmovi v3.4s, #1\n"), 0.0);
+}
+
+// MOVK is a read-modify-write of its own destination: it merges a 16-bit field
+// into the existing value, so it genuinely carries a dependence and is NOT in
+// sec. 4.12.  This is the exact trap that made the Firestorm/Icestorm zero
+// write unusable as a "renamed away" signal (see getEdgeLatency()'s comment),
+// so it is pinned here for A720 too.
+TEST(FacileTest, A720MovkIsNotZeroLatency) {
+    initLLVMAArch64();
+    AArch64TestContext A720("cortex-a720");
+    EXPECT_NEAR(runFacileAArch64(A720, "add x0, x1, #1\nmov x1, x0\nmovk x1, #7, lsl #16\n").PrecedenceBound,
+                2.0, 0.01);
+}
+
+// The sec. 4.12 modelling must not leak onto cores whose own SOG does not
+// document it.  cortex-a76 keeps the 1-cycle floor on the very same MOV.
+TEST(FacileTest, A720ZeroLatencyDoesNotLeakToOtherCores) {
+    initLLVMAArch64();
+    AArch64TestContext A76("cortex-a76");
+    EXPECT_NEAR(runFacileAArch64(A76, "add x0, x1, #1\nmov x1, x0\n").PrecedenceBound, 2.0, 0.01);
 }

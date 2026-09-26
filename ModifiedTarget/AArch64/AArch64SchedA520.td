@@ -13,8 +13,42 @@
 //
 //===----------------------------------------------------------------------===//
 
+// Cortex-A520 SOG (PJDOC-1505342170-671342, Issue 1.2) sec. 4.1 "Issue
+// constraints", p.72: "The issue queue has space for three instructions ...
+// A maximum of three issue queue entries can be co-issued per cycle (ignoring
+// hazards) consisting of at most: Two ALU instructions / Two load instructions
+// / One store instruction / Two VPU data processing instructions."
+//
+// WHY THIS WAS WRONG.  IssueWidth was 2, carrying the comment "Dual-issue
+// in-order execution" -- a value and a justification inherited verbatim from
+// CortexA55Model (AArch64SchedA55.td: "It dual-issues under most
+// circumstances") when this model was written by analogy to A55.  A520 is
+// A55's in-order LITTLE successor, but it is NOT dual-issue: it is 3-wide.
+// The identical "three issue queue entries can be co-issued per cycle" wording
+// already appears in the Cortex-A510 SOG sec. 4.1, so 3-wide co-issue is a
+// stable property of the A510/A520 generation, not an A520-specific quirk.
+//
+// MECHANISM OF THE BUG.  Unlike the Cortex-A55 dual-issue bug (which was a
+// MISSING ENFORCEMENT guard in the project's own a55_issue_stage.cpp), the
+// A520 enforcement path is stock and correct: A520 has MicroOpBufferSize = 0,
+// so getSchedModel().isOutOfOrder() is false, and mca.cpp's pipeline selector
+// gates the custom A55 stage on the exact string "cortex-a55" -- so A520 falls
+// through to Context::createInOrderPipeline().  llvm-mca's InOrderIssueStage
+// caps issue with its `Bandwidth` field, which it seeds from getIssueWidth(),
+// i.e. straight from this constant.  The width was therefore enforced
+// faithfully -- at the wrong number.  Every A520 simulation was capped at IPC
+// 2 by an issue limit that does not exist on the real core, so any region
+// whose true bottleneck was between 2 and 3 instructions/cycle was reported as
+// issue-bound when the hardware would not be.  Correcting the constant is the
+// whole fix; no C++ change is needed.
+//
+// NOT CHANGED HERE: the per-class co-issue sub-limits above (at most 1 store,
+// at most 2 loads) are finer-grained than a single IssueWidth and are only
+// approximated by the ProcResource counts below (A520UnitLS is ProcResource<2>
+// and so admits two same-cycle stores). That is a separate modelling question
+// from the issue width and is left alone deliberately.
 def CortexA520Model : SchedMachineModel {
-  let IssueWidth = 2;           // Dual-issue in-order execution
+  let IssueWidth = 3;           // SOG sec. 4.1: max three entries co-issued per cycle
   let MicroOpBufferSize = 0;    // In-order core
   let LoadLatency = 2;          // L1 hit latency (2 cycles from Cortex-A520 SOG)
   let MispredictPenalty = 10;

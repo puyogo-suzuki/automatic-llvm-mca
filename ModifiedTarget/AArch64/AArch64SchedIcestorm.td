@@ -32,9 +32,8 @@ def IcestormModel : SchedMachineModel {
   // base+reg lsl #N, wreg sxtw).  This model previously used 3 for all loads,
   // i.e. it applied the pointer-chase special case universally and so
   // understated every load->ALU dependence by 1c.
-  // NOTE (2026-09-10): correcting this is metric-neutral on all four datasets
-  // (eval_estimation.py byte-identical for data / 0818_a78 / 0907_a78 /
-  // macbook).  Almost every hot block in SPEC is bound by IssueWidth or by an
+  // NOTE (2026-09-10): correcting this is metric-neutral on all benchmark
+  // datasets tested.  Almost every hot block is bound by IssueWidth or by an
   // execution resource rather than by the precedence bound, so the load
   // latency does not reach the answer - the same masking that the
   // --no-facile-memory-deps note describes.  Kept as a source-fidelity fix.

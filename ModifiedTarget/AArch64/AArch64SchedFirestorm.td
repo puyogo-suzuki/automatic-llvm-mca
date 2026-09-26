@@ -31,9 +31,8 @@ def FirestormModel : SchedMachineModel {
   // base+reg lsl #N, wreg sxtw).  This model previously used 3 for all loads,
   // i.e. it applied the pointer-chase special case universally and so
   // understated every load->ALU dependence by 1c.
-  // NOTE (2026-09-10): correcting this is metric-neutral on all four datasets
-  // (eval_estimation.py byte-identical for data / 0818_a78 / 0907_a78 /
-  // macbook).  Almost every hot block in SPEC is bound by IssueWidth or by an
+  // NOTE (2026-09-10): correcting this is metric-neutral on all benchmark
+  // datasets tested.  Almost every hot block is bound by IssueWidth or by an
   // execution resource rather than by the precedence bound, so the load
   // latency does not reach the answer - the same masking that the
   // --no-facile-memory-deps note describes.  Kept as a source-fidelity fix.
@@ -141,7 +140,7 @@ def : InstRW<[WriteST], (instrs STRBui, STRHui, STRWui, STRXui, STRBroX, STRHroX
 // while Icestorm gave it 4, #1640 (FMULv2f64) 2 vs 4, #1619 (FADDv2f64) 2 vs 3.
 // Icestorm already carries the equivalent overrides (AArch64SchedIcestorm.td
 // rules 7-8); Firestorm was simply missing them, so the P-core - the one that
-// actually runs vectorised SPEC FP code - was the less faithful of the two.
+// actually runs vectorised floating-point code - was the less faithful of the two.
 // Dougall Johnson's firestorm-simd.html gives, for EVERY element size and for
 // both the vector and by-element forms:
 //   FMUL / FNMUL / FMLA / FMLS   4c, throughput 0.25 (u11-14)
@@ -150,9 +149,9 @@ def : InstRW<[WriteST], (instrs STRBui, STRHui, STRWui, STRXui, STRBroX, STRHroX
 // -> WriteFMul (4c) and FADD/FSUB -> WriteF (3c) reproduce the source exactly.
 // The SCALAR forms (FMULDrr, FMADDDrrr, ...) already resolve correctly through
 // their own Sched<[WriteFMul]>; these rules fix the vector / by-element forms.
-// NOTE (2026-09-10): metric-neutral on all four datasets - eval_estimation.py
-// is identical to 3 decimal places on all 20 CPI/SF numbers with and without
-// these two lines.  Reason: these SPEC binaries are gcc-4.6 -O2 base builds
+// NOTE (2026-09-10): metric-neutral on all benchmark datasets tested - CPI/SF
+// prediction is identical to 3 decimal places with and without
+// these two lines.  Reason: these binaries are gcc-4.6 -O2 base builds
 // with essentially no autovectorisation, so vector-form FP mul/mac/add/sub is
 // only 2875 of 6744507 static instructions (0.043%), against 48859 SCALAR
 // fmadd/fmsub/fnmadd/fnmsub.  Kept as a source-fidelity fix and for symmetry
