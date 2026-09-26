@@ -180,16 +180,12 @@ bool usesLocalSchedTables(llvm::StringRef CPUName) {
 // AArch64 binary.  The opcode-count guard below refuses the swap outright if a
 // future libLLVM bump breaks that agreement.
 //
-// EFFECT ON ACCURACY (2026-09-10, eval_estimation.py, CPI-Stack R2, all four
-// datasets regenerated through analyze.bash + concat.py).  The fix is NOT an
-// accuracy win; it is a correctness fix whose net metric effect is mixed:
-//            CPI_S          CPI_B          SF_S            SF_B
-//   data      0.183>0.182    0.709>0.707   -0.135>+0.179   -1.074>-0.590
-//   0818_a78  0.311>0.268    0.645>0.624   -0.041>-0.174   -0.046>-0.119
-//   0907_a78  0.331>0.306    0.660>0.618   +0.029>+0.126   +0.181>-0.267
-//   macbook   0.139>0.128    0.638>0.608   +0.309>+0.254   +0.492>+0.419
-// MAPE mostly improves (e.g. data SF 0.299>0.270, macbook CPI_S 0.161>0.155).
-// Working hypothesis for the regressions: the InstRW rules in
+// EFFECT ON ACCURACY (2026-09-10, measured against several independent
+// benchmark datasets regenerated through analyze.bash + concat.py).  The fix
+// is NOT an accuracy win; it is a correctness fix whose net effect on
+// downstream cross-core CPI/speed-factor prediction R^2 was mixed across
+// datasets (some metrics improved, some regressed) while MAPE mostly
+// improved. Working hypothesis for the regressions: the InstRW rules in
 // ModifiedTarget/AArch64/*.td were tuned empirically WHILE the indices were
 // scrambled, so part of that tuning was compensating for the mis-indexing -
 // and worse, each added InstRW itself renumbers the classes, so it perturbed a

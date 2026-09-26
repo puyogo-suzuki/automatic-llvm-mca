@@ -135,8 +135,8 @@ producer's latency — no new constant is introduced.
 Pass `--no-facile-memory-deps` to restore the register-only behaviour. Because a
 missing precedence bound is masked whenever the issue or port limit is larger,
 this matters most on the **widest** core modelled with the **coarsest** port
-table — in practice Apple FireStorm, where 456.hmmer's P7Viterbi D-state
-recurrence moves the hot block's prediction from 7 to 12 cycles against 11.7
+table — in practice Apple FireStorm, where a hot loop's store→load D-state
+recurrence moves the block's prediction from 7 to 12 cycles against 11.7
 measured on real M1 hardware (Cortex-A76/A78 and IceStorm are unchanged on that
 block: their port/issue limits already exceeded the recurrence).
 

@@ -214,8 +214,8 @@ void A55DecoupledIssueStage::drainDecodeWindow() {
   // making the effective per-cycle issue width unbounded (limited only by
   // register hazards and ResourceManager unit counts) instead of 2. Any
   // dependency-free run of instructions that happens to spread across distinct
-  // pipelines could then all issue in one cycle: e.g. the 4-instruction loop at
-  // 0x1a584 in 444.namd (str/add/cmp/b.gt -> LS + ALU + ALU + BR) simulated at
+  // pipelines could then all issue in one cycle: e.g. a 4-instruction loop
+  // (str/add/cmp/b.gt -> LS + ALU + ALU + BR) simulated at
   // 12 instructions in 4 cycles = IPC 3, and post-correction the emitted CSV
   // row read 8 retired instructions in 1 cycle (IPC 8) on a core that cannot
   // exceed IPC 2. Capping here restores the documented dual-issue limit; the

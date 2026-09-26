@@ -1,6 +1,6 @@
 # automatic-llvm-mca Technical Documentation
 
-This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented in this project.
+This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here.
 
 ---
 

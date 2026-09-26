@@ -55,8 +55,8 @@ namespace opts {
                  "behaviour. The edges are on by default: the graph already carries "
                  "loop-carried REGISTER recurrences, so omitting loop-carried MEMORY "
                  "recurrences was an inconsistency that made the model blind to any value "
-                 "that round-trips through memory across a backedge (e.g. 456.hmmer's "
-                 "P7Viterbi D-state recurrence). A missing precedence bound is masked by "
+                 "that round-trips through memory across a backedge (e.g. a scalar "
+                 "carried via a stack slot instead of a register). A missing precedence bound is masked by "
                  "IssueWidth on narrow cores and only becomes visible on the widest core of "
                  "a pair, which is why it presented as a FireStorm-specific "
                  "under-prediction. This flag exists to A/B the effect."),
@@ -83,7 +83,7 @@ namespace opts {
                  "the machine, a later load to the same cache line is guaranteed resident, so "
                  "it is a guaranteed hit. That argument applies literally to an in-order core, "
                  "so this flag exists to A/B-test whether extending the exclusion to the "
-                 "in-order path improves CPI-Stack accuracy. Ignored under "
+                 "in-order path improves prediction accuracy. Ignored under "
                  "-disable-always-hit-loads-heuristic, and a no-op for --dependency ooo "
                  "(which already enables the heuristic unconditionally)."),
         cl::init(false));
