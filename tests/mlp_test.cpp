@@ -1710,3 +1710,64 @@ TEST(FacileTest, A720ZeroLatencyDoesNotLeakToOtherCores) {
     AArch64TestContext A76("cortex-a76");
     EXPECT_NEAR(runFacileAArch64(A76, "add x0, x1, #1\nmov x1, x0\n").PrecedenceBound, 2.0, 0.01);
 }
+
+// --merge-same-header: two back-edges to the SAME header are one natural loop.
+// Layout mirrors mcf primal_bea_mpp: hdr=1, short early-continue back-edge at 3 -> 1,
+// full-body back-edge at 6 -> 1, plus an unrelated DIFFERENT-header inner loop [4,5].
+static std::vector<RegionSpan> collectLoopSpans(std::vector<Instr> &instrs) {
+    FunctionBoundaries empty_bounds;
+    std::vector<RegionSpan> loops, bbs;
+    walkRegions(instrs, empty_bounds,
+                [&](const RegionSpan &S) { if (S.Start == S.AnalysisStart) loops.push_back(S); },
+                [&](const RegionSpan &S) { bbs.push_back(S); });
+    return loops;
+}
+
+TEST(MLPTest, SplitterMergeSameHeader) {
+    opts::ChainThreshold = 5;
+    std::vector<Instr> instrs(8);
+    for (size_t i = 0; i < 8; ++i) instrs[i].Addr = i * 4;
+    instrs[3].IsBranch = true; instrs[3].BranchTarget = 4;   // [1,3] short same-header path
+    instrs[5].IsBranch = true; instrs[5].BranchTarget = 16;  // [4,5] different header (real inner loop)
+    instrs[6].IsBranch = true; instrs[6].BranchTarget = 4;   // [1,6] full body
+
+    opts::MergeSameHeader = false;
+    auto off = collectLoopSpans(instrs);
+    ASSERT_EQ(off.size(), 3u);  // pre-existing behavior unchanged when flag off
+
+    opts::MergeSameHeader = true;
+    auto on = collectLoopSpans(instrs);
+    opts::MergeSameHeader = false;
+    ASSERT_EQ(on.size(), 2u);
+    bool has16 = false, has45 = false, has13 = false;
+    for (auto &s : on) {
+        if (s.Start == 1 && s.Size == 6) has16 = true;
+        if (s.Start == 4 && s.Size == 2) has45 = true;
+        if (s.Start == 1 && s.Size == 3) has13 = true;
+    }
+    EXPECT_TRUE(has16);
+    EXPECT_TRUE(has45);   // different-header nested loop is preserved
+    EXPECT_FALSE(has13);  // same-header partial path is dropped
+}
+
+TEST(MLPTest, SplitterMergeSameHeaderKeepsAbabSpansIdentical) {
+    // abab pair [1,3],[2,4] with threshold 1 merges to [1,4]; the flag must not alter it.
+    std::vector<Instr> instrs(5);
+    for (size_t i = 0; i < 5; ++i) instrs[i].Addr = i * 4;
+    instrs[3].IsBranch = true; instrs[3].BranchTarget = 4;
+    instrs[4].IsBranch = true; instrs[4].BranchTarget = 8;
+    for (int th : {1, 100}) {
+        opts::ChainThreshold = th;
+        opts::MergeSameHeader = false;
+        auto a = collectLoopSpans(instrs);
+        opts::MergeSameHeader = true;
+        auto b = collectLoopSpans(instrs);
+        opts::MergeSameHeader = false;
+        ASSERT_EQ(a.size(), b.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            EXPECT_EQ(a[i].Start, b[i].Start);
+            EXPECT_EQ(a[i].Size, b[i].Size);
+        }
+    }
+    opts::ChainThreshold = 5;
+}

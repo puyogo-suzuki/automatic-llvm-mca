@@ -188,6 +188,36 @@ std::vector<SimpleLoop> detectAndMergeAbabChains(const std::vector<SimpleLoop> &
     return selected_loops;
 }
 
+// Step 4 (opt-in, --merge-same-header): several backward branches that jump to the SAME
+// target address are, by the standard natural-loop definition (one loop per header,
+// all back-edges to it belong to that loop), ONE loop - not a set of concentric loops.
+// detectBackwardBranchLoops() emits one span per backward branch, so a loop body with an
+// early "continue" (e.g. mcf primal_bea_mpp: `if (arc->ident <= BASIC) continue;`, which
+// compiles to a 6-instruction `add; cmp; b.ls; ldr; cmp; b.le <hdr>` back-edge) produced
+// a short same-header partial path that was then analyzed (and PC-matched by concat.py's
+// tightest-span rule) as if it repeated back-to-back. This keeps only the widest span per
+// header, unchanged, and drops
+// the strictly-contained same-header partial spans. It deliberately does NOT touch abab
+// merging or its chain-depth decision (applied after detectAndMergeAbabChains, so every
+// kept span is byte-identical to before), nor genuinely nested loops with a DIFFERENT
+// header (those are real inner loops).
+std::vector<SimpleLoop> mergeSameHeaderLoops(const std::vector<SimpleLoop> &loops) {
+    std::vector<SimpleLoop> out;
+    out.reserve(loops.size());
+    for (const auto &l : loops) {
+        bool dominated = false;
+        for (auto &o : out) {
+            if (o.h_idx == l.h_idx) {
+                if (l.l_idx > o.l_idx) o = l;  // keep the widest same-header span as-is
+                dominated = true;
+                break;
+            }
+        }
+        if (!dominated) out.push_back(l);
+    }
+    return out;
+}
+
 } // namespace
 
 void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries,
@@ -211,6 +241,9 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries,
             return a.l_idx > b.l_idx;
         });
         std::vector<SimpleLoop> selected_loops = detectAndMergeAbabChains(raw_loops, opts::ChainThreshold);
+        if (opts::MergeSameHeader) {
+            selected_loops = mergeSameHeaderLoops(selected_loops);
+        }
 
         std::vector<bool> in_loop(f_size, false);
         for (const auto &l : selected_loops) {

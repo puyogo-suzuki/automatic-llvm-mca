@@ -62,6 +62,7 @@ namespace opts {
                  "under-prediction. This flag exists to A/B the effect."),
         cl::init(false));
     cl::opt<int> ChainThreshold("chain-threshold", cl::desc("Max chain threshold for merged loop region analysis"), cl::init(5));
+    cl::opt<bool> MergeSameHeader("merge-same-header", cl::desc("Keep only the widest backward-branch span per loop header (natural-loop definition: all back-edges to one header are one loop); drops same-header partial-path spans such as an early-continue back-edge. Applied after abab merging, never changes a kept span. See splitter.cpp mergeSameHeaderLoops."), cl::init(false));
     cl::opt<bool> CountOnly("count-only", cl::desc("Only count total generated regions without running MCA simulation"), cl::init(false));
     cl::opt<bool> DisableAlwaysHitLoadsHeuristic("disable-always-hit-loads-heuristic",
         cl::desc("Disable the same-cache-line 'line reuse' always-hit heuristic: by default "

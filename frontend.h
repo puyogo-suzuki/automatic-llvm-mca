@@ -68,6 +68,7 @@ namespace opts {
     extern llvm::cl::opt<bool> FacileReason;
     extern llvm::cl::opt<bool> NoFacileMemoryDeps;
     extern llvm::cl::opt<int> ChainThreshold;
+    extern llvm::cl::opt<bool> MergeSameHeader;
     extern llvm::cl::opt<bool> CountOnly;
     extern llvm::cl::opt<bool> DisableAlwaysHitLoadsHeuristic;
     extern llvm::cl::opt<bool> LineReuseInOrder;
