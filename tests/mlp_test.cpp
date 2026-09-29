@@ -236,8 +236,12 @@ struct AArch64TestContext {
         // default cortex-a76, computes MLP 4.0 rather than 2.0 under the local
         // N1 tables).  That divergence is real and worth its own investigation,
         // but it is not this change's subject.
+        // cortex-x1/-x1c are added for the same reason as the A720: stock LLVM
+        // maps them to its own NeoverseV1Model (ROB 256, IssueWidth 8, no
+        // load-pair latency fix), which is not the model the tool installs.
         if (cpu == "icestorm" || cpu == "firestorm" ||
-            cpu == "cortex-a720" || cpu == "cortex-a720ae") {
+            cpu == "cortex-a720" || cpu == "cortex-a720ae" ||
+            cpu == "cortex-x1" || cpu == "cortex-x1c") {
             const std::string llvm_cpu =
                 (cpu == "icestorm" || cpu == "firestorm") ? "apple-m1" : cpu;
             STI.reset(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
@@ -1476,9 +1480,8 @@ TEST(FacileTest, A720FusionCmpRegisterCsel) {
 }
 
 // DIFFERENCE (1): A78 sec. 4.14 item 10 is "NOP + Any instruction"; A720
-// sec. 4.11 has no such row.  92,102 static pairs in the benchmark corpus hit this,
-// so getting it wrong would be the single largest modelling error of a
-// naively-widened A78 gate.
+// sec. 4.11 has no such row.  NOP is common in real code, so getting it
+// wrong would be a large modelling error of a naively-widened A78 gate.
 TEST(FacileTest, A720DoesNotFuseNopWithAnything) {
     initLLVMAArch64();
     AArch64TestContext A78("cortex-a78");
@@ -1564,8 +1567,8 @@ TEST(FacileTest, A720FusionDoesNotLeakToOtherCores) {
 //     so a block of qualifying moves has to show ZERO port pressure while the
 //     same moves in a non-qualifying form occupy their pipeline.
 //
-// These numbers are derived from the SOG, not fitted: no measured Cortex-A720
-// dataset is available, so nothing here is an accuracy claim.
+// These numbers are derived from the SOG, not fitted, so nothing here is an
+// accuracy claim.
 // ============================================================================
 
 // MOV Xd, Xn (encoded ORRXrs with Rn == XZR) inside a recurrence.  The cycle is
@@ -1709,6 +1712,178 @@ TEST(FacileTest, A720ZeroLatencyDoesNotLeakToOtherCores) {
     initLLVMAArch64();
     AArch64TestContext A76("cortex-a76");
     EXPECT_NEAR(runFacileAArch64(A76, "add x0, x1, #1\nmov x1, x0\n").PrecedenceBound, 2.0, 0.01);
+}
+
+// ============================================================================
+// Cortex-X1 (X1 SOG PJDOC-466751330-12804 Issue 4.0)
+//
+// The X1 runs on the locally modified NeoverseV1Model.  What differs from the
+// A78 (NeoverseN2Model) and is pinned here:
+//   * machine parameters: ROB 224, uOP dispatch width 16, 8 Mops/cycle;
+//   * "Instruction fusion" is the A78 table WITHOUT the CMP + CSEL/CSET rows;
+//   * "Zero Latency MOVs" is the A78 list, and must not turn the second
+//     destination of a load pair (V1Write_0c_0Z in stock V1) into a free value.
+// ============================================================================
+
+// facile with an explicit dispatch / Mop width, as frontend.cpp passes them.
+static facile::FacileResult runFacileAArch64Widths(const AArch64TestContext &TC, const std::string &asm_code,
+                                                   unsigned DispatchWidth, unsigned MopWidth) {
+    initLLVMAArch64();
+    auto instrs = parseAsm(TC, asm_code);
+    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
+    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
+    std::vector<const MCInst *> MCInsts;
+    for (const auto &I : instrs) {
+        auto ExpectedInst = IB.createInstruction(I.Inst, {});
+        if (ExpectedInst) {
+            SimInstrs.push_back(std::move(*ExpectedInst));
+            MCInsts.push_back(&I.Inst);
+        }
+    }
+    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, DispatchWidth, {}, MopWidth);
+}
+
+TEST(FacileTest, X1MachineParameters) {
+    initLLVMAArch64();
+    for (const char *cpu : {"cortex-x1", "cortex-x1c"}) {
+        AArch64TestContext TC(cpu);
+        const MCSchedModel &SM = TC.STI->getSchedModel();
+        EXPECT_EQ(SM.MicroOpBufferSize, 224) << cpu;  // ROB
+        EXPECT_EQ(SM.IssueWidth, 16u) << cpu;         // uOPs dispatched per cycle
+    }
+}
+
+// 16 independent single-uop ALU instructions: 16 uops / 16 = 1.0 cycles but
+// 16 Mops / 8 = 2.0, so the Mop cap is the binding front-end bound.
+TEST(FacileTest, X1MopDispatchBound) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    std::string Code;
+    for (int i = 0; i < 16; ++i)
+        Code += "add x" + std::to_string(i) + ", x" + std::to_string(i + 1) + ", #1\n";
+    EXPECT_NEAR(runFacileAArch64Widths(TC, Code, 16, 8).IssueBound, 2.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64Widths(TC, Code, 16, 0).IssueBound, 1.0, 0.01);  // Mop cap off
+}
+
+// Rows the X1 shares with the A78 (its items 1,2,7,8,9,10).
+TEST(FacileTest, X1FusionSharedRows) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    EXPECT_EQ(runFacileAArch64(TC, "cmp w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    EXPECT_EQ(runFacileAArch64(TC, "cmp w0, w1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    EXPECT_EQ(runFacileAArch64(TC, "cmn w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    EXPECT_EQ(runFacileAArch64(TC, "tst w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    EXPECT_EQ(runFacileAArch64(TC, "tst w0, w1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    EXPECT_EQ(runFacileAArch64(TC, "bics wzr, w0, w1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+    EXPECT_EQ(runFacileAArch64(TC, "nop\nadd x0, x1, x2\n").TotalMicroOps, 1u);  // NOP + Any
+}
+
+// The A78 rows the X1 SOG does NOT print: CMP + CSEL and CMP + CSET.
+TEST(FacileTest, X1DoesNotFuseCmpWithCselOrCset) {
+    initLLVMAArch64();
+    AArch64TestContext A78("cortex-a78");
+    AArch64TestContext X1("cortex-x1");
+    AArch64TestContext X1C("cortex-x1c");
+    const std::string Csel = "cmp w0, w1\ncsel w2, w3, w4, eq\n";
+    const std::string CselI = "cmp w0, #1\ncsel w2, w3, w4, eq\n";
+    const std::string Cset = "cmp w0, #1\ncset w1, eq\n";
+    for (const std::string &Code : {Csel, CselI, Cset}) {
+        EXPECT_EQ(runFacileAArch64(A78, Code).TotalMicroOps, 1u) << Code;  // A78: fused
+        EXPECT_EQ(runFacileAArch64(X1, Code).TotalMicroOps, 2u) << Code;   // X1: not
+        EXPECT_EQ(runFacileAArch64(X1C, Code).TotalMicroOps, 2u) << Code;
+    }
+}
+
+TEST(FacileTest, X1FlagSettingWithRealDestinationIsNotFusedExceptBics) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    EXPECT_EQ(runFacileAArch64(TC, "subs w5, w0, #1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 2u);
+    // BICS is named by its own mnemonic in the SOG, so a real destination is fine.
+    EXPECT_EQ(runFacileAArch64(TC, "bics w5, w0, w1\nb.eq .Lt\n.Lt:\n").TotalMicroOps, 1u);
+}
+
+// Sec. "Zero Latency MOVs": MOV Xd,Xn inside a recurrence costs nothing, so the
+// add(1c) -> mov -> add cycle is 1.0 on the X1 and 2.0 on the A76 control.
+TEST(FacileTest, X1ZeroLatencyMov) {
+    initLLVMAArch64();
+    AArch64TestContext X1("cortex-x1");
+    AArch64TestContext A76("cortex-a76");
+    const std::string Code = "add x0, x1, #1\nmov x1, x0\n";
+    EXPECT_NEAR(runFacileAArch64(X1, Code).PrecedenceBound, 1.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(A76, Code).PrecedenceBound, 2.0, 0.01);
+    // Not in the SOG list: a MOV with a non-zero shifted ORR, MOVK, and MOVZ #imm != 0.
+    EXPECT_NEAR(runFacileAArch64(X1, "add x0, x1, #1\norr x1, xzr, x0, lsl #1\n").PrecedenceBound, 2.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(X1, "add x0, x1, #1\nmov x1, x0\nmovk x1, #7, lsl #16\n").PrecedenceBound, 2.0, 0.01);
+}
+
+// The load-pair trap: stock V1 gives the high destination of LDPW / LDPSW /
+// LDP[SD] Latency 0 (V1Write_0c_0Z).  With the zero-latency gate on, that would
+// make it free.  The recurrence x3 -> ldp -> (high dest) -> mov -> x3 must cost
+// the load's latency instead.
+TEST(FacileTest, X1LoadPairHighHalfIsNotZeroLatency) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    // LDPSW: high half (x2) is 5c.  mov x3, x2 is a zero-latency MOV, so the
+    // cycle costs exactly the load.
+    EXPECT_NEAR(runFacileAArch64(TC, "ldpsw x1, x2, [x3]\nmov x3, x2\n").PrecedenceBound, 5.0, 0.01);
+    // S/D-form pair: high half (d2) is 6c, then fmov x3, d2 (vec->gen, 2c) closes the cycle.
+    EXPECT_NEAR(runFacileAArch64(TC, "ldp d1, d2, [x3]\nfmov x3, d2\n").PrecedenceBound, 8.0, 0.01);
+}
+
+// X1 SOG Table 3-34: AES ops run on V01 only, throughput 2 per cycle.  Four
+// independent AESE therefore need 2.0 cycles (stock V would say 1.0).
+TEST(FacileTest, X1AesRunsOnV01Only) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    EXPECT_NEAR(runFacileAArch64(TC, "aese v0.16b, v8.16b\naese v1.16b, v8.16b\n"
+                                     "aese v2.16b, v8.16b\naese v3.16b, v8.16b\n").PortBound, 2.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(TC, "aesmc v0.16b, v4.16b\naesmc v1.16b, v5.16b\n"
+                                     "aesmc v2.16b, v6.16b\naesmc v3.16b, v7.16b\n").PortBound, 2.0, 0.01);
+}
+
+// X1 SOG Table 3-12: LDPSW is "5, 1.5, I, L" - 1.5 per cycle, i.e. 2/3 cycle each
+// on the three L pipes (stock V1: 1/3).
+TEST(FacileTest, X1LdpswThroughput) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    EXPECT_NEAR(runFacileAArch64(TC, "ldpsw x1, x2, [x0]\n").PortBound, 2.0 / 3.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(TC, "ldp w1, w2, [x0]\n").PortBound, 1.0 / 3.0, 0.01);   // W-form: 3/cycle
+    EXPECT_NEAR(runFacileAArch64(TC, "ldp x1, x2, [x0]\n").PortBound, 2.0 / 3.0, 0.01);   // X-form: 1.5/cycle
+}
+
+// Rows where the X1 SOG differs from the stock V1 model it started from.  Each
+// asserts the pipe set / throughput the X1 SOG prints, via PortBound on
+// independent instructions (PortBound = worst resource occupancy / units).
+TEST(FacileTest, X1PipeAssignmentsFollowSog) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    auto Port = [&](const char *Code) { return runFacileAArch64(TC, Code).PortBound; };
+    // FCSEL: V02 (2 pipes) -> 4 of them need 2.0 cycles.
+    EXPECT_NEAR(Port("fcsel d0, d8, d9, eq\nfcsel d1, d8, d9, eq\nfcsel d2, d8, d9, eq\nfcsel d3, d8, d9, eq\n"), 2.0, 0.01);
+    // FP convert, vec -> gen: V02 but 1 per cycle -> 2 of them need 2.0 cycles.
+    EXPECT_NEAR(Port("fcvtzs w0, d8\nfcvtzs w1, d9\n"), 2.0, 0.01);
+    // TBL (1 table reg): one uOP on V01 -> 4 need 2.0 cycles.
+    EXPECT_NEAR(Port("tbl v0.16b, {v8.16b}, v9.16b\ntbl v1.16b, {v8.16b}, v9.16b\n"
+                     "tbl v2.16b, {v8.16b}, v9.16b\ntbl v3.16b, {v8.16b}, v9.16b\n"), 2.0, 0.01);
+    // PMULL (64x64): V01, 2 per cycle -> 2 of them need 1.0 cycle.
+    EXPECT_NEAR(Port("pmull v0.1q, v8.1d, v9.1d\npmull v1.1q, v8.1d, v9.1d\n"), 1.0, 0.01);
+    // SHA1SU0 / SHA256SU1 (three-register forms): V0 only -> 2 need 2.0 cycles.
+    EXPECT_NEAR(Port("sha1su0 v0.4s, v8.4s, v9.4s\nsha1su0 v1.4s, v8.4s, v9.4s\n"), 2.0, 0.01);
+    EXPECT_NEAR(Port("sha256su1 v0.4s, v8.4s, v9.4s\nsha256su1 v1.4s, v8.4s, v9.4s\n"), 2.0, 0.01);
+    // SQSHRUN (shift by immed, complex): V13 -> 4 need 2.0 cycles.
+    EXPECT_NEAR(Port("sqshrun v0.8b, v8.8h, #3\nsqshrun v1.8b, v8.8h, #3\n"
+                     "sqshrun v2.8b, v8.8h, #3\nsqshrun v3.8b, v8.8h, #3\n"), 2.0, 0.01);
+}
+
+// ASIMD dot product "2 (1)": 2c latency, 1c through the accumulator.
+TEST(FacileTest, X1DotProductAccumulatorLatency) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-x1");
+    EXPECT_NEAR(runFacileAArch64(TC, "sdot v0.4s, v1.16b, v2.16b\n").PrecedenceBound, 1.0, 0.01);
+    // Through a NON-accumulator operand the full 2c applies; the vector MOV is
+    // an ordinary 2c ORR on the X1 (its zero-latency list is GPR moves only).
+    EXPECT_NEAR(runFacileAArch64(TC, "sdot v0.4s, v1.16b, v2.16b\nmov v1.16b, v0.16b\n").PrecedenceBound, 4.0, 0.01);
 }
 
 // --merge-same-header: two back-edges to the SAME header are one natural loop.

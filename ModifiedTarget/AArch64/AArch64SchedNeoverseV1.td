@@ -18,11 +18,36 @@
 //
 //===----------------------------------------------------------------------===//
 
+// LOCAL USE: this file is compiled into the tool's own AArch64GenSubtargetInfo
+// tables, and custom_a55_sched.cpp installs NeoverseV1Model ONLY for
+// cortex-x1 / cortex-x1c (neoverse-v1 keeps libLLVM's stock model), so the
+// machine parameters below are the Cortex-X1's, not the Neoverse V1's.
+//
+// Pipeline parameters (Cortex-X1):
+//   Decode width           5   -- NOT modelled (see below).  Not stated in the SOG;
+//                                 supplied by the project owner together with the
+//                                 scheduler-entry count below.
+//   Alloc/Rename width     8   -- "up to 8 MOPs per cycle" (X1 SOG PJDOC-466751330-12804
+//                                 sec. 4.1); carried out-of-band as
+//                                 TargetInfo::MopDispatchWidth (frontend.cpp).
+//   Issue (dispatch) width 16  -- "dispatch up to 16 uOPs per cycle" (same sentence);
+//                                 IssueWidth below, also PipelineOptions::DispatchWidth.
+//   ROB                    224 -- MicroOpBufferSize below.
+//   Scheduler entries      150 -- NOT modelled (see below); also owner-supplied.
+//
+// NOT MODELLED, on purpose, exactly as for the Cortex-A78 (whose 4-wide
+// decode / scheduler size are likewise absent from AArch64SchedNeoverseN2.td):
+//   * Decode width.  Neither llvm::MCSchedModel nor MCA has a decode stage, and
+//     the tool bounds hot-loop front-end throughput by the rename/dispatch
+//     width (MopDispatchWidth), the same convention as the A76/A78/A720.
+//   * Scheduler entries.  MCA's only handle is a per-ProcResource BufferSize,
+//     i.e. one queue per pipe/group, and the SOG does not say how the 150
+//     entries are split over the fifteen issue pipelines.  Inventing a split
+//     would add stalls the hardware need not have, so the queues stay
+//     unbounded (BufferSize = -1) and the ROB is the only window limit.
 def NeoverseV1Model : SchedMachineModel {
-  let IssueWidth            =   8; // This value comes from the decode bandwidth
-                                   // and empirical measurements showed that this
-                                   // value is better.
-  let MicroOpBufferSize     = 256; // Micro-op re-order buffer.
+  let IssueWidth            =  16; // uOPs dispatched per cycle (X1 SOG sec. 4.1).
+  let MicroOpBufferSize     = 224; // Cortex-X1 re-order buffer.
   let LoadLatency           =   4; // Optimistic load latency.
   let MispredictPenalty     =  11; // Cycles cost of branch mispredicted.
   let LoopMicroOpBufferSize =  16; // NOTE: Copied from Cortex-A57.
@@ -96,6 +121,30 @@ def V1Write_0c_0Z : SchedWriteRes<[]>;
 
 def V1Write_0c : SchedWriteRes<[]> { let Latency = 0; }
 
+// LDPSW: X1 SOG Table 3-12/3-13 "LDPSW  5, 1.5, I, L" - one I uOP and TWO L
+// issue slots per instruction (1.5 per cycle over the three L pipes).  Stock V1
+// models a single L slot (3 per cycle).  Expressed as occupancy, not as an extra
+// uOP, so NumMicroOps stays 2 (the same correction the A78 gets in facile.cpp).
+def V1Write_5c_1I_2L : SchedWriteRes<[V1UnitI, V1UnitL]> {
+  let Latency = 5;
+  let NumMicroOps = 2;
+  let ReleaseAtCycles = [1, 2];
+}
+
+// Second (high) destination of a load pair that shares the first write's L
+// micro-op: no extra uOP and no resource, but the register is NOT available at
+// cycle 0 - it comes out of the same L1 access as the low half.  Stock V1 uses
+// V1Write_0c_0Z (Latency 0) here, which is indistinguishable from a
+// rename-time zero-latency MOV once facile trusts Latency == 0 for the X1
+// (facile.cpp: isZeroLatencyMovTarget()), and would make the high half of
+// LDPW/LDPSW/LDP[SD] free.  Give it the latency of the load instead.
+let Latency = 4, NumMicroOps = 0 in
+def V1Write_4c_0Z : SchedWriteRes<[]>;
+let Latency = 5, NumMicroOps = 0 in
+def V1Write_5c_0Z : SchedWriteRes<[]>;
+let Latency = 6, NumMicroOps = 0 in
+def V1Write_6c_0Z : SchedWriteRes<[]>;
+
 //===----------------------------------------------------------------------===//
 // Define generic 1 micro-op types
 
@@ -155,6 +204,7 @@ def V1Write_2c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 2; }
 def V1Write_3c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 3; }
 def V1Write_4c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 4; }
 def V1Write_5c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 5; }
+def V1Write_2c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 2; }
 def V1Write_3c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 3; }
 def V1Write_4c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
 def V1Write_7c7_1V02   : SchedWriteRes<[V1UnitV02]> { let Latency = 7;
@@ -524,8 +574,9 @@ def V1Rd_FMA : SchedReadAdvance<2, [WriteFMul, V1Wr_FMA]>;
 def V1Wr_ADA : SchedWriteRes<[V1UnitV13]> { let Latency = 4; }
 def V1Rd_ADA : SchedReadAdvance<3, [V1Wr_ADA]>;
 
-def V1Wr_VDOT : SchedWriteRes<[V1UnitV]> { let Latency = 3; }
-def V1Rd_VDOT : SchedReadAdvance<2, [V1Wr_VDOT]>;
+// X1 SOG Table 3-24: ASIMD dot product "2 (1), 4, V" (stock V1: 3 (1)).
+def V1Wr_VDOT : SchedWriteRes<[V1UnitV]> { let Latency = 2; }
+def V1Rd_VDOT : SchedReadAdvance<1, [V1Wr_VDOT]>;
 
 def V1Wr_VMMA : SchedWriteRes<[V1UnitV]> { let Latency = 3; }
 def V1Rd_VMMA : SchedReadAdvance<2, [V1Wr_VMMA]>;
@@ -746,15 +797,15 @@ def : SchedAlias<WriteAdr,   V1Write_1c_1I>;
 
 // Load pair, immed offset
 def : SchedAlias<WriteLDHi, V1Write_4c_1L>;
-def : InstRW<[V1Write_4c_1L, V1Write_0c_0Z], (instrs LDPWi, LDNPWi)>;
-def : InstRW<[WriteAdr, V1Write_4c_1L, V1Write_0c_0Z],
+def : InstRW<[V1Write_4c_1L, V1Write_4c_0Z], (instrs LDPWi, LDNPWi)>;
+def : InstRW<[WriteAdr, V1Write_4c_1L, V1Write_4c_0Z],
              (instrs LDPWpost, LDPWpre)>;
 
 // Load pair, signed immed offset, signed words
-def : InstRW<[V1Write_5c_1I_1L, V1Write_0c_0Z], (instrs LDPSWi)>;
+def : InstRW<[V1Write_5c_1I_2L, V1Write_5c_0Z], (instrs LDPSWi)>;
 
 // Load pair, immed post or pre-index, signed words
-def : InstRW<[WriteAdr, V1Write_5c_1I_1L, V1Write_0c_0Z],
+def : InstRW<[WriteAdr, V1Write_5c_1I_2L, V1Write_5c_0Z],
              (instrs LDPSWpost, LDPSWpre)>;
 
 
@@ -813,7 +864,8 @@ def : InstRW<[V1Write_3c_1V02], (instregex "^FRINT[AIMNPXZ][HSD]r$",
                                            "^FRINT(32|64)[XZ][SD]r$")>;
 
 // FP select
-def : InstRW<[V1Write_2c_1V01], (instregex "^FCSEL[HSD]rrr$")>;
+// X1 SOG Table 3-16: FCSEL "2, 2, V02" (stock V1: V01).
+def : InstRW<[V1Write_2c_1V02], (instregex "^FCSEL[HSD]rrr$")>;
 
 
 // FP miscellaneous instructions
@@ -823,7 +875,11 @@ def : InstRW<[V1Write_2c_1V01], (instregex "^FCSEL[HSD]rrr$")>;
 def : InstRW<[V1Write_3c_1M0], (instregex "^[SU]CVTF[SU][WX][HSD]ri$")>;
 
 // FP convert, from vec to gen reg
-def : InstRW<[V1Write_3c_1V0], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
+// X1 SOG Table 3-18: "3, 1, V02" - either of V0/V2 but only ONE per cycle
+// (stock V1: V0 only).  Expressed as a 2-cycle occupancy of the V02 group.
+def V1Write_3c2_1V02 : SchedWriteRes<[V1UnitV02]> { let Latency = 3;
+                                                    let ReleaseAtCycles = [2]; }
+def : InstRW<[V1Write_3c2_1V02], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
 
 // FP convert, Javascript from vec to gen reg
 def : InstRW<[V1Write_3c_1V0], (instrs FJCVTZS)>;
@@ -873,14 +929,14 @@ def : InstRW<[V1Write_6c_1L, ReadAdrBase], (instregex "^LDR[BSD]ro[WX]$")>;
 def : InstRW<[V1Write_7c_1I_1L, ReadAdrBase], (instregex "^LDR[HQ]ro[WX]$")>;
 
 // Load vector pair, immed offset, S/D-form
-def : InstRW<[V1Write_6c_1L, V1Write_0c_0Z], (instregex "^LDN?P[SD]i$")>;
+def : InstRW<[V1Write_6c_1L, V1Write_6c_0Z], (instregex "^LDN?P[SD]i$")>;
 
 // Load vector pair, immed offset, Q-form
 def : InstRW<[V1Write_6c_1L, WriteLDHi], (instrs LDPQi, LDNPQi)>;
 
 // Load vector pair, immed post-index, S/D-form
 // Load vector pair, immed pre-index, S/D-form
-def : InstRW<[WriteAdr, V1Write_6c_1L, V1Write_0c_0Z],
+def : InstRW<[WriteAdr, V1Write_6c_1L, V1Write_6c_0Z],
              (instregex "^LDP[SD](pre|post)$")>;
 
 // Load vector pair, immed post-index, Q-form
@@ -990,6 +1046,10 @@ def : InstRW<[V1Write_4c_1V02], (instregex "^SQDML[AS]L[iv]")>;
 // ASIMD multiply/multiply long (8x8) polynomial
 def : InstRW<[V1Write_3c_1V01], (instregex "^PMULL?v(8|16)i8$")>;
 
+// Crypto polynomial (64x64) multiply long
+// X1 SOG Table 3-34: PMULL(2) "2, 2, V01".
+def : InstRW<[V1Write_2c_1V01], (instregex "^PMULLv(1i64|2i64)$")>;
+
 // ASIMD multiply long
 def : InstRW<[V1Write_3c_1V02], (instregex "^([SU]|SQD)MULLv")>;
 
@@ -1001,7 +1061,7 @@ def : InstRW<[V1Wr_VSA, V1Rd_VSA], (instregex "^[SU]SRAv", "^[SU]RSRAv")>;
 def : InstRW<[V1Write_4c_1V13],
              (instregex "^RSHRNv", "^SQRSHRU?Nv", "^(SQSHLU?|UQSHL)[bhsd]$",
                         "^(SQSHLU?|UQSHL)(v8i8|v16i8|v4i16|v8i16|v2i32|v4i32|v2i64)_shift$",
-                        "^SQSHU?RNv", "^[SU]RSHRv", "^UQR?SHRNv", 
+                        "^SQSHU?RNv", "^SQSHRUNv", "^[SU]RSHRv", "^UQR?SHRNv", 
                         "^[SU]Q?RSHLv", "^[SU]QSHLv")>;
 
 // ASIMD shift by immed, basic
@@ -1192,7 +1252,9 @@ def : InstRW<[V1Write_4c_1V], (instregex "^FRECPS(16|32|64)$", "^FRECPSv",
 
 // ASIMD table lookup, 1 or 2 table regs
 // ASIMD table lookup extension, 1 table reg
-def : InstRW<[V1Write_2c_2V01], (instregex "^TBLv(8|16)i8(One|Two)$",
+// X1 SOG Table 3-28: "TBL 1 or 2 regs / TBX 1 reg: 2, 2, V01" - a single uOP
+// on V0/V1 (stock V1: two uOPs, throughput 1).
+def : InstRW<[V1Write_2c_1V01], (instregex "^TBLv(8|16)i8(One|Two)$",
                                            "^TBXv(8|16)i8One$")>;
 
 // ASIMD table lookup, 3 table regs
@@ -1418,18 +1480,21 @@ def : InstRW<[WriteAdr, V1Write_6c_3L_3V],
 // Covered by "SchedAlias (WriteV[dq]...)" above
 
 // Crypto AES ops
-def V1WriteVC : WriteSequence<[V1Write_2c_1V]>;
+// Cortex-X1 SOG Table 3-34: AESD/AESE/AESIMC/AESMC are "2, 2, V01" (latency 2,
+// throughput 2, the V0/V1 pipes only).  Stock V1 uses the 4-wide V group
+// (4 per cycle), which the X1 does not have for AES.
+def V1WriteVC : WriteSequence<[V1Write_2c_1V01]>;
 def V1ReadVC  : SchedReadAdvance<2, [V1WriteVC]>;
 def           : InstRW<[V1WriteVC], (instrs AESDrr, AESErr)>;
-def           : InstRW<[V1Write_2c_1V, V1ReadVC], (instrs AESMCrr, AESIMCrr)>;
+def           : InstRW<[V1Write_2c_1V01, V1ReadVC], (instrs AESMCrr, AESIMCrr)>;
 
 // Crypto SHA1 hash acceleration op
 // Crypto SHA1 schedule acceleration ops
 // Crypto SHA256 schedule acceleration ops
 // Crypto SHA512 hash acceleration ops
 // Crypto SM3 ops
-def : InstRW<[V1Write_2c_1V0], (instregex "^SHA1(H|SU[01])rr$",
-                                          "^SHA256SU[01]rr$",
+def : InstRW<[V1Write_2c_1V0], (instregex "^SHA1(H|SU[01])rrr?$",
+                                          "^SHA256SU[01]rrr?$",
                                           "^SHA512(H2?|SU[01])$",
                                           "^SM3(PARTW(1|2SM3SS1)|TT[12][AB])$")>;
 

@@ -214,11 +214,17 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     //     p.41, "The dispatch stage can process up to 4 Mops per cycle".
     //   cortex-a78 (+ae, c): A78 SOG sec 4.1 p.51-52 ("6 MOPs per cycle").
     //   cortex-a720 (+ae): A720 SOG sec 4.1 ("5 MOPs per cycle").
+    //   cortex-x1 (+c): X1 SOG (PJDOC-466751330-12804) sec 4.1 "Dispatch
+    //     constraints": "up to 8 MOPs per cycle and dispatch up to 16 uOPs
+    //     per cycle".  Only the 5-wide DECODE is not modelled: as for the A78
+    //     (4-wide decode, only its 6-wide rename is used) the Mop bound is the
+    //     rename/dispatch width.
     // Left at 0 (= not applied, see calculateIssueBound()) for
     // cortex-a710/a715/neoverse-n2 (grouped above only by SHARED uop
     // DispatchWidth=10; their own SOGs have not been consulted for the Mop
-    // number - do not assume it also equals 5) and for cortex-x1/x1c/
-    // neoverse-v1 (SOG not yet consulted), and for Apple icestorm/firestorm
+    // number - do not assume it also equals 5) and for neoverse-v1 (grouped
+    // with the X1 above only by the shared uop DispatchWidth=16; its own SOG
+    // has not been consulted - do not assume it also equals 8), and for Apple icestorm/firestorm
     // (computeFacilePrediction() already forces NumMicroOps=1 for
     // coalesced-ROB CPUs, so PO.DispatchWidth there already IS a Mop-level
     // width and must not get a second, redundant cap).
@@ -228,6 +234,8 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
         TI.MopDispatchWidth = 6;
     } else if (TI.STI->getCPU() == "cortex-a720" || TI.STI->getCPU() == "cortex-a720ae") {
         TI.MopDispatchWidth = 5;
+    } else if (TI.STI->getCPU() == "cortex-x1" || TI.STI->getCPU() == "cortex-x1c") {
+        TI.MopDispatchWidth = 8;
     }
 
     TI.TargetAddress = 0;

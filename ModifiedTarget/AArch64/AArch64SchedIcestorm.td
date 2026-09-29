@@ -27,16 +27,11 @@ def IcestormModel : SchedMachineModel {
   // operations gives a latency of 4c. (Although the second destination
   // register in an LDP always has 4c latency.)"  The 3c figure is therefore
   // the SPECIAL CASE of a load feeding another load's base address, not the
-  // general case: general load->consumer latency is 4c on BOTH cores, measured
-  // 4.0047-4.0057 for every GPR addressing mode (base, base+imm, base+reg,
-  // base+reg lsl #N, wreg sxtw).  This model previously used 3 for all loads,
+  // general case: general load->consumer latency is 4c on BOTH cores for every
+  // GPR addressing mode (base, base+imm, base+reg, base+reg lsl #N, wreg sxtw).  This model previously used 3 for all loads,
   // i.e. it applied the pointer-chase special case universally and so
   // understated every load->ALU dependence by 1c.
-  // NOTE (2026-09-10): correcting this is metric-neutral on all benchmark
-  // datasets tested.  Almost every hot block is bound by IssueWidth or by an
-  // execution resource rather than by the precedence bound, so the load
-  // latency does not reach the answer - the same masking that the
-  // --no-facile-memory-deps note describes.  Kept as a source-fidelity fix.
+  // Kept as a source-fidelity fix.
   let MispredictPenalty = 16;
   let CompleteModel = 0;
 

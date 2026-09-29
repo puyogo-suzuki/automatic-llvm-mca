@@ -68,7 +68,7 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 *   `mlp-objdump` — Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address.
 *   `--facile` — Enable Facile static analytical throughput prediction (AArch64). Calculates analytical throughput bounds for Issue, Execution Ports, and Precedence Constraints without cycle-by-cycle simulation overhead.
 *   `--no-facile-memory-deps` — Drop store→load memory RAW edges from the `--facile` precedence graph (register dependences only). See "Memory dependences in the precedence graph" below.
-*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `firestorm`, `icestorm`).
+*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `cortex-x1`, `firestorm`, `icestorm`).
 *   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `aarch64-linux-gnu`).
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).
 *   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`, `dependency`).
@@ -136,9 +136,8 @@ Pass `--no-facile-memory-deps` to restore the register-only behaviour. Because a
 missing precedence bound is masked whenever the issue or port limit is larger,
 this matters most on the **widest** core modelled with the **coarsest** port
 table — in practice Apple FireStorm, where a hot loop's store→load D-state
-recurrence moves the block's prediction from 7 to 12 cycles against 11.7
-measured on real M1 hardware (Cortex-A76/A78 and IceStorm are unchanged on that
-block: their port/issue limits already exceeded the recurrence).
+recurrence can dominate the block's prediction (on narrower cores the port/issue
+limits usually already exceed the recurrence).
 
 ### Reference & Citation
 * **Paper**: *Facile: Fast, Accurate, and Interpretable Basic-Block Throughput Prediction*

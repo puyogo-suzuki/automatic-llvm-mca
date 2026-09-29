@@ -180,17 +180,10 @@ bool usesLocalSchedTables(llvm::StringRef CPUName) {
 // AArch64 binary.  The opcode-count guard below refuses the swap outright if a
 // future libLLVM bump breaks that agreement.
 //
-// EFFECT ON ACCURACY (2026-09-10, measured against several independent
-// benchmark datasets regenerated through analyze.bash + concat.py).  The fix
-// is NOT an accuracy win; it is a correctness fix whose net effect on
-// downstream cross-core CPI/speed-factor prediction R^2 was mixed across
-// datasets (some metrics improved, some regressed) while MAPE mostly
-// improved. Working hypothesis for the regressions: the InstRW rules in
-// ModifiedTarget/AArch64/*.td were tuned empirically WHILE the indices were
-// scrambled, so part of that tuning was compensating for the mis-indexing -
-// and worse, each added InstRW itself renumbers the classes, so it perturbed a
-// different arbitrary set of instructions each time.  Those models likely need
-// re-tuning on top of this fix rather than the fix being backed out.
+// This is a correctness fix, not an accuracy claim: InstRW rules in
+// ModifiedTarget/AArch64/*.td written while the indices were scrambled may
+// have been compensating for the mis-indexing, and each added InstRW itself
+// renumbers the classes.
 void remapSchedClassIndices(llvm::MCInstrInfo &MCII, llvm::StringRef CPUName) {
     if (!usesLocalSchedTables(CPUName))
         return;

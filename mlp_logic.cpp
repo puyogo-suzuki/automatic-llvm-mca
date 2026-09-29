@@ -858,9 +858,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
 //     excluded by default; -no-stack-exclusion turns this off.
 //   - line reuse (a load repeating the same base-register+cache-line already
 //     seen in the analyzed window): also excluded by default as of
-//     2026-09-08 (validated via shuffle-testing on real hardware data across
-//     two ARM cores to improve CPI-Stack model accuracy);
-//     -disable-always-hit-loads-heuristic turns this off. NOTE: line reuse is
+//     2026-09-08; -disable-always-hit-loads-heuristic turns this off. NOTE: line reuse is
 //     enabled by default only in the OOO code paths (--dependency ooo). The
 //     non-OOO / in-order paths (--dependency dependency|io|none, i.e. the
 //     cortex-a55 small-core configuration) apply only the stack rule unless
@@ -877,8 +875,7 @@ MemAccessInfo AArch64MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCI
 //
 //   -no-stack-exclusion
 //       Removes stack/frame-pointer always-hit treatment entirely, in both
-//       countPotentialMissLoads and compute_mlp. VALIDATED, NOT ADOPTED:
-//       measured worse across every benchmark tested. Kept for ablation.
+//       countPotentialMissLoads and compute_mlp. NOT ADOPTED; kept for ablation.
 //
 // Both functions share the same "plain mode" decision -- i.e. the case where
 // -stack-only-miss-load-count (which only exists for countPotentialMissLoads)

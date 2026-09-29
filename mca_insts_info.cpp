@@ -109,6 +109,9 @@ int main(int argc, char **argv) {
     MCTargetOptions MCOPT;
     std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
     std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
+    // libLLVM's MCInstrDesc::SchedClass uses stock numbering; the sched tables
+    // installed below are the locally generated ones.  See remapSchedClassIndices().
+    llvm::remapSchedClassIndices(*MCII, MCPU);
     std::string llvm_cpu = MCPU;
     if (MCPU == "ice" || MCPU == "icestorm" || MCPU == "fire" || MCPU == "firestorm") {
         llvm_cpu = "apple-m1";

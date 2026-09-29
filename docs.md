@@ -97,7 +97,7 @@ Cortex-A55 utilizes a non-blocking speculative branch predictor. When branch pre
         double correctedCycles = static_cast<double>(M.Cycles) - (static_cast<double>(NumSteadyIterations) * 0.5);
         M.Cycles = static_cast<unsigned>(correctedCycles + 0.5);
         ```
-        This brings the calculated loop CPI of tight blocks down to **`0.56`** (matching the actual hardware test loop CPI of **`0.57`**).
+        This brings the calculated loop CPI of tight blocks down to **`0.56`**.
 
 #### 4. Flag-Transfer Penalty and A64 Low Latency Pointer Forwarding (SOG-Compliant)
 To align the C++ simulation engine exactly with the *Cortex-A55 Software Optimization Guide (v3.0)*, we added dynamic dependency checking during the instruction dispatch phase:

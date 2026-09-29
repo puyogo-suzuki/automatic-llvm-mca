@@ -34,7 +34,8 @@ double getInstLatency(const llvm::mca::Instruction &Inst) {
 // than by just trusting any Latency==0 write.
 bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
     return STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c" ||
-           STI.getCPU() == "cortex-a720" || STI.getCPU() == "cortex-a720ae";
+           STI.getCPU() == "cortex-a720" || STI.getCPU() == "cortex-a720ae" ||
+           STI.getCPU() == "cortex-x1" || STI.getCPU() == "cortex-x1c";
 }
 
 // ---------------------------------------------------------------------------
@@ -155,8 +156,7 @@ double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
     //     cannot issue in the same cycle as a producer that really has to
     //     compute something), but a zero-latency MOV is not computed at all:
     //     there is no producer to wait for.  Charging it a cycle inflates
-    //     every dependence chain that passes through a register copy - and
-    //     copies are the single most common mnemonic in this corpus.
+    //     every dependence chain that passes through a register copy.
     //     WHY THIS IS GATED ON THE TARGET AND NOT JUST ON "Latency == 0".
     //     A zero-latency write means "renamed away" only in the N2 model.
     //     Checked every other model this tool uses, and a blanket rule would
@@ -176,13 +176,22 @@ double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
     //         MOVN, *MOVK*, FMOVDr, FMOVSr and NOP.  MOVK is a read-modify-
     //         write of its own destination (it merges a 16-bit field into the
     //         existing value) and so genuinely carries a dependence; these
-    //         models also predate this reasoning and their CSVs are not
-    //         regenerated here.  Left alone.
+    //         models are left alone here.
     //       * A720 (cortex-a720/-a720ae): see the A720 paragraph below.  Its
     //         only Latency==0 write is A720Write_0c, which - like N2's - exists
     //         solely as the zero-move arm of a SchedWriteVariant.
-    //       * A55 does not run through facile at all (analyze.bash drives it
-    //         with --dependency dependency and no --facile), and A520/V1 define
+    //       * X1 (cortex-x1/-x1c): its SOG sec. 4.15 "Zero Latency MOVs" is
+    //         word for word A78's list (MOV Xd/Wd,#0; MOV Xd/Wd,XZR/WZR;
+    //         MOV Wd,Wn; MOV Xd,Xn), and AArch64SchedNeoverseV1.td, the model
+    //         installed for it, has V1Write_0c as the zero-move arm of two
+    //         SchedWriteVariants (MOVZ[WX]i, ORR[WX]rs) exactly as N2 does.
+    //         V1 ALSO has the N1-style trap above - V1Write_0c_0Z, the
+    //         Latency-0 second write of LDPW/LDPSW/LDP[SD] - so the X1 model
+    //         replaces it with V1Write_{4,5,6}c_0Z (same latency as the load,
+    //         still zero uops); without that edit this gate would have made the
+    //         high half of every load pair free.  V1Write_0c is now the only
+    //         Latency==0 write in the model.
+    //       * A55 (in-order) is not covered by this gate, and A520 defines
     //         no Latency==0 write.
     //     So the gate is the honest scope of what has actually been verified,
     //     not a convenience.
@@ -266,11 +275,8 @@ double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
     //     MOVK is specifically NOT bound, and neither is FMOVHr (FMOV Hd,Hn),
     //     which sec. 4.12 does not list.
     //
-    //     STILL NOT VALIDATED AGAINST HARDWARE.  No measured Cortex-A720 dataset
-    //     is available (no benchmark run was collected on an A720 core), so this
-    //     change cannot be checked against real CPI in
-    //     either direction.  It rests entirely on SOG sec. 4.12 being transcribed
-    //     correctly, which is what the unit tests in tests/mlp_test.cpp assert:
+    //     NOT VALIDATED AGAINST HARDWARE.  This change rests entirely on SOG
+    //     sec. 4.12 being transcribed correctly, which is what the unit tests in tests/mlp_test.cpp assert:
     //     that the documented forms carry 0 and the deliberately excluded
     //     neighbours (non-ZR ORR, shifted ORR, MOVZ with imm > 15) still carry
     //     their normal latency.  Accuracy is NOT claimed.
@@ -353,9 +359,7 @@ const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI
 // throughput (two AES instructions per cycle, per the quote), so masking the
 // second one out of calculatePortUsageBound() would claim four AES
 // instructions per cycle and contradict the SOG.  Wiring it through this
-// mask would therefore be a modelling error, not a fix; and the benchmark
-// corpus this tool has been used on contains no AES instructions at all, so
-// there is nothing to validate a separate latency-path change against.
+// mask would therefore be a modelling error, not a fix.
 // ---------------------------------------------------------------------------
 // A78 SOG correction: integer register-offset loads/stores on Cortex-A78 do
 // NOT use an integer (I) pipe.
@@ -439,6 +443,19 @@ bool isA78FusionCandidate(const llvm::MCSubtargetInfo &STI) {
     return STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c";
 }
 
+// Cortex-X1 SOG (PJDOC-466751330-12804 Issue 4.0) "Instruction fusion" prints
+// a STRICT SUBSET of A78 sec. 4.14:
+//   1. CMP/CMN (immediate) + B.cond     4. TST (register) + B.cond
+//   2. CMP/CMN (register) + B.cond      5. BICS (register) + B.cond
+//   3. TST (immediate) + B.cond         6. NOP + Any instruction
+// i.e. A78 items 1,2,7,8,9,10 - the CMP + CSEL and CMP + CSET rows (A78 items
+// 3-6) do NOT exist on the X1.  (The AESE+AESMC / AESD+AESIMC list is the same
+// and is left out for the reason given for the A78.)  The A78 machinery is
+// reused with the select/set consumers switched off; see isA78FusiblePair().
+bool isX1FusionCandidate(const llvm::MCSubtargetInfo &STI) {
+    return STI.getCPU() == "cortex-x1" || STI.getCPU() == "cortex-x1c";
+}
+
 // mca::Instruction::getDefs() elides writes to the discarded zero register
 // (nothing can ever depend on WZR/XZR's value, so the register-renaming
 // dependency tracker doesn't bother recording it) -- so whether a
@@ -520,10 +537,14 @@ A78Consumer classifyA78Consumer(const llvm::MCInstrInfo &MCII, const llvm::mca::
 // The sec. 4.14 pairing table, transcribed row by row.  Producers down,
 // consumers across; see the big comment on isA78FusionCandidate() for why
 // this is NOT the cross product of the two sets.
-bool isA78FusiblePair(A78Producer P, A78Consumer C) {
+//
+// `HasSelectFusion` is false for the Cortex-X1, whose SOG omits items 3-6
+// (CMP + CSEL / CSET); see isX1FusionCandidate().
+bool isA78FusiblePair(A78Producer P, A78Consumer C, bool HasSelectFusion = true) {
     switch (P) {
     case A78Producer::CMP:  // items 1,2 (+B.cond), 3,4 (+CSEL), 5,6 (+CSET)
-        return C == A78Consumer::BCOND || C == A78Consumer::CSEL || C == A78Consumer::CSET;
+        return C == A78Consumer::BCOND ||
+               (HasSelectFusion && (C == A78Consumer::CSEL || C == A78Consumer::CSET));
     case A78Producer::CMN:  // items 1,2 only -- CMN is absent from items 3-6
         return C == A78Consumer::BCOND;
     case A78Producer::TST:  // items 7,8 only
@@ -556,7 +577,8 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
                                       llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                       llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
     std::vector<bool> Fused(SimInstrs.size(), false);
-    if (!isA78FusionCandidate(STI) || SimInstrs.size() < 2)
+    const bool IsX1 = isX1FusionCandidate(STI);  // A78 table minus the CSEL/CSET rows
+    if (!(isA78FusionCandidate(STI) || IsX1) || SimInstrs.size() < 2)
         return Fused;
     auto McAt = [&](size_t i) -> const llvm::MCInst * {
         return (i < MCInsts.size()) ? MCInsts[i] : nullptr;
@@ -571,7 +593,8 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
             ++i; // the successor is consumed by this pair
             continue;
         }
-        if (isA78FusiblePair(P, classifyA78Consumer(MCII, *SimInstrs[i + 1], McAt(i + 1)))) {
+        if (isA78FusiblePair(P, classifyA78Consumer(MCII, *SimInstrs[i + 1], McAt(i + 1)),
+                             /*HasSelectFusion=*/!IsX1)) {
             Fused[i + 1] = true;
             ++i;
         }
@@ -616,18 +639,15 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
 // all three in the direction of OVER-fusing (i.e. under-predicting cycles):
 //
 //  (1) A720 DOES NOT DOCUMENT "NOP + Any instruction".  A78 sec. 4.14 item 10
-//      has no counterpart anywhere in A720 sec. 4.11.  This is not a rounding
-//      difference: counting adjacent static pairs over a corpus of 25 real
-//      benchmark binaries (6,744,507 instructions)
-//      finds 92,102 NOP+Any pairs - by far the most frequent A78 fusion.
-//      Reusing A78's table for A720 would silently delete 92,102 instructions'
-//      worth of issue slots and port cycles that A720's SOG never says are
-//      free.
+//      has no counterpart anywhere in A720 sec. 4.11.  NOP is common in real
+//      code, and reusing A78's table for A720 would silently delete every
+//      such NOP's issue slot and port cycles, which A720's SOG never says
+//      are free.
 //
 //  (2) A720 restricts the register form of CMP/CMN + B.cond to "Rn != ZR";
-//      A78 prints the same row with no such qualifier.  22 static pairs in
-//      the corpus are CMP/CMN (register) with Rn == ZR followed by B.cond -
-//      fusible on A78, NOT fusible on A720.  Note the qualifier is printed on
+//      A78 prints the same row with no such qualifier.  A CMP/CMN
+//      (register) with Rn == ZR followed by B.cond is fusible on A78, NOT
+//      fusible on A720.  Note the qualifier is printed on
 //      the B.cond row ONLY; the "CMP (register) + CSEL" and "CMP (register) +
 //      CSET" rows carry no Rn restriction, so - transcribing exactly as
 //      printed, which is the same discipline the A78 table needed - the
@@ -637,8 +657,8 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
 //      implementation above deliberately accepts a real (non-ZR) destination
 //      because A78's SOG names BICS by its own mnemonic with no destination
 //      qualifier.  A720 names the destination explicitly, so on A720 the BICS
-//      must discard its result into WZR/XZR.  10 static pairs in the corpus
-//      are non-ZR-destination BICS + B.cond: fusible on A78, not on A720.
+//      must discard its result into WZR/XZR.  A non-ZR-destination
+//      BICS + B.cond is fusible on A78, not on A720.
 //
 // NOT MODELLED HERE, DELIBERATELY - and why, row by row:
 //
@@ -653,33 +673,26 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
 //     latency/forwarding effect on a dependent pair, not the issue-slot and
 //     port elimination FusedMask expresses - both halves still occupy V-pipe
 //     throughput, so masking the second out would claim four AES instructions
-//     per cycle and contradict sec. 4.6.  The corpus contains no AES
-//     instructions at all, so there is nothing to validate a latency-path
-//     change against either.
+//     per cycle and contradict sec. 4.6.
 //
 //   * SHL + SRI, and FCMP + AXFLAG.  Both are genuine issue-slot fusions and
-//     would be correct to model, but neither can ever fire on this corpus:
-//     scanning all 25 binaries finds ZERO SRI instructions and ZERO AXFLAG
-//     instructions (AXFLAG is Armv8.5 FEAT_FlagM2, which these builds predate).
-//     Implementing them would be unexecutable code that no test or dataset
-//     available could distinguish from a no-op, so they are recorded here
-//     rather than written.  If a future corpus contains SRI or AXFLAG, add
+//     would be correct to model, but are not implemented because no test
+//     exercises them (AXFLAG is Armv8.5 FEAT_FlagM2).  They are recorded here
+//     rather than written.  To add them, add
 //     them as SHL->SRI (matched on both operands being scalar, or both vector)
 //     and FCMP->AXFLAG rows in isA720FusiblePair().
 //
-//   * BTI + Integer DP/BR/BLR/RET/B uncond/CBZ/TBZ.  This one DOES occur - 57
-//     BTI instructions corpus-wide, 52 of them followed by a listed consumer -
-//     but every single occurrence is a function-entry landing pad in CRT or
-//     libgcc glue (_start, frame_dummy, __eqtf2, __letf2), i.e. never inside a
-//     loop body, which is the only thing facile is ever asked to analyse.
-//     Modelling it would therefore change no prediction this tool can make,
-//     while requiring a definition of "Integer DP" that the SOG does not give
+//   * BTI + Integer DP/BR/BLR/RET/B uncond/CBZ/TBZ.  BTI is a
+//     function-entry landing pad, i.e. normally not inside a loop body, which
+//     is the only thing facile is ever asked to analyse.  Modelling it would
+//     therefore change almost no prediction this tool can make, while
+//     requiring a definition of "Integer DP" that the SOG does not give
 //     precisely enough to encode without guessing.  Recorded, not written.
 //
 //   * MOVPRFX + supported SVE instruction.  CortexA720Model in
 //     AArch64SchedA720.td declares `UnsupportedFeatures = SVEUnsupported.F`,
 //     so SVE instructions carry no scheduling data in this model at all, and
-//     the corpus contains zero MOVPRFX instructions.  Out of scope twice over.
+//     MOVPRFX only has a use together with SVE.  Out of scope twice over.
 // ---------------------------------------------------------------------------
 bool isA720FusionCandidate(const llvm::MCSubtargetInfo &STI) {
     return STI.getCPU() == "cortex-a720" || STI.getCPU() == "cortex-a720ae";
@@ -826,7 +839,9 @@ std::vector<bool> computeA720FusedMask(const llvm::MCSubtargetInfo &STI,
 
 // Per-target dispatch.  Each core gets its OWN SOG's table; there is
 // deliberately no shared "Arm fusion" path, because A78 sec. 4.14 and A720
-// sec. 4.11 disagree on three rows (see the table above).
+// sec. 4.11 disagree on three rows (see the table above).  The X1 is the
+// A78 table with the CSEL/CSET rows removed, handled inside
+// computeA78FusedMask().
 std::vector<bool> computeFusedMask(const llvm::MCSubtargetInfo &STI,
                                    const llvm::MCInstrInfo &MCII,
                                    llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
@@ -1035,29 +1050,16 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
 // (uops / issue width) is larger anyway and still wins the max; it becomes
 // visible exactly on the WIDEST core of a pair, whose IssueBound is smallest.
 // A dynamic-programming inner loop with a memory-carried D-state recurrence is
-// the textbook case.  The block at
-// 0xcc2c..0xcd18 (59 instructions, 17 loads, 10 stores) carries the serial
-// recurrence
+// the textbook case; such a block carries the serial recurrence
 //     str w2, [x5, x0, lsl #2]   ; dc[k]        (iteration k)
 //     ...
 //     ldr w3, [x5, x1]           ; dc[k-1]      (iteration k+1)
 //     add w3, w3, w2  /  cmp  /  csel  /  cmp  /  csel  /  str
 // i.e. a memory round trip plus a 5-deep flag/select chain, which no register
 // edge can see because the value never stays in a register across the
-// backedge.  Measured on real M1: IceStorm needs 15.9
-// cycles for the block and its IssueBound of 59/4 = 14.75 already covers that,
-// so IceStorm's prediction (15) is accidentally right.  FireStorm needs 11.7
-// cycles but its IssueBound is only 59/8 = 7.375, so the model predicted 7 --
-// and the missing cycles are precisely the ones that show up in FireStorm's
-// MAP_STALL_DISPATCH counter (30% of its cycles on this benchmark, versus 4.5% on
-// IceStorm, the largest such ratio in the benchmark suite tested): the mapper
-// cannot dispatch because the scheduler is backed up behind a recurrence the
-// model does not know about.  Dougall Johnson's measured port throughputs
-// cannot explain that gap and were confirmed innocent: on FireStorm every
-// resource bound for this block is at or below the issue bound (LDR TP 0.333
-// on u8-10 -> 17/3 = 5.67; STR TP 0.5 on u7/8 -> 10/2 = 5; CMP/CSEL TP 0.333
-// on u1-3 -> 18/3 = 6; ADD TP 0.167 on u1-6 -> 12/6 = 2).  The bottleneck is
-// a dependence, not a port.
+// backedge.  Such a recurrence bounds the block from below regardless of the
+// issue width, so it becomes visible exactly on the widest core, where the
+// IssueBound is smallest: the bottleneck is a dependence, not a port.
 //
 // MAY-ALIAS RULE.  Deliberately the same conservative-but-cheap rule the MLP
 // analyser's SeenStoreAddrs already uses, with no new tunable:
@@ -1081,7 +1083,7 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
 // edge, so a store->load round trip costs WriteST + WriteLD = 1 + 3 = 4
 // cycles, i.e. store-to-load forwarding is modelled as no slower than an L1
 // hit.  That is the optimistic end of the plausible range and introduces NO
-// new constant; a larger, separately-measured store-forwarding latency would
+// new constant; a larger store-forwarding latency would
 // only raise the bound further, so this errs toward under- rather than
 // over-prediction.
 // ---------------------------------------------------------------------------
