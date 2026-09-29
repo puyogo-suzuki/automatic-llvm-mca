@@ -89,96 +89,12 @@ bool usesLocalSchedTables(llvm::StringRef CPUName) {
     return getCpuTraits(CPUName).Model != CpuModel::None;
 }
 
-// Re-point MCInstrInfo at the LOCALLY re-generated AArch64 instruction
-// descriptor table, so that MCInstrDesc::SchedClass carries OUR TableGen
-// numbering instead of stock libLLVM's.
-//
-// WHY THIS IS NEEDED (2026-09-10).  The tool mixes two independently generated
-// halves of the same AArch64 target description:
-//
-//   (a) frontend.cpp calls TheTarget->createMCInstrInfo(), i.e. the MCInstrDesc
-//       array COMPILED INTO the installed libLLVM-22 (22.1.8).  Its
-//       MCInstrDesc::SchedClass values use the numbering that stock
-//       AArch64.td produces.
-//   (b) overrideCortexA55SchedModel() below installs FirestormModelSchedClasses
-//       et al. from build/AArch64GenSubtargetInfo.inc, which this project
-//       re-generates from AArch64.td plus ModifiedTarget/AArch64/*.td.  Those
-//       extra files (AArch64SchedIcestorm.td, AArch64SchedFirestorm.td, and the
-//       modified A55/N1/N2/V1/A520/A720 models) declare additional InstRW rules,
-//       and every InstRW that partitions an existing SchedClass makes TableGen
-//       CREATE new SchedClass records.  Our class list is 2324 entries; stock's
-//       is 2050.  The two numberings therefore DIVERGE, and MCA was indexing
-//       table (b) with indices from table (a).
-//
-// Measured extent of the mismatch (all 9135 AArch64 opcodes compared, stock
-// libLLVM vs build/AArch64GenInstrInfo.inc):
-//   - opcode numbering:      0 / 9131 mismatched (the two .td revisions agree)
-//   - SchedClass numbering:  1051 / 9131 mismatched (11.5%)
-//   - first divergence at class 498 (stock) / 499 (ours); delta is +1 for 953
-//     opcodes, and -776..+738 for the rest.
-// Stock's largest SchedClass index (2049) stays below our NumSchedClasses
-// (2324), so the mis-indexing never read out of bounds - it silently returned
-// ANOTHER instruction's latency and port assignment, which is why it survived
-// unnoticed.
-//
-// The symptom that exposed it: `fmadd d31, d30, d29, d31` simulated at 3c
-// instead of 4c.  FMADDDrrr is Sched<[WriteFMul]> (AArch64InstrFormats.td:5953)
-// and WriteFMul is Latency=4 in both Apple models, so the .td was already
-// correct - but stock libLLVM hands MCA SchedClass 649, and OUR class 649 is
-// FADDDrr_FADDSrr_FSUBDrr_FSUBSrr (WriteF, Latency=3).  Our FMADD class is 650.
-// That is why the previous attempts failed to move the number: editing
-// WriteFMul's latency, or adding an InstRW for the FMADD family, both correctly
-// changed class 650, while the simulation kept reading class 649.  Plain `fmul`
-// appeared right only because FMULDrr's stock and local indices happen to agree.
-//
-// WHY THE WHOLE TABLE, and not just the SchedClass field.  Two reasons, both
-// found the hard way:
-//
-//  1. A per-class translation (rewriting table (b) into stock numbering) is
-//     impossible in principle.  The two numberings are not a shift, they are
-//     DIFFERENT PARTITIONS of the instruction set - stock puts FMADDDrrr in
-//     class 649 and FADDDrr in 1343, we put FADDDrr in 649 and FMADDDrrr in
-//     650.  Our extra InstRW rules exist precisely to split stock classes, so
-//     one stock class index can correspond to several of ours and cannot carry
-//     their differing latencies.  The remap has to be per-OPCODE.
-//  2. A per-opcode copy of the descriptors (std::vector<MCInstrDesc> with the
-//     SchedClass field overwritten) is also impossible: MCInstrDesc is
-//     explicitly non-copyable-in-practice, because it locates its own operand
-//     and implicit-operand arrays from its OWN ADDRESS -
-//     MCInstrDesc::operands() is `reinterpret_cast<const MCOperandInfo *>(this
-//     + Opcode + 1) + OpInfoOffset` (MCInstrDesc.h:240), which only resolves
-//     inside the generated <Target>InstrTable struct, where Insts[] is stored
-//     in DESCENDING opcode order and is immediately followed by ImplicitOps[]
-//     and OperandInfo[].  Copying the descs elsewhere sends operands() into
-//     unrelated heap memory; the first attempt at this fix aborted on every
-//     input, including a two-instruction `nop; ret`.
-//
-// So install our AArch64Descs wholesale, via the InitAArch64MCInstrInfo() that
-// TableGen emits alongside it - exactly the call libLLVM's own
-// createMCInstrInfo() makes, just with our table.  That keeps Insts /
-// ImplicitOps / OperandInfo mutually consistent, and makes SchedClass agree
-// with the sched-class tables installed by overrideCortexA55SchedModel().
-//
-// SAFETY of swapping in a table generated from llvm-source (LLVM main) while
-// linking libLLVM-22.1.8.  Verified field by field over all 9135 opcodes, our
-// table against libLLVM's: SchedClass is the ONLY field that differs anywhere.
-//   SchedClass            1051 differ
-//   Flags 0    TSFlags 0    NumOperands 0    NumDefs 0    Size 0
-//   NumImplicitUses 0    NumImplicitDefs 0    OpInfoOffset 0
-//   opcode slot ordering  exact match (our Insts[N-1-i].Opcode == i for all i)
-// So this is a pure SchedClass correction: it cannot change mayLoad / mayStore
-// / isBranch / operand shape, and any change in simulation output is
-// attributable to the sched-class mapping alone.  The only 4 instruction NAMES
-// that differ (LOAD_STACK_GUARD, PATCHABLE_EVENT_CALL,
-// PATCHABLE_TYPED_EVENT_CALL, PREALLOCATED_ARG, emitted as anonymous_* by our
-// run) are generic TargetOpcode pseudos that never occur in a disassembled
-// AArch64 binary.  The opcode-count guard below refuses the swap outright if a
-// future libLLVM bump breaks that agreement.
-//
-// This is a correctness fix, not an accuracy claim: InstRW rules in
-// ModifiedTarget/AArch64/*.td written while the indices were scrambled may
-// have been compensating for the mis-indexing, and each added InstRW itself
-// renumbers the classes.
+// Re-point MCInstrInfo at the LOCALLY re-generated AArch64 instruction descriptor
+// table, so that MCInstrDesc::SchedClass carries OUR TableGen numbering instead of
+// stock libLLVM's (which differs for ~11% of opcodes once ModifiedTarget/*.td add
+// InstRW rules).  This is a correctness fix, not an accuracy claim.  The full
+// rationale, the measured extent of the mismatch and the safety checks:
+// docs.md section 5.A.
 void remapSchedClassIndices(llvm::MCInstrInfo &MCII, llvm::StringRef CPUName) {
     if (!usesLocalSchedTables(CPUName))
         return;

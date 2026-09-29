@@ -18,33 +18,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-// LOCAL USE: this file is compiled into the tool's own AArch64GenSubtargetInfo
-// tables, and custom_a55_sched.cpp installs NeoverseV1Model ONLY for
-// cortex-x1 / cortex-x1c (neoverse-v1 keeps libLLVM's stock model), so the
-// machine parameters below are the Cortex-X1's, not the Neoverse V1's.
-//
-// Pipeline parameters (Cortex-X1):
-//   Decode width           5   -- NOT modelled (see below).  Not stated in the SOG;
-//                                 supplied by the project owner together with the
-//                                 scheduler-entry count below.
-//   Alloc/Rename width     8   -- "up to 8 MOPs per cycle" (X1 SOG PJDOC-466751330-12804
-//                                 sec. 4.1); carried out-of-band as
-//                                 TargetInfo::MopDispatchWidth (frontend.cpp).
-//   Issue (dispatch) width 16  -- "dispatch up to 16 uOPs per cycle" (same sentence);
-//                                 IssueWidth below, also PipelineOptions::DispatchWidth.
-//   ROB                    224 -- MicroOpBufferSize below.
-//   Scheduler entries      150 -- NOT modelled (see below); also owner-supplied.
-//
-// NOT MODELLED, on purpose, exactly as for the Cortex-A78 (whose 4-wide
-// decode / scheduler size are likewise absent from AArch64SchedNeoverseN2.td):
-//   * Decode width.  Neither llvm::MCSchedModel nor MCA has a decode stage, and
-//     the tool bounds hot-loop front-end throughput by the rename/dispatch
-//     width (MopDispatchWidth), the same convention as the A76/A78/A720.
-//   * Scheduler entries.  MCA's only handle is a per-ProcResource BufferSize,
-//     i.e. one queue per pipe/group, and the SOG does not say how the 150
-//     entries are split over the fifteen issue pipelines.  Inventing a split
-//     would add stalls the hardware need not have, so the queues stay
-//     unbounded (BufferSize = -1) and the ROB is the only window limit.
+// LOCAL USE: compiled into the tool's own tables and installed ONLY for
+// cortex-x1 / cortex-x1c (neoverse-v1 keeps libLLVM's stock model), so the machine
+// parameters below are the Cortex-X1's.  Issue width 16 uOPs/cycle, ROB 224; the
+// 8-Mop rename width lives in cpu_traits.cpp; decode width (5) and scheduler
+// entries (150) are not modelled.  See docs.md section 1.D.
 def NeoverseV1Model : SchedMachineModel {
   let IssueWidth            =  16; // uOPs dispatched per cycle (X1 SOG sec. 4.1).
   let MicroOpBufferSize     = 224; // Cortex-X1 re-order buffer.
