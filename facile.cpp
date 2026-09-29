@@ -356,6 +356,85 @@ const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI
 // mask would therefore be a modelling error, not a fix; and the benchmark
 // corpus this tool has been used on contains no AES instructions at all, so
 // there is nothing to validate a separate latency-path change against.
+// ---------------------------------------------------------------------------
+// A78 SOG correction: integer register-offset loads/stores on Cortex-A78 do
+// NOT use an integer (I) pipe.
+//
+// cortex-a78 borrows NeoverseN2Model (AArch64Processors.td), whose
+//   SchedAlias<WriteLDIdx, N2Write_4c_1I_1L>        (every reg-offset load)
+//   SchedAlias<WriteSTIdx, N2Write_1c_1L01_1D_1I>   (every reg-offset store)
+// charge one extra N2UnitI uop to EVERY integer register-offset access. The
+// Arm Cortex-A78 Core SOG (PJDOC-466751330-9691 Issue 4.0, Table 3-12/3-14)
+// says otherwise:
+//   Load register, register offset, basic            4  3  L
+//   Load register, register offset, scale by 4/8     4  3  L
+//   Load register, register offset, scale by 2       5  3  I, L   (LDRH/LDRSH)
+//   Load register, register offset, extend           4  3  L
+//   Load register, register offset, extend, sc. 4/8  4  3  L
+//   Load register, register offset, extend, sc. 2    5  3  I, L   (LDRH/LDRSH)
+//   Store register, register offset, basic/scaled 4/8/extend  1 2 L01, D
+//   Store register, register offset, scaled by 2 (STRH)       2 2 I, L01, D
+// i.e. only the halfword forms WITH a shift need the I uop. (Cortex-A76's
+// NeoverseN1Model already has WriteLDIdx = 1L, WriteSTIdx = 1L_1D, matching
+// the A76 SOG, which is why only the A78 is affected.) Consequence of the bug:
+// integer-ALU-heavy loops with many indexed accesses (e.g. a 59-instruction
+// loop with 17 LDRWroX + 10 STRWroX) become falsely N2UnitI-bound.
+
+// A78 SOG correction: NeoverseN2Model gives several Cortex-A78 instructions
+// a MULTI-cycle occupancy of the single M0 pipe although the A78 SOG lists
+// them as fully pipelined (throughput 1):
+//   SCVTF/UCVTF (gen->vec)  N2Write_3c_1M0  ReleaseAtCycles=3   SOG 3-18: lat 3, thr 1, M0
+//   FMOV W/X -> S/D/H       N2Write_0or3c_1M0 (3)               SOG: lat 3, thr 1, M0
+//   DUP (vector, from GPR)  N2Write_3c_1M0 (3)                  SOG 3-26: lat 3, thr 1, M0
+// and LDPSW, which the SOG lists as "5, 3/2, I, L" (as NeoverseN1Model
+// models it for the A76: N1Write_5c_1I_1L), is modelled as N2Write_5c_1M0
+// (5 cycles of M0, no load pipe at all).
+//
+// A76/A78 model-convention alignment: both the A76 and
+// the A78 SOG give integer divide "latency 5 to 12(20), throughput 1/12(20)
+// to 1/5". NeoverseN1Model (A76) occupies its divider for the BEST case (5,
+// N1Write_12c5_1M / N1Write_20c5_1M); NeoverseN2Model (A78) for the WORST
+// case (12 / 20). This is a convention mismatch between the two borrowed
+// upstream models, not a hardware difference; the A76 model's occupancy (5)
+// is applied to the A78 so the two cores are modelled alike. Always on since
+
+enum class A78ResOverride { None, OccupancyCap1, LDPSW, DivCap5 };
+static A78ResOverride classifyA78ResOverride(const llvm::MCSubtargetInfo &STI, const llvm::MCInstrInfo &MCII,
+                                             const llvm::mca::Instruction &Inst) {
+    llvm::StringRef CPU = STI.getCPU();
+    if (!(CPU == "cortex-a78" || CPU == "cortex-a78ae" || CPU == "cortex-a78c")) return A78ResOverride::None;
+    llvm::StringRef N = MCII.getName(Inst.getOpcode());
+    if ((N == "SDIVWr" || N == "UDIVWr" || N == "SDIVXr" || N == "UDIVXr"))
+        return A78ResOverride::DivCap5;
+    if (N == "LDPSWi" || N == "LDPSWpost" || N == "LDPSWpre") return A78ResOverride::LDPSW;
+    if (N == "FMOVWHr" || N == "FMOVXHr" || N == "FMOVWSr" || N == "FMOVXDr") return A78ResOverride::OccupancyCap1;
+    if ((N.starts_with("SCVTF") || N.starts_with("UCVTF")) && N.ends_with("ri") && N.size() == 10)
+        return A78ResOverride::OccupancyCap1;  // [SU]CVTF[SU][WX][HSD]ri
+    if (N.starts_with("DUPv") && N.ends_with("gpr")) return A78ResOverride::OccupancyCap1;
+    return A78ResOverride::None;
+}
+
+static bool isA78RegOffsetNoAlu(const llvm::MCSubtargetInfo &STI, const llvm::MCInstrInfo &MCII,
+                                const llvm::mca::Instruction &Inst, const llvm::MCInst *MCI) {
+    llvm::StringRef CPU = STI.getCPU();
+    if (!(CPU == "cortex-a78" || CPU == "cortex-a78ae" || CPU == "cortex-a78c")) return false;
+    llvm::StringRef N = MCII.getName(Inst.getOpcode());
+    if (!(N.ends_with("roW") || N.ends_with("roX"))) return false;
+    llvm::StringRef B = N.drop_back(3);
+    static const char *always[] = {"LDRBB", "LDRW", "LDRX", "LDRSBW", "LDRSBX", "LDRSW", "PRFM",
+                                   "STRBB", "STRW", "STRX"};
+    for (const char *a : always) if (B == a) return true;
+    static const char *half[] = {"LDRHH", "LDRSHW", "LDRSHX", "STRHH"};
+    for (const char *h : half) {
+        if (B == h) {
+            // operand 4 = "do shift" flag of the addressing mode (Rt, Rn, Rm, sign-ext, shift)
+            if (!MCI || MCI->getNumOperands() < 5 || !MCI->getOperand(4).isImm()) return false;
+            return MCI->getOperand(4).getImm() == 0;  // unscaled halfword: L only
+        }
+    }
+    return false;  // FP/SIMD reg-offset forms: left to the model (see SOG Table 3-18)
+}
+
 bool isA78FusionCandidate(const llvm::MCSubtargetInfo &STI) {
     return STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c";
 }
@@ -778,7 +857,8 @@ double calculateIssueBound(const llvm::MCSchedModel &SM,
                             unsigned &TotalUops,
                             unsigned DispatchWidthOverride,
                             unsigned MopWidth,
-                            const std::vector<bool> &FusedMask) {
+                            const std::vector<bool> &FusedMask,
+                            const std::vector<bool> &NoAluMask = {}) {
     unsigned IssueWidth = DispatchWidthOverride > 0 ? DispatchWidthOverride
                          : (SM.IssueWidth > 0 ? SM.IssueWidth : 1);
     TotalUops = 0;
@@ -787,6 +867,7 @@ double calculateIssueBound(const llvm::MCSchedModel &SM,
         if (i < FusedMask.size() && FusedMask[i])
             continue;
         unsigned NumUops = SimInstrs[i]->getNumMicroOps();
+        if (i < NoAluMask.size() && NoAluMask[i] && NumUops > 1) --NumUops;  // A78 SOG reg-offset correction
         TotalUops += (NumUops > 0 ? NumUops : 1);
         ++NumMops; // one Mop per non-fused instruction (see comment above)
     }
@@ -803,7 +884,8 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
                                llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                llvm::ArrayRef<const llvm::MCInst *> MCInsts,
                                std::string &BottleneckPortName,
-                               const std::vector<bool> &FusedMask) {
+                               const std::vector<bool> &FusedMask,
+                               const std::vector<bool> &NoAluMask = {}) {
     const llvm::MCSchedModel &SM = STI.getSchedModel();
     unsigned NumProcResources = SM.NumProcResourceKinds;
     std::vector<double> ProcResUsage(NumProcResources, 0.0);
@@ -818,11 +900,28 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
         const llvm::MCSchedClassDesc *SCDesc = resolveSchedClass(STI, MCII, MCID.getSchedClass(), MCI);
         if (!SCDesc) continue;
 
+        A78ResOverride Ovr = classifyA78ResOverride(STI, MCII, *Inst);
+        if (Ovr == A78ResOverride::LDPSW) {  // A78 SOG: LDPSW "I, L", 3/2 per cycle
+            for (unsigned r = 1; r < NumProcResources; ++r) {
+                const llvm::MCProcResourceDesc *P = SM.getProcResource(r);
+                if (!P || !P->Name) continue;
+                llvm::StringRef PN(P->Name);
+                if (PN == "N2UnitI") ProcResUsage[r] += 1;
+                if (PN == "N2UnitL") ProcResUsage[r] += 2;
+            }
+            continue;
+        }
         for (const llvm::MCWriteProcResEntry *WPR = STI.getWriteProcResBegin(SCDesc);
              WPR != STI.getWriteProcResEnd(SCDesc); ++WPR) {
             unsigned ProcResIdx = WPR->ProcResourceIdx;
             unsigned Cycles = WPR->ReleaseAtCycle - WPR->AcquireAtCycle;
             if (Cycles == 0) continue; // Skip entries that consume 0 resource cycles
+            if (Ovr == A78ResOverride::OccupancyCap1) Cycles = std::min(Cycles, 1u);
+            if (Ovr == A78ResOverride::DivCap5) Cycles = std::min(Cycles, 5u);
+            if (i < NoAluMask.size() && NoAluMask[i]) {  // A78 SOG reg-offset correction
+                const llvm::MCProcResourceDesc *P = SM.getProcResource(ProcResIdx);
+                if (P && P->Name && llvm::StringRef(P->Name) == "N2UnitI") continue;
+            }
             if (ProcResIdx < NumProcResources) {
                 ProcResUsage[ProcResIdx] += Cycles;
             }
@@ -1266,12 +1365,15 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     }
 
     std::vector<bool> FusedMask = computeFusedMask(STI, MCII, SimInstrs, MCInsts);
+    std::vector<bool> NoAluMask(SimInstrs.size(), false);
+    for (size_t i = 0; i < SimInstrs.size(); ++i)
+        NoAluMask[i] = isA78RegOffsetNoAlu(STI, MCII, *SimInstrs[i], i < MCInsts.size() ? MCInsts[i] : nullptr);
 
     // 1. Issue Limit
-    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, MopWidth, FusedMask);
+    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, MopWidth, FusedMask, NoAluMask);
 
     // 2. Execution Ports Limit
-    Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask);
+    Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask, NoAluMask);
 
     // 3. Precedence Constraints Limit
     auto Adj = buildDependencyGraph(STI, SimInstrs);

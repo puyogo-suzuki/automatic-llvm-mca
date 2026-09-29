@@ -27,10 +27,26 @@
 using namespace llvm;
 using namespace llvm::object;
 
-
+// EXPERIMENTAL (opt-in, default off): print the facile cycle estimate unrounded.
+// M.Cycles is std::round(EstimatedCycles); for short regions on a wide core
+// (e.g. an 8-instr region at ~1.6 cycles on the A78) that quantisation alone is
+// a +-0.5 cycle (up to ~30%) error in BB_CPI. The unrounded value is
+// BaseCPI * RetiredInstructions = EstimatedCycles exactly.
+static cl::opt<bool> FractionalCycles("fractional-cycles",
+    cl::desc("EXPERIMENTAL: print facile cycles unrounded (%.3f) instead of rounded to an integer"),
+    cl::init(false));
 
 static void printResultCsv(uint64_t StartAddr, uint64_t EndAddr, uint64_t AnalysisStartAddr, uint64_t AnalysisEndAddr,
                            size_t Length, bool isLoop, const McaMetrics &M) {
+    if (FractionalCycles && M.BaseCPI > 0.0) {
+        std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%.3f,%.2f,%.2f",
+                    StartAddr, EndAddr, AnalysisStartAddr, AnalysisEndAddr,
+                    static_cast<unsigned long>(Length),
+                    isLoop ? 1 : 0,
+                    static_cast<unsigned long>(M.RetiredInstructions),
+                    static_cast<unsigned long>(M.LoadInstructions),
+                    M.BaseCPI * static_cast<double>(M.RetiredInstructions), M.MLP, M.MLP_R);
+    } else
     std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f",
                 StartAddr, EndAddr, AnalysisStartAddr, AnalysisEndAddr,
                 static_cast<unsigned long>(Length),
