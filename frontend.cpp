@@ -1,4 +1,5 @@
 #include "frontend.h"
+#include "cpu_traits.h"
 #include "custom_a55_sched.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -190,53 +191,20 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     }
     TI.PO.MicroOpQueueSize = SM.MicroOpBufferSize;
     TI.PO.DispatchWidth = SM.IssueWidth;
-    if (TI.STI->getCPU() == "cortex-a76" || TI.STI->getCPU() == "cortex-a76ae" || TI.STI->getCPU() == "neoverse-n1") {
-        TI.PO.DispatchWidth = 8;
-    } else if (TI.STI->getCPU() == "cortex-a78" || TI.STI->getCPU() == "cortex-a78ae" || TI.STI->getCPU() == "cortex-a78c") {
-        TI.PO.DispatchWidth = 12;
-    } else if (TI.STI->getCPU() == "cortex-a710" || TI.STI->getCPU() == "cortex-a715" || TI.STI->getCPU() == "cortex-a720" || TI.STI->getCPU() == "cortex-a720ae" || TI.STI->getCPU() == "neoverse-n2") {
-        TI.PO.DispatchWidth = 10;
-    } else if (TI.STI->getCPU() == "cortex-x1" || TI.STI->getCPU() == "cortex-x1c" || TI.STI->getCPU() == "neoverse-v1") {
-        TI.PO.DispatchWidth = 16;
-    }
+    // Real uop dispatch width and the SOG's Mop cap come from cpu_traits.cpp
+    // (which also documents where each number comes from).  The Mop cap is a
+    // SECOND front-end constraint independent of PO.DispatchWidth (the uop
+    // cap): every one of these SOGs states "the dispatch stage can process up
+    // to N Mops per cycle and dispatch up to M uops per cycle", and since
+    // AArch64 averages ~1.1-1.3 uops/inst the Mop cap is the tighter of the
+    // two.  See frontend.h's MopDispatchWidth comment for why it can't come
+    // from llvm::MCSchedModel itself.  0 = not applied, see
+    // calculateIssueBound().
+    const CpuTraits &Traits = getCpuTraits(TI.STI->getCPU());
+    if (Traits.UopDispatchWidth)
+        TI.PO.DispatchWidth = Traits.UopDispatchWidth;
     TI.PO.AssumeNoAlias = true;
-
-    // Macro-op (Mop) decode/dispatch cap, a SECOND front-end constraint
-    // independent of PO.DispatchWidth above (which is the uop cap). Every one
-    // of these cores' SOGs states this as "the dispatch stage can process up
-    // to N Mops per cycle and dispatch up to M uops per cycle" - two
-    // independent numbers, and since AArch64 averages ~1.1-1.3 uops/inst, the
-    // Mop cap is the tighter (~1.75x) of the two and was previously never
-    // modeled (facile.cpp's calculateIssueBound() only ever saw the uop
-    // number). See frontend.h's MopDispatchWidth comment for why this can't
-    // come from llvm::MCSchedModel itself.
-    //   cortex-a76 (+ae, neoverse-n1): A76 SOG (PJDOC-466751330-7215) sec 4.1
-    //     p.41, "The dispatch stage can process up to 4 Mops per cycle".
-    //   cortex-a78 (+ae, c): A78 SOG sec 4.1 p.51-52 ("6 MOPs per cycle").
-    //   cortex-a720 (+ae): A720 SOG sec 4.1 ("5 MOPs per cycle").
-    //   cortex-x1 (+c): X1 SOG (PJDOC-466751330-12804) sec 4.1 "Dispatch
-    //     constraints": "up to 8 MOPs per cycle and dispatch up to 16 uOPs
-    //     per cycle".  Only the 5-wide DECODE is not modelled: as for the A78
-    //     (4-wide decode, only its 6-wide rename is used) the Mop bound is the
-    //     rename/dispatch width.
-    // Left at 0 (= not applied, see calculateIssueBound()) for
-    // cortex-a710/a715/neoverse-n2 (grouped above only by SHARED uop
-    // DispatchWidth=10; their own SOGs have not been consulted for the Mop
-    // number - do not assume it also equals 5) and for neoverse-v1 (grouped
-    // with the X1 above only by the shared uop DispatchWidth=16; its own SOG
-    // has not been consulted - do not assume it also equals 8), and for Apple icestorm/firestorm
-    // (computeFacilePrediction() already forces NumMicroOps=1 for
-    // coalesced-ROB CPUs, so PO.DispatchWidth there already IS a Mop-level
-    // width and must not get a second, redundant cap).
-    if (TI.STI->getCPU() == "cortex-a76" || TI.STI->getCPU() == "cortex-a76ae" || TI.STI->getCPU() == "neoverse-n1") {
-        TI.MopDispatchWidth = 4;
-    } else if (TI.STI->getCPU() == "cortex-a78" || TI.STI->getCPU() == "cortex-a78ae" || TI.STI->getCPU() == "cortex-a78c") {
-        TI.MopDispatchWidth = 6;
-    } else if (TI.STI->getCPU() == "cortex-a720" || TI.STI->getCPU() == "cortex-a720ae") {
-        TI.MopDispatchWidth = 5;
-    } else if (TI.STI->getCPU() == "cortex-x1" || TI.STI->getCPU() == "cortex-x1c") {
-        TI.MopDispatchWidth = 8;
-    }
+    TI.MopDispatchWidth = Traits.MopDispatchWidth;
 
     TI.TargetAddress = 0;
     if (!opts::TargetAddressStr.empty()) {

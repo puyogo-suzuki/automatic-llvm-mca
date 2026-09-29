@@ -1,5 +1,6 @@
 #include "mca_common.h"
 #include "a55_issue_stage.h"
+#include "cpu_traits.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64AddressingModes.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
 #include <algorithm>
@@ -310,7 +311,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         }
         
         std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
-        if (STI.getCPU() == "cortex-a55") {
+        if (getCpuTraits(STI.getCPU()).Model == CpuModel::A55) {
             unsigned opc = I.Inst.getOpcode();
             if (opc == llvm::AArch64::ADDXrs || opc == llvm::AArch64::ADDWrs ||
                 opc == llvm::AArch64::SUBXrs || opc == llvm::AArch64::SUBWrs ||
@@ -369,7 +370,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     const unsigned SteadyIterations = computeSteadyIterations(STI, instrs.size(), iterations);
     mca::CircularSourceMgr CSM(Sequence, WarmupIterations + SteadyIterations);
     mca::CustomBehaviour CB(STI, CSM, MCII);
-    bool IsA55 = (STI.getCPU() == "cortex-a55");
+    bool IsA55 = (getCpuTraits(STI.getCPU()).Model == CpuModel::A55);
     std::unique_ptr<mca::Pipeline> P;
     if (STI.getSchedModel().isOutOfOrder()) {
         P = MCAContext.createDefaultPipeline(PO, CSM, CB);

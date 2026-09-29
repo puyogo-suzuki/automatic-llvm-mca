@@ -1,4 +1,5 @@
 #include "custom_a55_sched.h"
+#include "cpu_traits.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/MC/MCInst.h"
@@ -85,13 +86,7 @@ std::unique_ptr<MCSubtargetInfo> wrapCustomSubtargetInfo(std::unique_ptr<MCSubta
 // mandatory, because such a CPU keeps libLLVM's own stock MCSchedModel, whose
 // SchedClassTable is indexed with the stock numbering.
 bool usesLocalSchedTables(llvm::StringRef CPUName) {
-    return CPUName == "cortex-a55" ||
-           CPUName == "cortex-a520" || CPUName == "cortex-a520ae" ||
-           CPUName == "cortex-a76" || CPUName == "cortex-a76ae" ||
-           CPUName == "cortex-a78" || CPUName == "cortex-a78ae" || CPUName == "cortex-a78c" ||
-           CPUName == "cortex-a720" || CPUName == "cortex-a720ae" ||
-           CPUName == "cortex-x1" || CPUName == "cortex-x1c" ||
-           CPUName == "icestorm" || CPUName == "firestorm";
+    return getCpuTraits(CPUName).Model != CpuModel::None;
 }
 
 // Re-point MCInstrInfo at the LOCALLY re-generated AArch64 instruction
@@ -195,46 +190,21 @@ void remapSchedClassIndices(llvm::MCInstrInfo &MCII, llvm::StringRef CPUName) {
 }
 
 void overrideCortexA55SchedModel(llvm::MCSubtargetInfo &STI, llvm::StringRef CPUName) {
-    if (CPUName == "cortex-a55") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CortexA55Model;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "cortex-a520" || CPUName == "cortex-a520ae") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CortexA520Model;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "cortex-a76" || CPUName == "cortex-a76ae") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseN1Model;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "cortex-a78" || CPUName == "cortex-a78ae" || CPUName == "cortex-a78c") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseN2Model;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "cortex-a720" || CPUName == "cortex-a720ae") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &CortexA720Model;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "cortex-x1" || CPUName == "cortex-x1c") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &NeoverseV1Model;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "icestorm") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &IcestormModel;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
-    } else if (CPUName == "firestorm") {
-        STI.*get(MCSubtargetInfo_CPUSchedModel()) = &FirestormModel;
-        STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
-        STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
-        STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
+    const llvm::MCSchedModel *Model = nullptr;
+    switch (getCpuTraits(CPUName).Model) {
+    case CpuModel::A55:       Model = &CortexA55Model;   break;
+    case CpuModel::A520:      Model = &CortexA520Model;  break;
+    case CpuModel::A76:       Model = &NeoverseN1Model;  break;
+    case CpuModel::A78:       Model = &NeoverseN2Model;  break;
+    case CpuModel::A720:      Model = &CortexA720Model;  break;
+    case CpuModel::X1:        Model = &NeoverseV1Model;  break;
+    case CpuModel::Icestorm:  Model = &IcestormModel;    break;
+    case CpuModel::Firestorm: Model = &FirestormModel;   break;
+    case CpuModel::None:      return;
     }
+    STI.*get(MCSubtargetInfo_CPUSchedModel()) = Model;
+    STI.*get(MCSubtargetInfo_WriteProcResTable()) = AArch64WriteProcResTable;
+    STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
+    STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
 }
 }

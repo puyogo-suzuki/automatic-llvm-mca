@@ -1,4 +1,5 @@
 #include "mca_common.h"
+#include "cpu_traits.h"
 #include <iostream>
 #include <memory>
 #include <string>
@@ -125,15 +126,8 @@ int main(int argc, char **argv) {
     const MCSchedModel &SM = STI->getSchedModel();
     PO.MicroOpQueueSize = SM.MicroOpBufferSize;
     PO.DispatchWidth = SM.IssueWidth;
-    if (STI->getCPU() == "cortex-a76" || STI->getCPU() == "cortex-a76ae" || STI->getCPU() == "neoverse-n1") {
-        PO.DispatchWidth = 8;
-    } else if (STI->getCPU() == "cortex-a78" || STI->getCPU() == "cortex-a78ae" || STI->getCPU() == "cortex-a78c") {
-        PO.DispatchWidth = 12;
-    } else if (STI->getCPU() == "cortex-a710" || STI->getCPU() == "cortex-a715" || STI->getCPU() == "cortex-a720" || STI->getCPU() == "cortex-a720ae" || STI->getCPU() == "neoverse-n2") {
-        PO.DispatchWidth = 10;
-    } else if (STI->getCPU() == "cortex-x1" || STI->getCPU() == "cortex-x1c" || STI->getCPU() == "neoverse-v1") {
-        PO.DispatchWidth = 16;
-    }
+    if (unsigned W = getCpuTraits(STI->getCPU()).UopDispatchWidth)
+        PO.DispatchWidth = W;
     PO.AssumeNoAlias = true;
 
     // Find 3 representative loops

@@ -1,4 +1,5 @@
 #include "facile.h"
+#include "cpu_traits.h"
 #include "mca_common.h"
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -33,9 +34,7 @@ double getInstLatency(const llvm::mca::Instruction &Inst) {
 // getEdgeLatency() comment below for why this must be asked per-target rather
 // than by just trusting any Latency==0 write.
 bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
-    return STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c" ||
-           STI.getCPU() == "cortex-a720" || STI.getCPU() == "cortex-a720ae" ||
-           STI.getCPU() == "cortex-x1" || STI.getCPU() == "cortex-x1c";
+    return getCpuTraits(STI.getCPU()).ZeroLatencyMov;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,8 +404,7 @@ const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI
 enum class A78ResOverride { None, OccupancyCap1, LDPSW, DivCap5 };
 static A78ResOverride classifyA78ResOverride(const llvm::MCSubtargetInfo &STI, const llvm::MCInstrInfo &MCII,
                                              const llvm::mca::Instruction &Inst) {
-    llvm::StringRef CPU = STI.getCPU();
-    if (!(CPU == "cortex-a78" || CPU == "cortex-a78ae" || CPU == "cortex-a78c")) return A78ResOverride::None;
+    if (!getCpuTraits(STI.getCPU()).N2ModelCorrections) return A78ResOverride::None;
     llvm::StringRef N = MCII.getName(Inst.getOpcode());
     if ((N == "SDIVWr" || N == "UDIVWr" || N == "SDIVXr" || N == "UDIVXr"))
         return A78ResOverride::DivCap5;
@@ -420,8 +418,7 @@ static A78ResOverride classifyA78ResOverride(const llvm::MCSubtargetInfo &STI, c
 
 static bool isA78RegOffsetNoAlu(const llvm::MCSubtargetInfo &STI, const llvm::MCInstrInfo &MCII,
                                 const llvm::mca::Instruction &Inst, const llvm::MCInst *MCI) {
-    llvm::StringRef CPU = STI.getCPU();
-    if (!(CPU == "cortex-a78" || CPU == "cortex-a78ae" || CPU == "cortex-a78c")) return false;
+    if (!getCpuTraits(STI.getCPU()).N2ModelCorrections) return false;
     llvm::StringRef N = MCII.getName(Inst.getOpcode());
     if (!(N.ends_with("roW") || N.ends_with("roX"))) return false;
     llvm::StringRef B = N.drop_back(3);
@@ -439,10 +436,6 @@ static bool isA78RegOffsetNoAlu(const llvm::MCSubtargetInfo &STI, const llvm::MC
     return false;  // FP/SIMD reg-offset forms: left to the model (see SOG Table 3-18)
 }
 
-bool isA78FusionCandidate(const llvm::MCSubtargetInfo &STI) {
-    return STI.getCPU() == "cortex-a78" || STI.getCPU() == "cortex-a78ae" || STI.getCPU() == "cortex-a78c";
-}
-
 // Cortex-X1 SOG (PJDOC-466751330-12804 Issue 4.0) "Instruction fusion" prints
 // a STRICT SUBSET of A78 sec. 4.14:
 //   1. CMP/CMN (immediate) + B.cond     4. TST (register) + B.cond
@@ -451,10 +444,8 @@ bool isA78FusionCandidate(const llvm::MCSubtargetInfo &STI) {
 // i.e. A78 items 1,2,7,8,9,10 - the CMP + CSEL and CMP + CSET rows (A78 items
 // 3-6) do NOT exist on the X1.  (The AESE+AESMC / AESD+AESIMC list is the same
 // and is left out for the reason given for the A78.)  The A78 machinery is
-// reused with the select/set consumers switched off; see isA78FusiblePair().
-bool isX1FusionCandidate(const llvm::MCSubtargetInfo &STI) {
-    return STI.getCPU() == "cortex-x1" || STI.getCPU() == "cortex-x1c";
-}
+// reused with the select/set consumers switched off; see isA78FusiblePair()
+// and FusionTable::X1 in cpu_traits.h.
 
 // mca::Instruction::getDefs() elides writes to the discarded zero register
 // (nothing can ever depend on WZR/XZR's value, so the register-renaming
@@ -535,11 +526,11 @@ A78Consumer classifyA78Consumer(const llvm::MCInstrInfo &MCII, const llvm::mca::
 }
 
 // The sec. 4.14 pairing table, transcribed row by row.  Producers down,
-// consumers across; see the big comment on isA78FusionCandidate() for why
-// this is NOT the cross product of the two sets.
+// consumers across; see the big "THE SOG's LIST IS NOT A CROSS PRODUCT"
+// comment above for why this is NOT the cross product of the two sets.
 //
 // `HasSelectFusion` is false for the Cortex-X1, whose SOG omits items 3-6
-// (CMP + CSEL / CSET); see isX1FusionCandidate().
+// (CMP + CSEL / CSET); see the Cortex-X1 fusion note above.
 bool isA78FusiblePair(A78Producer P, A78Consumer C, bool HasSelectFusion = true) {
     switch (P) {
     case A78Producer::CMP:  // items 1,2 (+B.cond), 3,4 (+CSEL), 5,6 (+CSET)
@@ -572,13 +563,14 @@ bool isA78FusiblePair(A78Producer P, A78Consumer C, bool HasSelectFusion = true)
 // consecutive NOPs: `nop; nop; ldr` is one fused pair plus a separate `nop;
 // ldr` pair, not a single three-way fusion.  For items 1-9 the producer and
 // consumer sets are disjoint, so this is a no-op there.
-std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
-                                      const llvm::MCInstrInfo &MCII,
+//
+// `HasSelectFusion` = false gives the Cortex-X1 table (A78 minus CSEL/CSET).
+std::vector<bool> computeA78FusedMask(const llvm::MCInstrInfo &MCII,
                                       llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
-                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
+                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts,
+                                      bool HasSelectFusion) {
     std::vector<bool> Fused(SimInstrs.size(), false);
-    const bool IsX1 = isX1FusionCandidate(STI);  // A78 table minus the CSEL/CSET rows
-    if (!(isA78FusionCandidate(STI) || IsX1) || SimInstrs.size() < 2)
+    if (SimInstrs.size() < 2)
         return Fused;
     auto McAt = [&](size_t i) -> const llvm::MCInst * {
         return (i < MCInsts.size()) ? MCInsts[i] : nullptr;
@@ -594,7 +586,7 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
             continue;
         }
         if (isA78FusiblePair(P, classifyA78Consumer(MCII, *SimInstrs[i + 1], McAt(i + 1)),
-                             /*HasSelectFusion=*/!IsX1)) {
+                             HasSelectFusion)) {
             Fused[i + 1] = true;
             ++i;
         }
@@ -611,8 +603,8 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
 // that can be fused are as follows: [...] These instruction pairs must be
 // adjacent to each other in program code."
 //
-// WHY THIS IS A SEPARATE FUNCTION AND NOT `isA78FusionCandidate() ||
-// cortex-a720`.  A720 is A78's architectural successor, so widening the A78
+// WHY THIS IS A SEPARATE TABLE AND NOT `FusionTable::A78` FOR
+// cortex-a720 TOO.  A720 is A78's architectural successor, so widening the A78
 // gate is the obvious-looking move - and it is wrong.  The two SOGs print
 // DIFFERENT tables.  Side by side, A78 sec. 4.14 vs. A720 sec. 4.11:
 //
@@ -694,9 +686,6 @@ std::vector<bool> computeA78FusedMask(const llvm::MCSubtargetInfo &STI,
 //     so SVE instructions carry no scheduling data in this model at all, and
 //     MOVPRFX only has a use together with SVE.  Out of scope twice over.
 // ---------------------------------------------------------------------------
-bool isA720FusionCandidate(const llvm::MCSubtargetInfo &STI) {
-    return STI.getCPU() == "cortex-a720" || STI.getCPU() == "cortex-a720ae";
-}
 
 // The four producers A720 sec. 4.11 names among the rows modelled here.  Note
 // the absence of NOP: sec. 4.11 has no "NOP + Any instruction" row (see
@@ -815,12 +804,11 @@ bool isA720FusiblePair(const A720ProducerInfo &P, A720Consumer C) {
 // Pairing is greedy and non-overlapping, as on A78; since the producer and
 // consumer sets are disjoint for every row modelled here, that is a no-op in
 // practice and is kept only for structural parity.
-std::vector<bool> computeA720FusedMask(const llvm::MCSubtargetInfo &STI,
-                                       const llvm::MCInstrInfo &MCII,
+std::vector<bool> computeA720FusedMask(const llvm::MCInstrInfo &MCII,
                                        llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                        llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
     std::vector<bool> Fused(SimInstrs.size(), false);
-    if (!isA720FusionCandidate(STI) || SimInstrs.size() < 2)
+    if (SimInstrs.size() < 2)
         return Fused;
     auto McAt = [&](size_t i) -> const llvm::MCInst * {
         return (i < MCInsts.size()) ? MCInsts[i] : nullptr;
@@ -840,15 +828,19 @@ std::vector<bool> computeA720FusedMask(const llvm::MCSubtargetInfo &STI,
 // Per-target dispatch.  Each core gets its OWN SOG's table; there is
 // deliberately no shared "Arm fusion" path, because A78 sec. 4.14 and A720
 // sec. 4.11 disagree on three rows (see the table above).  The X1 is the
-// A78 table with the CSEL/CSET rows removed, handled inside
-// computeA78FusedMask().
+// A78 table with the CSEL/CSET rows removed.  Which table a CPU uses is
+// CpuTraits::Fusion (cpu_traits.cpp).
 std::vector<bool> computeFusedMask(const llvm::MCSubtargetInfo &STI,
                                    const llvm::MCInstrInfo &MCII,
                                    llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                    llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
-    if (isA720FusionCandidate(STI))
-        return computeA720FusedMask(STI, MCII, SimInstrs, MCInsts);
-    return computeA78FusedMask(STI, MCII, SimInstrs, MCInsts);
+    switch (getCpuTraits(STI.getCPU()).Fusion) {
+    case FusionTable::A78:  return computeA78FusedMask(MCII, SimInstrs, MCInsts, /*HasSelectFusion=*/true);
+    case FusionTable::X1:   return computeA78FusedMask(MCII, SimInstrs, MCInsts, /*HasSelectFusion=*/false);
+    case FusionTable::A720: return computeA720FusedMask(MCII, SimInstrs, MCInsts);
+    case FusionTable::None: break;
+    }
+    return std::vector<bool>(SimInstrs.size(), false);
 }
 
 // 1. Calculate Dispatch / Issue Width Limit

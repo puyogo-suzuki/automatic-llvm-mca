@@ -152,6 +152,33 @@ Run the C++ unit tests (GoogleTest):
 ./build/mca_unit_tests
 ```
 
+## Checking a scheduling model against an Arm SOG
+
+`tools/sog_compare.py` compares the AArch64 instruction tables of an Arm Software
+Optimization Guide (latency, throughput, utilized pipelines) with the scheduling model
+this tool installs for the same core, and lists the opcodes that disagree with every
+SOG row naming their mnemonic.
+
+```bash
+pdftotext -layout Arm_Cortex-X1_Core_Software_Optimization_Guide.pdf x1sog.txt
+./build/mca-insts-info --mtriple aarch64-linux-gnu --mcpu cortex-x1 --format csv > x1.csv
+tools/sog_compare.py --sog x1sog.txt --csv x1.csv
+```
+
+The SOGs are Arm's documents and are not part of this repository (the `tmp/` directory is
+git-ignored for keeping local copies). The output is a triage list: it has false
+positives (rows the SOG itself prints inconsistently, forms that cannot be told apart by
+mnemonic) and it cannot see corrections applied on top of the model in `facile.cpp`.
+See the script's docstring for details.
+
+## Per-CPU parameters
+
+Facts about a core that LLVM's scheduling model cannot express - which local `.td` model
+is installed, the SOG's uop dispatch width and Mop dispatch width, which macro-op fusion
+table applies, whether the model's zero-latency writes are rename-time moves - live in one
+table, `cpu_traits.cpp` (`getCpuTraits()`). Adding a core or a variant of one is a
+single line there.
+
 
 ## Misc
 
