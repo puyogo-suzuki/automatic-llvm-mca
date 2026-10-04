@@ -121,7 +121,7 @@ Facile as published analyses a basic block in isolation and assumes aliasing is
 statically unknowable (sec. 3.3). This tool goes further — it adds
 *inter-iteration* edges so the third limit is a genuine loop-recurrence bound —
 and therefore must also model recurrences that round-trip through **memory**,
-not just through registers. `addMemoryDependencies()` in `facile.cpp` adds a
+not just through registers. `addMemoryDependencies()` in `src/facile/facile.cpp` adds a
 store→load edge under a deliberately conservative may-alias rule (different
 base register ⇒ no alias; same base with both displacements constant ⇒ alias
 only on an exact offset match; same base with a register index ⇒ may alias; a
@@ -143,6 +143,26 @@ limits usually already exceed the recurrence).
 * **Paper**: *Facile: Fast, Accurate, and Interpretable Basic-Block Throughput Prediction*
 * **Authors**: Shrey Sharma, Jan Reineke, Andreas Abel (Saarland University)
 * **Preprint**: [arXiv:2310.13212 [cs.PF]](https://arxiv.org/abs/2310.13212) (2023)
+
+## Source layout
+
+```
+src/
+  core/      types, ELF loading + disassembly (object_loader), loop/basic-block splitting (region_splitter)
+  cpu/       cpu_traits (per-CPU table), sched_model (installs the local ModifiedTarget/*.td models)
+  a55/       Cortex-A55 specifics: in-order issue stage, register bypasses, instruction/cycle corrections
+  mca/       LLVM MCA driver (mca_simulation) and the steady-state event listeners
+  mlp/       memory-level-parallelism analysis: one analyzer per ISA, window/heuristic logic
+  facile/    Facile analytical predictor, macro-op fusion tables, A78 (N2) model corrections
+  frontend/  command-line options and target/CPU initialisation shared by the tools
+apps/        the executables (mca_tool, mlp-objdump, mlp-check, mca-insts-info, ...)
+tests/       GoogleTest suites (mlp, splitter, facile, cpu_traits) and shared fixtures
+tools/       helper scripts (sog_compare.py)
+ModifiedTarget/AArch64/   TableGen scheduling models
+```
+
+Everything under `src/` is one static library (`mca_common_lib`); headers are included as
+`"<module>/<file>.h"`.
 
 ## Tests
 
@@ -168,7 +188,7 @@ tools/sog_compare.py --sog x1sog.txt --csv x1.csv
 The SOGs are Arm's documents and are not part of this repository (the `tmp/` directory is
 git-ignored for keeping local copies). The output is a triage list: it has false
 positives (rows the SOG itself prints inconsistently, forms that cannot be told apart by
-mnemonic) and it cannot see corrections applied on top of the model in `facile.cpp`.
+mnemonic) and it cannot see corrections applied on top of the model in `src/facile/n2_corrections.cpp`.
 See the script's docstring for details.
 
 ## Per-CPU parameters
@@ -176,7 +196,7 @@ See the script's docstring for details.
 Facts about a core that LLVM's scheduling model cannot express - which local `.td` model
 is installed, the SOG's uop dispatch width and Mop dispatch width, which macro-op fusion
 table applies, whether the model's zero-latency writes are rename-time moves - live in one
-table, `cpu_traits.cpp` (`getCpuTraits()`). Adding a core or a variant of one is a
+table, `src/cpu/cpu_traits.cpp` (`getCpuTraits()`). Adding a core or a variant of one is a
 single line there.
 
 

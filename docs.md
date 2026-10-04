@@ -6,7 +6,7 @@ This document provides an exhaustive technical overview of the processor schedul
 
 ## 1. Processor Scheduling Model Customizations & Forwarding Paths
 
-To accurately simulate the execution timeline of target processors (specifically the dual-issue in-order **ARM Cortex-A55**), the scheduling model has been customized at both the **TableGen** description level (`ModifiedTarget/AArch64/AArch64SchedA55.td`) and the **C++ runtime simulation layer** (`mca.cpp`).
+To accurately simulate the execution timeline of target processors (specifically the dual-issue in-order **ARM Cortex-A55**), the scheduling model has been customized at both the **TableGen** description level (`ModifiedTarget/AArch64/AArch64SchedA55.td`) and the **C++ runtime simulation layer** (`src/mca/mca_simulation.cpp`, `src/a55/`).
 
 ### A. TableGen Scheduling Model Customizations (`AArch64SchedA55.td`)
 
@@ -48,7 +48,7 @@ For integer multiplications, the operands are forwarded with varying latencies:
 
 ---
 
-### B. C++ Runtime Simulation Adaptations (`mca.cpp`)
+### B. C++ Runtime Simulation Adaptations (`src/mca/mca_simulation.cpp`, `src/a55/`)
 
 While TableGen provides the static structural definition, the LLVM MCA runtime library does not always fully resolve variant scheduling classes at runtime because of limitations in the static analyzer's register-state operand representation. Therefore, several dynamic modifications are applied during the construction of the simulation pipeline:
 
@@ -236,7 +236,7 @@ Not all memory loads translate to concurrent outstanding memory requests. The an
 
 ## 4. Facile: SOG-Derived Modelling Notes
 
-Rationale that used to sit in comments in `facile.cpp`. Each subsection names the function it belongs to. "SOG" is the Arm Software Optimization Guide of the core in question; the guides themselves are not part of this repository. Per-CPU switches (which core gets which behaviour) are in `cpu_traits.cpp`.
+Rationale that used to sit in comments in `src/facile/`. Each subsection names the function it belongs to. "SOG" is the Arm Software Optimization Guide of the core in question; the guides themselves are not part of this repository. Per-CPU switches (which core gets which behaviour) are in `cpu_traits.cpp`.
 
 ### A. Dependence-edge latency (`getEdgeLatency`)
 
@@ -351,7 +351,7 @@ A720ZeroMove is deliberately NOT stock LLVM's NeoverseZeroMove: that predicate i
 
 The condition this gate depends on therefore holds for A720 the same way it holds for N2, and was re-checked rather than assumed: A720Write_0c is referenced ONLY as the A720ZeroMove arm of those three variants and nowhere else in the file, so within CortexA720Model "Latency == 0" is equivalent to "this is a sec. 4.12 zero-latency form".  None of the newly bound writes is an accounting marker of the N1Write_0c_0Z kind (that one is the second destination of a load pair, where the value genuinely is not available early), and none is a read-modify-write of the Firestorm/Icestorm MOVK kind: every opcode listed above fully overwrites its destination from a source that the rename stage can point at (or from a constant it can fabricate). MOVK is specifically NOT bound, and neither is FMOVHr (FMOV Hd,Hn), which sec. 4.12 does not list.
 
-NOT VALIDATED AGAINST HARDWARE.  This change rests entirely on SOG sec. 4.12 being transcribed correctly, which is what the unit tests in tests/mlp_test.cpp assert: that the documented forms carry 0 and the deliberately excluded neighbours (non-ZR ORR, shifted ORR, MOVZ with imm > 15) still carry their normal latency.  Accuracy is NOT claimed.
+NOT VALIDATED AGAINST HARDWARE.  This change rests entirely on SOG sec. 4.12 being transcribed correctly, which is what the unit tests in tests/facile_test.cpp assert: that the documented forms carry 0 and the deliberately excluded neighbours (non-ZR ORR, shifted ORR, MOVZ with imm > 15) still carry their normal latency.  Accuracy is NOT claimed.
 
 ### C. Macro-op fusion tables (`computeFusedMask`)
 
@@ -436,7 +436,7 @@ NOT MODELLED HERE, DELIBERATELY - and why, row by row:
 
 ### D. Corrections on top of `NeoverseN2Model` (Cortex-A78)
 
-The A78 borrows `NeoverseN2Model`. Where it disagrees with the A78 SOG, `facile.cpp` corrects the port usage after the fact (`CpuTraits::N2ModelCorrections`).
+The A78 borrows `NeoverseN2Model`. Where it disagrees with the A78 SOG, `src/facile/n2_corrections.cpp` and `calculatePortUsageBound()` correct the port usage after the fact (`CpuTraits::N2ModelCorrections`).
 
 #### Register-offset loads and stores (`isA78RegOffsetNoAlu`)
 
@@ -504,7 +504,7 @@ Re-point MCInstrInfo at the LOCALLY re-generated AArch64 instruction descriptor 
 
 WHY THIS IS NEEDED (2026-09-10).  The tool mixes two independently generated halves of the same AArch64 target description:
 
-(a) frontend.cpp calls TheTarget->createMCInstrInfo(), i.e. the MCInstrDesc array COMPILED INTO the installed libLLVM-22 (22.1.8).  Its MCInstrDesc::SchedClass values use the numbering that stock AArch64.td produces. (b) overrideCortexA55SchedModel() below installs FirestormModelSchedClasses et al. from build/AArch64GenSubtargetInfo.inc, which this project re-generates from AArch64.td plus ModifiedTarget/AArch64/*.td.  Those extra files (AArch64SchedIcestorm.td, AArch64SchedFirestorm.td, and the modified A55/N1/N2/V1/A520/A720 models) declare additional InstRW rules, and every InstRW that partitions an existing SchedClass makes TableGen CREATE new SchedClass records.  Our class list is 2324 entries; stock's is 2050.  The two numberings therefore DIVERGE, and MCA was indexing table (b) with indices from table (a).
+(a) src/frontend/frontend.cpp calls TheTarget->createMCInstrInfo(), i.e. the MCInstrDesc array COMPILED INTO the installed libLLVM-22 (22.1.8).  Its MCInstrDesc::SchedClass values use the numbering that stock AArch64.td produces. (b) installLocalSchedModel() below installs FirestormModelSchedClasses et al. from build/AArch64GenSubtargetInfo.inc, which this project re-generates from AArch64.td plus ModifiedTarget/AArch64/*.td.  Those extra files (AArch64SchedIcestorm.td, AArch64SchedFirestorm.td, and the modified A55/N1/N2/V1/A520/A720 models) declare additional InstRW rules, and every InstRW that partitions an existing SchedClass makes TableGen CREATE new SchedClass records.  Our class list is 2324 entries; stock's is 2050.  The two numberings therefore DIVERGE, and MCA was indexing table (b) with indices from table (a).
 
 Measured extent of the mismatch (all 9135 AArch64 opcodes compared, stock libLLVM vs build/AArch64GenInstrInfo.inc):
 
@@ -539,7 +539,7 @@ one stock class index can correspond to several of ours and cannot carry their d
 
 SchedClass field overwritten) is also impossible: MCInstrDesc is explicitly non-copyable-in-practice, because it locates its own operand and implicit-operand arrays from its OWN ADDRESS - MCInstrDesc::operands() is `reinterpret_cast<const MCOperandInfo *>(this + Opcode + 1) + OpInfoOffset` (MCInstrDesc.h:240), which only resolves inside the generated <Target>InstrTable struct, where Insts[] is stored in DESCENDING opcode order and is immediately followed by ImplicitOps[] and OperandInfo[].  Copying the descs elsewhere sends operands() into unrelated heap memory; the first attempt at this fix aborted on every input, including a two-instruction `nop; ret`.
 
-So install our AArch64Descs wholesale, via the InitAArch64MCInstrInfo() that TableGen emits alongside it - exactly the call libLLVM's own createMCInstrInfo() makes, just with our table.  That keeps Insts / ImplicitOps / OperandInfo mutually consistent, and makes SchedClass agree with the sched-class tables installed by overrideCortexA55SchedModel().
+So install our AArch64Descs wholesale, via the InitAArch64MCInstrInfo() that TableGen emits alongside it - exactly the call libLLVM's own createMCInstrInfo() makes, just with our table.  That keeps Insts / ImplicitOps / OperandInfo mutually consistent, and makes SchedClass agree with the sched-class tables installed by installLocalSchedModel().
 
 SAFETY of swapping in a table generated from llvm-source (LLVM main) while linking libLLVM-22.1.8.  Verified field by field over all 9135 opcodes, our table against libLLVM's: SchedClass is the ONLY field that differs anywhere.
 

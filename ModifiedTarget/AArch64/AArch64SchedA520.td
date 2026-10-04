@@ -31,7 +31,7 @@
 // MECHANISM OF THE BUG.  Unlike the Cortex-A55 dual-issue bug (which was a
 // MISSING ENFORCEMENT guard in the project's own a55_issue_stage.cpp), the
 // A520 enforcement path is stock and correct: A520 has MicroOpBufferSize = 0,
-// so getSchedModel().isOutOfOrder() is false, and mca.cpp's pipeline selector
+// so getSchedModel().isOutOfOrder() is false, and mca/mca_simulation.cpp's pipeline selector
 // gates the custom A55 stage on the exact string "cortex-a55" -- so A520 falls
 // through to Context::createInOrderPipeline().  llvm-mca's InOrderIssueStage
 // caps issue with its `Bandwidth` field, which it seeds from getIssueWidth(),

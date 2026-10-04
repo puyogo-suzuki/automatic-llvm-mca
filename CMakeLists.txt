@@ -59,16 +59,38 @@ add_custom_command(
     COMMENT "Generating AArch64GenInstrInfo.inc using llvm-tblgen"
 )
 
-include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
-# Common library for shared logic between tool and tests
-add_library(mca_common_lib STATIC mlp_logic.cpp mca.cpp splitter.cpp cpu_traits.cpp custom_a55_sched.cpp frontend.cpp facile.cpp a55_issue_stage.cpp ${GEN_INC_FILE} ${GEN_REG_INC_FILE} ${GEN_INSTR_INC_FILE})
+# Common library for shared logic between the tools and the tests.  Sources are
+# grouped by module under src/ (headers are included as "<module>/<file>.h").
+set(MCA_SOURCES
+    src/core/object_loader.cpp
+    src/core/region_splitter.cpp
+    src/cpu/cpu_traits.cpp
+    src/cpu/sched_model.cpp
+    src/a55/a55_adaptations.cpp
+    src/a55/a55_issue_stage.cpp
+    src/mca/mca_simulation.cpp
+    src/mca/steady_state_tracker.cpp
+    src/mlp/mlp_aarch64.cpp
+    src/mlp/mlp_analyzer.cpp
+    src/mlp/mlp_riscv.cpp
+    src/mlp/mlp_window.cpp
+    src/mlp/mlp_x86.cpp
+    src/mlp/seen_regs.cpp
+    src/facile/facile.cpp
+    src/facile/fusion.cpp
+    src/facile/n2_corrections.cpp
+    src/frontend/frontend.cpp
+    src/frontend/options.cpp)
+add_library(mca_common_lib STATIC ${MCA_SOURCES} ${GEN_INC_FILE} ${GEN_REG_INC_FILE} ${GEN_INSTR_INC_FILE})
+target_include_directories(mca_common_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mca_common_lib PUBLIC LLVM)
 
-add_executable(mca_tool mca_main.cpp)
-add_executable(mlp_objdump mlp_objdump.cpp)
-add_executable(analyze_distribution analyze_distribution.cpp)
+add_executable(mca_tool apps/mca_main.cpp)
+add_executable(mlp_objdump apps/mlp_objdump.cpp)
+add_executable(analyze_distribution apps/analyze_distribution.cpp)
 set_target_properties(mlp_objdump PROPERTIES OUTPUT_NAME "mlp-objdump")
 
 # Explicitly link all necessary components for each supported architecture
@@ -98,20 +120,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-add_executable(mca_unit_tests tests/mlp_test.cpp)
+add_executable(mca_unit_tests tests/mlp_test.cpp tests/splitter_test.cpp tests/facile_test.cpp tests/cpu_traits_test.cpp)
 target_link_libraries(mca_unit_tests PRIVATE gtest_main mca_common_lib ${llvm_libs})
 
 include(GoogleTest)
 gtest_discover_tests(mca_unit_tests)
-add_executable(convergence_test convergence_test.cpp)
+add_executable(convergence_test apps/convergence_test.cpp)
 target_link_libraries(convergence_test PRIVATE mca_common_lib ${llvm_libs})
 
-add_executable(mca_insts_info mca_insts_info.cpp)
+add_executable(mca_insts_info apps/mca_insts_info.cpp)
 target_link_libraries(mca_insts_info PRIVATE mca_common_lib ${llvm_libs})
 set_target_properties(mca_insts_info PROPERTIES OUTPUT_NAME "mca-insts-info")
 
 
-add_executable(mlp_check mlp_check.cpp)
+add_executable(mlp_check apps/mlp_check.cpp)
 target_link_libraries(mlp_check PRIVATE mca_common_lib ${llvm_libs})
 set_target_properties(mlp_check PROPERTIES OUTPUT_NAME "mlp-check")
 
