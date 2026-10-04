@@ -1,36 +1,16 @@
+#include "core/object_loader.h"
 #include "core/types.h"
+#include "frontend/frontend.h"
+#include <algorithm>
 #include <iostream>
-#include <memory>
+#include <map>
 #include <string>
 #include <vector>
-#include <algorithm>
-#include <set>
-#include <map>
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/MC/MCAsmInfo.h"
-#include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCDisassembler/MCDisassembler.h"
-#include "llvm/MC/MCInst.h"
-#include "llvm/MC/MCInstrAnalysis.h"
-#include "llvm/MC/MCInstrInfo.h"
-#include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/TargetRegistry.h"
-#include "llvm/Object/Binary.h"
-#include "llvm/Object/ELFObjectFile.h"
-#include "llvm/Object/ELFTypes.h"
-#include "llvm/Object/ObjectFile.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 using namespace llvm::object;
-
-static cl::opt<std::string> InputBinary(cl::Positional, cl::desc("<input binary>"), cl::Required);
 
 struct Stats {
     size_t count = 0;
@@ -47,78 +27,20 @@ void print_stats(const std::string& label, const Stats& s) {
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
-    LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target(); LLVMInitializeX86TargetMC(); LLVMInitializeX86AsmParser(); LLVMInitializeX86Disassembler();
-    LLVMInitializeAArch64TargetInfo(); LLVMInitializeAArch64Target(); LLVMInitializeAArch64TargetMC(); LLVMInitializeAArch64AsmParser(); LLVMInitializeAArch64Disassembler();
-    LLVMInitializeARMTargetInfo(); LLVMInitializeARMTarget(); LLVMInitializeARMTargetMC(); LLVMInitializeARMAsmParser(); LLVMInitializeARMDisassembler();
-    LLVMInitializeRISCVTargetInfo(); LLVMInitializeRISCVTarget(); LLVMInitializeRISCVTargetMC(); LLVMInitializeRISCVAsmParser(); LLVMInitializeRISCVDisassembler();
 
-    cl::ParseCommandLineOptions(argc, argv, "Analysis Strategy Comparator\n");
+    std::unique_ptr<ObjectFile> Obj;
+    TargetInfo TI;
+    if (!initializeFrontend(argc, argv, "Analysis Strategy Comparator\n", Obj, TI)) return 1;
 
-    auto BinaryOrErr = ObjectFile::createObjectFile(InputBinary);
-    if (!BinaryOrErr) return 1;
-    ObjectFile &Obj = *BinaryOrErr.get().getBinary();
-
-    Triple TT = Obj.makeTriple();
-    std::string Error;
-    const Target *TheTarget = TargetRegistry::lookupTarget(TT, Error);
-    if (!TheTarget) return 1;
-
-    std::unique_ptr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TT));
-    MCTargetOptions MCOPT;
-    std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
-    std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
-    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, "generic", ""));
-    MCContext Ctx(TT, MAI.get(), MRI.get(), STI.get());
-    std::unique_ptr<MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI, Ctx));
-    std::unique_ptr<MCInstrAnalysis> MCIA(TheTarget->createMCInstrAnalysis(MCII.get()));
-
-    std::map<uint64_t, uint64_t> FunctionBoundaries;
-    for (const auto &Sym : Obj.symbols()) {
-        auto TypeOrErr = Sym.getType();
-        if (!TypeOrErr || *TypeOrErr != SymbolRef::ST_Function) continue;
-        auto AddrOrErr = Sym.getAddress();
-        if (!AddrOrErr) continue;
-        uint64_t Addr = *AddrOrErr;
-        uint64_t Size = 0;
-        if (auto *Elf32LE = dyn_cast<ELF32LEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf32LE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        } else if (auto *Elf64LE = dyn_cast<ELF64LEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf64LE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        } else if (auto *Elf32BE = dyn_cast<ELF32BEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf32BE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        } else if (auto *Elf64BE = dyn_cast<ELF64BEObjectFile>(&Obj)) {
-            if (auto SymOrErr = Elf64BE->getSymbol(Sym.getRawDataRefImpl())) Size = (*SymOrErr)->st_size;
-        }
-        if (Size > 0) FunctionBoundaries[Addr] = Addr + Size;
-    }
+    FunctionBoundaries FunctionRanges = collectFunctionBoundaries(*Obj);
 
     Stats optLoop;
     std::map<size_t, std::map<size_t, size_t>> dist2D; // [InstrBucket100][BranchCount] -> Freq
-    
-    for (const SectionRef &Section : Obj.sections()) {
-        if (!Section.isText() || Section.getSize() == 0) continue;
-        uint64_t SAddr = Section.getAddress();
-        auto ContentsOrErr = Section.getContents();
-        if (!ContentsOrErr) continue;
-        StringRef Contents = *ContentsOrErr;
 
-        std::vector<Instr> SectionInstrs;
-        SectionInstrs.reserve(Contents.size() / 4);
-        ArrayRef<uint8_t> Data(reinterpret_cast<const uint8_t*>(Contents.data()), Contents.size());
-        for (uint64_t Index = 0; Index < Data.size(); ) {
-            MCInst Inst;
-            uint64_t Size;
-            auto Status = DisAsm->getInstruction(Inst, Size, Data.slice(Index), SAddr + Index, nulls());
-            if (Status != MCDisassembler::Success) { Index++; continue; }
-            Instr I;
-            I.Addr = SAddr + Index; I.Inst = Inst;
-            I.IsBranch = MCII->get(Inst.getOpcode()).isBranch();
-            I.EndsBB = I.IsBranch || MCII->get(Inst.getOpcode()).isTerminator();
-            I.BranchTarget = 0;
-            if (I.IsBranch) MCIA->evaluateBranch(Inst, I.Addr, Size, I.BranchTarget);
-            SectionInstrs.push_back(I);
-            Index += Size;
-        }
+    for (const SectionRef &Section : Obj->sections()) {
+        if (!Section.isText() || Section.getSize() == 0) continue;
+
+        std::vector<Instr> SectionInstrs = disassembleTextSection(Section, *TI.DisAsm, *TI.MCII, TI.MCIA.get());
 
         auto find_idx = [&](uint64_t addr) -> int64_t {
             auto it = std::lower_bound(SectionInstrs.begin(), SectionInstrs.end(), addr,
@@ -135,8 +57,8 @@ int main(int argc, char **argv) {
                 if (start_idx != -1) {
                     size_t sz = i - (size_t)start_idx + 1;
                     bool same_func = false;
-                    auto it = FunctionBoundaries.upper_bound(I.Addr);
-                    if (it != FunctionBoundaries.begin()) {
+                    auto it = FunctionRanges.upper_bound(I.Addr);
+                    if (it != FunctionRanges.begin()) {
                         --it;
                         if (I.Addr >= it->first && I.Addr < it->second && I.BranchTarget >= it->first && I.BranchTarget < it->second) same_func = true;
                     }
