@@ -745,3 +745,49 @@ TEST(FacileTest, X1DotProductAccumulatorLatency) {
     // an ordinary 2c ORR on the X1 (its zero-latency list is GPR moves only).
     EXPECT_NEAR(runFacileAArch64(TC, "sdot v0.4s, v1.16b, v2.16b\nmov v1.16b, v0.16b\n").PrecedenceBound, 4.0, 0.01);
 }
+
+// ---------------------------------------------------------------------------
+// Stores with a writeback base update (docs.md section 4.F).  The base update is
+// produced by the address side of the store, so it must not wait for the store
+// data.  The recurrences below are written without a branch: facile adds the
+// loop-carried edges itself.
+// ---------------------------------------------------------------------------
+
+// Data comes from a load off the same base register that the store updates.  The
+// only recurrence is the 1-cycle base update; the ldr -> sub -> str data path is
+// not part of a cycle.  Before the fix this was ldr(4) + sub(1) + str(1) = 6.
+TEST(FacileTest, PostIndexStoreWritebackDoesNotDependOnStoreData) {
+    initLLVMAArch64();
+    for (const char *cpu : {"cortex-a78", "cortex-x1", "cortex-a720", "cortex-a76", "firestorm", "icestorm"}) {
+        AArch64TestContext TC(cpu);
+        auto Res = runFacileAArch64(TC, "ldr w1, [x0]\nsub w1, w1, #10\nstr w1, [x0], #4\ncmp x0, x21\n");
+        EXPECT_LE(Res.PrecedenceBound, 1.0) << cpu;
+        EXPECT_GE(Res.PrecedenceBound, 1.0) << cpu;  // the base update itself stays a 1-cycle recurrence
+    }
+}
+
+TEST(FacileTest, PreIndexAndPairStoreWritebackDoNotDependOnStoreData) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a78");
+    EXPECT_NEAR(runFacileAArch64(TC, "ldr w1, [x0]\nsub w1, w1, #10\nstr w1, [x0, #4]!\ncmp x0, x21\n").PrecedenceBound, 1.0, 0.01);
+    EXPECT_NEAR(runFacileAArch64(TC, "ldp w1, w2, [x0]\nadd w1, w1, w2\nstp w1, w2, [x0], #8\ncmp x0, x21\n").PrecedenceBound, 1.0, 0.01);
+}
+
+// What was not wrong stays as it was: a load with writeback, a store whose base is
+// updated by a separate add, and a data recurrence that does not involve the base.
+TEST(FacileTest, StoreWritebackChangeLeavesOtherRecurrencesAlone) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a78");
+    EXPECT_NEAR(runFacileAArch64(TC, "ldr w1, [x0], #4\nsub w1, w1, #10\nstr w1, [x2], #4\ncmp x0, x21\n").PrecedenceBound, 1.0, 0.01);
+    EXPECT_LE(runFacileAArch64(TC, "ldr w1, [x0]\nsub w1, w1, #10\nstr w1, [x0]\nadd x0, x0, #4\ncmp x0, x21\n").PrecedenceBound, 1.0);
+    EXPECT_NEAR(runFacileAArch64(TC, "ldr w1, [x0], #4\nadd w2, w2, w1\ncmp x0, x21\n").PrecedenceBound, 1.0, 0.01);
+}
+
+// The address side still counts: if the base register is itself loaded (a pointer
+// chase), the writeback depends on that load and the recurrence is ldr (4) + base
+// update (1).
+TEST(FacileTest, StoreWritebackStillDependsOnItsBaseRegister) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a78");
+    EXPECT_NEAR(runFacileAArch64(TC, "ldr x0, [x0]\nstr w1, [x0], #8\n").PrecedenceBound, 5.0, 0.01);
+}

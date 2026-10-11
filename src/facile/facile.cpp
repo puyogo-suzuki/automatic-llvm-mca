@@ -197,23 +197,74 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
     return MaxPortBound;
 }
 
+// A store with a writeback base update (STR/STP post- or pre-index, ST1.. post-index)
+// writes the base register it also reads; no other def of a store is read by the
+// store itself (STXR's status register, the only other kind, is not).  Returns the
+// operand index of that base register, i.e. the first ADDRESS operand: every
+// register use with a smaller explicit operand index is store DATA.  Returns -1 if
+// `Inst` is not such a store, or has no store data to separate from.
+//
+// The writeback is produced by the address-generation side (the SOGs split a store
+// into an address and a data uOP), so it does not wait for the data.  See docs.md
+// section 4.F.
+int storeWritebackAddressOperand(const llvm::mca::Instruction &Inst) {
+    if (!Inst.getMayStore()) return -1;
+    for (const llvm::mca::WriteState &W : Inst.getDefs()) {
+        if (W.getRegisterID() == 0) continue;
+        for (const llvm::mca::ReadState &R : Inst.getUses()) {
+            if (R.getRegisterID() != W.getRegisterID() || R.getDescriptor().OpIndex < 0) continue;
+            const int Base = R.getDescriptor().OpIndex;
+            for (const llvm::mca::ReadState &D : Inst.getUses())
+                if (D.getRegisterID() != 0 && D.getDescriptor().OpIndex >= 0 && D.getDescriptor().OpIndex < Base) return Base;
+        }
+    }
+    return -1;
+}
+
+// True if `W` is the base-register update of a store (see above).
+bool isStoreWritebackDef(const llvm::mca::Instruction &Inst, const llvm::mca::WriteState &W) {
+    if (!Inst.getMayStore() || W.getRegisterID() == 0) return false;
+    for (const llvm::mca::ReadState &R : Inst.getUses())
+        if (R.getRegisterID() == W.getRegisterID() && R.getDescriptor().OpIndex >= 0) return true;
+    return false;
+}
+
 // 3. Build Read-After-Write (RAW) Register Dependency Graph
+//
+// One node per instruction, plus one extra node per store with a writeback (see
+// storeWritebackAddressOperand()): that node reads only the address registers and
+// is the producer of the writeback register, so the base update does not appear
+// to wait for the store data.  The extra nodes are numbered after the
+// instructions, so instruction indices are unchanged.
 std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     const llvm::MCSubtargetInfo &STI,
     llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs) {
 
     size_t N = SimInstrs.size();
     std::vector<std::vector<DependencyEdge>> Adj(N);
-    std::map<unsigned, size_t> LastWriter;
+    // For each register: the node that last wrote it and the INSTRUCTION whose
+    // def latency applies (they differ for a writeback node).
+    struct Writer { size_t Node; size_t Inst; };
+    std::map<unsigned, Writer> LastWriter;
     // Instruction index + the index of the USE SLOT within that instruction's
     // getUses(), so that the loop-carried edge built in Pass 2 can be given
     // the same per-operand ReadAdvance treatment as the intra-iteration ones.
     std::map<unsigned, std::pair<size_t, size_t>> FirstReader;
     std::set<unsigned> DefinedRegs;
+    // Address-register reads of writeback nodes that happen before the register is
+    // redefined in the iteration: they read the previous iteration's value.
+    struct EarlyRead { size_t Node; size_t Inst; size_t Slot; unsigned Reg; };
+    std::vector<EarlyRead> EarlyReads;
 
     // Pass 1: Intra-iteration dependencies & Live-In reads
     for (size_t i = 0; i < N; ++i) {
         const auto &Inst = SimInstrs[i];
+        const int AddrOp = storeWritebackAddressOperand(*Inst);
+        size_t WbNode = 0;
+        if (AddrOp >= 0) {
+            WbNode = Adj.size();
+            Adj.emplace_back();
+        }
 
         size_t UseSlot = 0;
         for (const auto &Op : Inst->getUses()) {
@@ -227,20 +278,22 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
                 }
             }
 
+            const bool IsAddressUse = AddrOp >= 0 && Op.getDescriptor().OpIndex >= AddrOp;
+            if (IsAddressUse && DefinedRegs.find(Reg) == DefinedRegs.end())
+                EarlyReads.push_back({WbNode, i, ThisSlot, Reg});
+
             auto it = LastWriter.find(Reg);
-            if (it != LastWriter.end()) {
-                size_t WriterIdx = it->second;
-                if (WriterIdx < i) {
-                    double Lat = getEdgeLatency(STI, *SimInstrs[WriterIdx], Op, Reg);
-                    Adj[WriterIdx].push_back({i, Lat, 0});
-                }
+            if (it != LastWriter.end() && it->second.Inst < i) {
+                double Lat = getEdgeLatency(STI, *SimInstrs[it->second.Inst], Op, Reg);
+                Adj[it->second.Node].push_back({i, Lat, 0});
+                if (IsAddressUse) Adj[it->second.Node].push_back({WbNode, Lat, 0});
             }
         }
 
         for (const auto &Op : Inst->getDefs()) {
             unsigned Reg = Op.getRegisterID();
             if (Reg != 0) {
-                LastWriter[Reg] = i;
+                LastWriter[Reg] = {(AddrOp >= 0 && isStoreWritebackDef(*Inst, Op)) ? WbNode : i, i};
                 DefinedRegs.insert(Reg);
             }
         }
@@ -253,13 +306,22 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
         size_t ReaderSlot = entry.second.second;
         auto it = LastWriter.find(Reg);
         if (it != LastWriter.end()) {
-            size_t WriterIdx = it->second;
             const auto &Uses = SimInstrs[ReaderIdx]->getUses();
             double Lat = (ReaderSlot < Uses.size())
-                             ? getEdgeLatency(STI, *SimInstrs[WriterIdx], Uses[ReaderSlot], Reg)
-                             : getInstLatency(*SimInstrs[WriterIdx]);
-            Adj[WriterIdx].push_back({ReaderIdx, Lat, 1});
+                             ? getEdgeLatency(STI, *SimInstrs[it->second.Inst], Uses[ReaderSlot], Reg)
+                             : getInstLatency(*SimInstrs[it->second.Inst]);
+            Adj[it->second.Node].push_back({ReaderIdx, Lat, 1});
         }
+    }
+    // The writeback nodes' own loop-carried reads (the base register updates itself).
+    for (const EarlyRead &E : EarlyReads) {
+        auto it = LastWriter.find(E.Reg);
+        if (it == LastWriter.end()) continue;
+        const auto &Uses = SimInstrs[E.Inst]->getUses();
+        double Lat = (E.Slot < Uses.size())
+                         ? getEdgeLatency(STI, *SimInstrs[it->second.Inst], Uses[E.Slot], E.Reg)
+                         : getInstLatency(*SimInstrs[it->second.Inst]);
+        Adj[it->second.Node].push_back({E.Node, Lat, 1});
     }
 
     return Adj;
@@ -619,7 +681,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     auto Adj = buildDependencyGraph(STI, SimInstrs);
     if (!MemInfos.empty())
         addMemoryDependencies(MCII, MRI, SimInstrs, MCInsts, MemInfos, Adj);
-    Res.PrecedenceBound = calculatePrecedenceBound(SimInstrs.size(), Adj);
+    Res.PrecedenceBound = calculatePrecedenceBound(Adj.size(), Adj);
 
     // 4. Overall Max Bottleneck Prediction
     Res.EstimatedCycles = std::max({Res.IssueBound, Res.PortBound, Res.PrecedenceBound});

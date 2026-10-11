@@ -496,6 +496,25 @@ TWO INDEPENDENT front-end bounds, both documented for every Arm core this tool m
 
 The numbers per core are in `cpu_traits.cpp`: uop dispatch width A76 8, A78 12, A720 10, X1 16; Mops per cycle A76 4, A78 6, A720 5, X1 8. The decode width (A78 4, X1 5) is deliberately not modelled: the tool bounds hot-loop front-end throughput by the rename/dispatch width. Cores that only share a uop width with a modelled core (`cortex-a710`, `cortex-a715`, `neoverse-n2`; `neoverse-v1`) keep no Mop cap because their own SOGs have not been consulted; the Apple cores have none because `computeFacilePrediction()` already forces `NumMicroOps = 1` for coalesced-ROB CPUs.
 
+### F. Stores with a writeback base update (`buildDependencyGraph`)
+
+A pre- or post-index store (`str w1,[x0],#4`, `str w1,[x0,#4]!`, `stp ...,[x0],#8`, `st1 ...,[x0],#16`) writes the base register it reads. The SOGs split a store into an address uOP and a data uOP at dispatch; the base update belongs to the address side, so it is available about one cycle (`WriteAdr`) after the base register, **regardless of when the store data is ready**.
+
+The dependence graph has one node per instruction, so the base update used to inherit the data dependence: in the in-place update loop
+
+```text
+ldr w1, [x0]
+sub w1, w1, #10
+str w1, [x0], #4      // base update
+cmp x0, x21
+```
+
+the cycle ldr (4) + sub (1) + str (1) = 6 cycles per iteration was reported as the precedence bound, although the only real recurrence is the one-cycle base update. The same loop with the update written as a separate `add x0, x0, #4` was not affected. Vectorised in-place updates (`ldr q`, arithmetic, `str q,[x],#16`) were affected the same way: 9 and 13 cycles became 1 and 2.
+
+The fix gives such a store a second node. That node reads only the address registers (the base and, for ASIMD post-index forms, the register increment: every register use whose explicit operand index is at or after the tied base operand) and is the producer of the base register; the store's own node keeps all its inputs, so the store data and the address still feed the store itself. The extra nodes are numbered after the instructions, so instruction indices, the port and issue bounds and the memory-dependence edges are unchanged. The node also reads the base register's value from the previous iteration, which keeps the one-cycle base update a recurrence. The writeback def is recognised as "a def of a store that the same instruction also reads"; the latency is the one the scheduling model gives that def (`WriteAdr`), not a new constant.
+
+Loads with writeback were not affected (their only use is the base), and neither were stores whose base is updated by a separate `add`.
+
 ## 5. Scheduling-Model Plumbing
 
 ### A. SchedClass index remapping (`remapSchedClassIndices`)
