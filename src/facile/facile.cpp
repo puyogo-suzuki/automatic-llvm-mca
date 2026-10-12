@@ -1,5 +1,6 @@
 #include "facile/facile.h"
 #include "cpu/cpu_traits.h"
+#include "cpu/sched_model.h"
 #include "facile/fusion.h"
 #include "facile/n2_corrections.h"
 #include "mlp/mlp_types.h"
@@ -730,7 +731,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     Res.TotalInstructions = SimInstrs.size();
 
     // For Coalesced ROB CPUs (Apple Firestorm / Icestorm), normalize NumMicroOps to 1 (MOP-based)
-    if (isCoalescedROBCPU(STI.getCPU())) {
+    if (isCoalescedROBSubtarget(STI)) {
         for (const auto &Inst : SimInstrs) {
             llvm::mca::InstrDesc &MutableDesc = const_cast<llvm::mca::InstrDesc &>(Inst->getDesc());
             MutableDesc.NumMicroOps = 1;

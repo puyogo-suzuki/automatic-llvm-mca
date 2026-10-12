@@ -100,6 +100,8 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     }
 
     TI.Analyzer = MLPAnalyzer::create(*TI.STI);
+    if (TI.Analyzer)
+        TI.Analyzer->setWindowResources(getCpuTraits(TI.CPU).MlpWindow);
 
     return true;
 }

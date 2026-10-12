@@ -713,3 +713,86 @@ TEST(MLPTest, FirestormMCASimulation) {
     EXPECT_TRUE(M.Valid);
     EXPECT_GT(M.Cycles, 0u);
 }
+
+
+// -----------------------------------------------------------------------------
+// WindowResources (Firestorm's in-flight-limit window): per-instruction costs and
+// the window ending at the first exceeded limit.
+// -----------------------------------------------------------------------------
+TEST(MLPTest, AArch64WindowCosts) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    AArch64MLPAnalyzer analyzer;
+    // add: 1 rename; adds: result + NZCV = 2; str: 0 rename, 1 store;
+    // ldp: 2 renames, 2 load slots; stp: 2 store slots; mov: 1 rename.
+    auto instrs = parseAsm(TC,
+        "add x0, x1, x2\nadds x3, x1, x2\nstr x4, [x5]\nldp x6, x7, [x8]\n"
+        "stp x9, x10, [x11]\nmov x12, #1\nldr x13, [x14]");
+    ASSERT_EQ(instrs.size(), 7u);
+    std::vector<MLPInstInfo> v = buildInstInfos(instrs, *TC.STI, *TC.MCII, *TC.MRI, &analyzer);
+    EXPECT_EQ(v[0].rename_entries, 1);
+    EXPECT_EQ(v[1].rename_entries, 2);
+    EXPECT_EQ(v[2].rename_entries, 0);
+    EXPECT_EQ(v[2].store_slots, 1);
+    EXPECT_EQ(v[3].rename_entries, 2);
+    EXPECT_EQ(v[3].load_slots, 2);
+    EXPECT_EQ(v[4].store_slots, 2);
+    EXPECT_EQ(v[5].rename_entries, 1);
+    EXPECT_EQ(v[6].load_slots, 1);
+    for (const auto &i : v) EXPECT_EQ(i.branch_slots, 0);
+}
+
+
+TEST(MLPTest, AArch64WindowResourcesLoadSlots) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    AArch64MLPAnalyzer analyzer;
+    // Four independent loads on distinct bases.  A 3-load-slot window sees 3 loads
+    // from each of the first two starting loads, then 2 and 1.
+    auto instrs = parseAsm(TC, "ldr x1, [x2]\nldr x3, [x4]\nldr x5, [x6]\nldr x7, [x8]");
+    ASSERT_EQ(instrs.size(), 4u);
+    float ratio = 0.0f;
+    analyzer.setWindowResources({1000, 3, 1000, 1000, 100});
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                                     *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    EXPECT_NEAR(val, 4.0 / (1.0 / 3 + 1.0 / 3 + 1.0 / 2 + 1.0), 0.01);
+
+    // Without limits (plain width) the first load sees all four.
+    analyzer.setWindowResources({});
+    val = analyzer.compute_mlp(instrs, 100, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                               *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    EXPECT_NEAR(val, 4.0 / (1.0 / 4 + 1.0 / 3 + 1.0 / 2 + 1.0), 0.01);
+}
+
+
+TEST(MLPTest, AArch64WindowResourcesLdpCountsTwo) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    AArch64MLPAnalyzer analyzer;
+    // The LDP takes 2 of the 3 load slots, so only one more load fits behind it.
+    auto instrs = parseAsm(TC, "ldp x1, x2, [x3]\nldr x4, [x5]\nldr x6, [x7]");
+    ASSERT_EQ(instrs.size(), 3u);
+    float ratio = 0.0f;
+    analyzer.setWindowResources({1000, 3, 1000, 1000, 100});
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                                     *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    // Windows: {ldp, ldr} = 2, {ldr, ldr} = 2, {ldr} = 1.
+    EXPECT_NEAR(val, 3.0 / (0.5 + 0.5 + 1.0), 0.01);
+}
+
+
+TEST(MLPTest, AArch64WindowResourcesRenameEntries) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    AArch64MLPAnalyzer analyzer;
+    // Each load (and add) writes one register; a 2-entry rename queue ends the
+    // window after two of them.
+    auto instrs = parseAsm(TC, "ldr x1, [x2]\nadd x9, x9, #1\nldr x3, [x4]");
+    ASSERT_EQ(instrs.size(), 3u);
+    float ratio = 0.0f;
+    analyzer.setWindowResources({2, 1000, 1000, 1000, 100});
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                                     *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    // First load's window = {ldr, add}: 1 load.  Second load: 1.
+    EXPECT_NEAR(val, 1.0, 0.01);
+}

@@ -2,6 +2,7 @@
 #include "a55/a55_adaptations.h"
 #include "a55/a55_issue_stage.h"
 #include "cpu/cpu_traits.h"
+#include "cpu/sched_model.h"
 #include "mca/steady_state_tracker.h"
 #include <algorithm>
 #include <memory>
@@ -86,7 +87,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
             }
             MutableDesc.MaxLatency = MaxLatency;
         }
-        if (isCoalescedROBCPU(STI.getCPU())) {
+        if (isCoalescedROBSubtarget(STI)) {
             mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
             MutableDesc.NumMicroOps = 1;
         }

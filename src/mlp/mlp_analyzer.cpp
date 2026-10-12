@@ -128,6 +128,16 @@ std::vector<MLPInstInfo> buildInstInfos(
 
         inst_infos[i].num_uops = static_cast<short>(getNumMicroOps(Inst, STI, MCII));
         inst_infos[i].mem_info = mem_info;
+        {
+            // AArch64 pair / exclusive-pair forms transfer two registers.
+            std::string nm = MCII.getName(Inst.getOpcode()).upper();
+            auto starts = [&](const char *pfx) { return StringRef(nm).starts_with(pfx); };
+            bool pair_load = starts("LDP") || starts("LDNP") || starts("LDXP") || starts("LDAXP");
+            bool pair_store = starts("STP") || starts("STNP") || starts("STXP") || starts("STLXP");
+            inst_infos[i].load_slots = mem_info.is_load() ? (pair_load ? 2 : 1) : 0;
+            inst_infos[i].store_slots = mem_info.is_store() ? (pair_store ? 2 : 1) : 0;
+            inst_infos[i].branch_slots = (MCID.isBranch() || MCID.isCall() || MCID.isReturn()) ? 1 : 0;
+        }
         for (unsigned j = 0; j < Inst.getNumOperands(); ++j) {
             const MCOperand& Op = Inst.getOperand(j);
             if (Op.isReg() && Op.getReg() != 0) {
@@ -143,6 +153,7 @@ std::vector<MLPInstInfo> buildInstInfos(
         for (MCPhysReg R : MCID.implicit_uses()) {
             if (!Analyzer->isZeroRegister(R, MRI)) inst_infos[i].io_regs.inputs.push_back(R);
         }
+        inst_infos[i].rename_entries = static_cast<short>(inst_infos[i].io_regs.outputs.size());
     }
     return inst_infos;
 }

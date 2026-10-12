@@ -38,3 +38,22 @@ TEST(CpuTraitsTest, TableContents) {
         EXPECT_EQ(T.Fusion, FusionTable::None) << n;
     }
 }
+
+
+// Apple's cores are recognised from the installed sched model: LLVM reports
+// getCPU() == "apple-a14" for both, so the CPU name cannot be used.
+TEST(CpuTraitsTest, CoalescedROBSubtargetFromSchedModel) {
+    initLLVMAArch64();
+    {
+        AArch64TestContext fire("firestorm");
+        EXPECT_TRUE(isCoalescedROBSubtarget(*fire.STI));
+    }
+    {
+        AArch64TestContext ice("icestorm");
+        EXPECT_TRUE(isCoalescedROBSubtarget(*ice.STI));
+    }
+    {
+        AArch64TestContext a78("cortex-a78");
+        EXPECT_FALSE(isCoalescedROBSubtarget(*a78.STI));
+    }
+}

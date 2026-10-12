@@ -47,6 +47,12 @@ struct RegDeps {
 struct MLPInstInfo {
     std::bitset<3> flags; // bit 0: is_load, bit 1: is_store, bit 2: is_call
     short num_uops = 1;
+    // Resources this instruction occupies in the out-of-order window; see
+    // WindowResources in cpu/cpu_traits.h.
+    short rename_entries = 0;
+    short load_slots = 0;
+    short store_slots = 0;
+    short branch_slots = 0;
     RegDeps io_regs;
     MemAccessInfo mem_info;
 

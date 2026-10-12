@@ -7,6 +7,7 @@
 #include "mca/mca_simulation.h"
 #include "mlp/mlp_analyzer.h"
 #include "cpu/cpu_traits.h"
+#include "cpu/sched_model.h"
 #include "frontend/frontend.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/MC/TargetRegistry.h"

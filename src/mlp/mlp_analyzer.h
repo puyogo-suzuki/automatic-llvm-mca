@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <string>
+#include "cpu/cpu_traits.h"
 #include "mlp/mlp_types.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/MC/MCInstrInfo.h"
@@ -31,6 +32,13 @@ public:
 
     static std::unique_ptr<MLPAnalyzer> create(const llvm::MCSubtargetInfo &STI);
 
+    // In-flight limits that end the MLP window for this core (see
+    // WindowResources).  Set by the frontend from the --mcpu name; NOT derived
+    // from MCSubtargetInfo::getCPU(), which reports LLVM's own CPU name
+    // ("apple-a14" for both firestorm and icestorm).  Default: not enabled.
+    void setWindowResources(const WindowResources &r) { windowRes_ = r; }
+    const WindowResources &windowResources() const { return windowRes_; }
+
     virtual MemAccessInfo getMemAccessInfo(const llvm::MCInst &Inst,
                                            const llvm::MCInstrDesc &MCID,
                                            const llvm::MCRegisterInfo &MRI,
@@ -53,6 +61,9 @@ public:
                                            const llvm::MCRegisterInfo& MRI,
                                            DependencyKind depKind = DependencyKind::None,
                                            bool mlpWindowLoop = false) const;
+
+private:
+    WindowResources windowRes_;
 };
 
 class RISCVMLPAnalyzer : public MLPAnalyzer {

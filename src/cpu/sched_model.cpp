@@ -75,6 +75,11 @@ public:
     }
 };
 
+bool isCoalescedROBSubtarget(const MCSubtargetInfo &STI) {
+    const MCSchedModel *M = &STI.getSchedModel();
+    return M == &FirestormModel || M == &IcestormModel;
+}
+
 std::unique_ptr<MCSubtargetInfo> wrapCustomSubtargetInfo(std::unique_ptr<MCSubtargetInfo> STI, StringRef CPUName) {
     if (!STI) return STI;
     return std::make_unique<CustomSubtargetInfo>(std::move(STI));

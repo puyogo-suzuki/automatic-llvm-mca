@@ -17,7 +17,7 @@ namespace {
 //
 // The Apple icestorm/firestorm entries have no Mop width either:
 // computeFacilePrediction() already forces NumMicroOps = 1 for the
-// coalesced-ROB CPUs (isCoalescedROBCPU()), so their dispatch width already
+// coalesced-ROB CPUs (isCoalescedROBSubtarget()), so their dispatch width already
 // IS a Mop-level width and must not get a second, redundant cap.
 llvm::StringMap<CpuTraits> buildTable() {
     llvm::StringMap<CpuTraits> T;
@@ -61,6 +61,19 @@ llvm::StringMap<CpuTraits> buildTable() {
     CpuTraits Ice;  Ice.Model = CpuModel::Icestorm;
     T["icestorm"] = Ice;
     CpuTraits Fire; Fire.Model = CpuModel::Firestorm;
+    // MLP window limits, from Dougall Johnson's Firestorm page
+    // (https://dougallj.github.io/applecpu/firestorm.html).  There is no Arm SOG
+    // for Apple cores, so these are not SOG values; the page's numbers are
+    // approximate ("~").
+    //   rename retire queue ~623 entries: every write to an architectural register
+    //     takes one (add/mov 1, adds/ldp 2, cbz/str 0);
+    //   ~130 loads, ~60 stores, ~144 branches in flight;
+    //   MaxInsts: the coalesced retire queue holds ~330 retire groups of at most 7
+    //     uops, so no window holds more than 330 * 7 instructions (the page quotes
+    //     "over 2200 nop").  The group-forming rules themselves are not modelled.
+    // The physical register files are deliberately not used (the page marks their
+    // sizes uncertain).
+    Fire.MlpWindow = {623, 130, 60, 144, 330 * 7};
     T["firestorm"] = Fire;
 
     return T;

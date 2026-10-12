@@ -32,8 +32,25 @@ enum class FusionTable {
     A720,         // A720 SOG sec. 4.11
 };
 
+// Out-of-order window limits for the MLP window, for cores whose published
+// documentation gives several independent in-flight limits instead of one
+// uop-counted ROB.  The MLP window (mlp/mlp_window.cpp) ends at the first
+// instruction that would exceed any of them.  All zero = not used (the window is
+// then `MicroOpBufferSize` uops, or --window-width).
+struct WindowResources {
+    unsigned RenameEntries = 0;   // architectural-register writes in flight (zero registers excluded)
+    unsigned LoadSlots = 0;       // loads in flight (an LDP counts as 2)
+    unsigned StoreSlots = 0;      // stores in flight (an STP counts as 2)
+    unsigned BranchSlots = 0;     // branches (incl. calls/returns) in flight
+    unsigned MaxInsts = 0;        // absolute cap on instructions in the window
+    bool enabled() const { return MaxInsts != 0; }
+};
+
 struct CpuTraits {
     CpuModel Model = CpuModel::None;
+
+    // See WindowResources.  Only Firestorm sets it.
+    WindowResources MlpWindow;
 
     // Real uOP dispatch/issue width from the SOG, in uops per cycle.  Used as
     // PipelineOptions::DispatchWidth instead of the borrowed model's
@@ -59,12 +76,6 @@ struct CpuTraits {
     // (The X1's NeoverseV1Model does not have these defects.)
     bool N2ModelCorrections = false;
 };
-
-// Apple's Firestorm/Icestorm coalesce several uops into one ROB entry, so every
-// instruction counts as a single uop there.
-inline bool isCoalescedROBCPU(llvm::StringRef CPU) {
-    return CPU.equals_insensitive("firestorm") || CPU.equals_insensitive("icestorm");
-}
 
 // Unknown CPU names (including "generic") get a default-constructed CpuTraits.
 // Keyed by the CPU name as MCSubtargetInfo::getCPU() reports it.
