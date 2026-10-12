@@ -791,3 +791,137 @@ TEST(FacileTest, StoreWritebackStillDependsOnItsBaseRegister) {
     AArch64TestContext TC("cortex-a78");
     EXPECT_NEAR(runFacileAArch64(TC, "ldr x0, [x0]\nstr w1, [x0], #8\n").PrecedenceBound, 5.0, 0.01);
 }
+
+// ---------------------------------------------------------------------------
+// Memory dependence when the index register changes between store and load
+// (docs.md section 4.G).  The loops are written so that the memory edge is part
+// of a cycle: the loaded value feeds the data of the store.
+// ---------------------------------------------------------------------------
+namespace {
+// PrecedenceBound with the memory edges minus without them: > 0 iff a memory
+// dependence closes a recurrence.
+double memoryEdgeEffect(const std::string &body) {
+    AArch64TestContext TC("cortex-a78");
+    return runFacileAArch64Mem(TC, body).PrecedenceBound - runFacileAArch64(TC, body).PrecedenceBound;
+}
+}  // namespace
+
+// The index moves by 2 and the accesses are 2 bytes wide: the load reads the NEXT
+// element, so there is no memory dependence (x264 quant_4x4).
+TEST(FacileTest, MemoryNoEdgeWhenIndexAdvancesPastTheStore) {
+    initLLVMAArch64();
+    EXPECT_DOUBLE_EQ(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4]\nadd x4, x4, #2\nldrsh w5, [x0, x4]\n"), 0.0);
+    // Scaled form: str w [x0, x4, lsl #2] then x4 += 1 is 4 bytes further.
+    EXPECT_DOUBLE_EQ(memoryEdgeEffect("add w3, w3, w5\nstr w3, [x0, x4, lsl #2]\nadd x4, x4, #1\nldr w5, [x0, x4, lsl #2]\n"), 0.0);
+    // Moving back is just as disjoint.
+    EXPECT_DOUBLE_EQ(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4]\nsub x4, x4, #2\nldrsh w5, [x0, x4]\n"), 0.0);
+}
+
+// Everything that is not statically disjoint keeps the edge.
+TEST(FacileTest, MemoryEdgeKeptUnlessProvablyDisjoint) {
+    initLLVMAArch64();
+    // Same address: the index is not updated between them.
+    EXPECT_GT(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4]\nldrsh w5, [x0, x4]\n"), 0.0);
+    // The index moves by 1 byte but the accesses are 2 bytes: they overlap.
+    EXPECT_GT(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4]\nadd x4, x4, #1\nldrsh w5, [x0, x4]\n"), 0.0);
+    // The index is rewritten by something that is not add/sub of an immediate.
+    EXPECT_GT(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4]\nmov x4, x6\nldrsh w5, [x0, x4]\n"), 0.0);
+    // Different scaling of the index in the two accesses: not comparable.
+    EXPECT_GT(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4, lsl #1]\nadd x4, x4, #1\nldr w5, [x0, x4, lsl #2]\n"), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// FP multiply-accumulate (SOGs: FMADD / FMLA "4 (2)"): result latency 4, and the
+// accumulate operand is needed 2 cycles early, so a chain of accumulations costs
+// 2 cycles each.  The A720 model used to treat FMADD as an FMUL (3, no early read).
+// ---------------------------------------------------------------------------
+TEST(FacileTest, FmaAccumulateChainIsTwoCyclesPerLink) {
+    initLLVMAArch64();
+    // (cortex-a76 / cortex-a78 are not listed: this fixture runs them on libLLVM's stock
+    // tables, not on the models the tool installs - see AArch64TestContext.)
+    for (const char *cpu : {"cortex-x1", "cortex-a720"}) {
+        AArch64TestContext TC(cpu);
+        EXPECT_NEAR(runFacileAArch64(TC, "fmadd d0, d1, d2, d0\n").PrecedenceBound, 2.0, 0.01) << cpu;
+        EXPECT_NEAR(runFacileAArch64(TC, "fmadd d0, d1, d2, d0\nfmadd d0, d3, d4, d0\n").PrecedenceBound, 4.0, 0.01) << cpu;
+    }
+    AArch64TestContext A720("cortex-a720");
+    EXPECT_NEAR(runFacileAArch64(A720, "fmla v0.4s, v1.4s, v2.4s\n").PrecedenceBound, 2.0, 0.01);
+}
+
+// A720 SOG: the result of an FP multiply is forwarded late to the accumulate operand
+// (FMUL 3 - 2 = 1), but a non-accumulate operand sees the full latency (4).
+TEST(FacileTest, A720FmulToAccumulateForwarding) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a720");
+    // fmadd (4, through a multiplicand) -> fmul (3, to the accumulator: 1) = 4 + 1.
+    EXPECT_NEAR(runFacileAArch64(TC, "fmadd d0, d1, d2, d3\nfmul d3, d0, d4\n").PrecedenceBound, 5.0, 0.01);
+}
+
+// ---------------------------------------------------------------------------
+// FP divide / square root latency, one value per form (docs.md section 4.I).
+// A self-dependent chain makes the precedence bound equal to the latency.
+// ---------------------------------------------------------------------------
+namespace {
+double fpChainLatency(const char *cpu, const std::string &insn) {
+    AArch64TestContext TC(cpu);
+    return runFacileAArch64(TC, insn).PrecedenceBound;
+}
+}  // namespace
+
+TEST(FacileTest, A720FpDivSqrtLatencyPerFormFromSog) {
+    initLLVMAArch64();
+    // Scalar: H 5, S 7, D 12 for both.
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fdiv h0, h0, h1\n"), 5.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fdiv s0, s0, s1\n"), 7.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fdiv d0, d0, d1\n"), 12.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fsqrt s0, s0\n"), 7.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fsqrt d0, d0\n"), 12.0, 0.01);
+    // ASIMD: D-form F32 8, Q-form F32 10, Q-form F64 13.
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fdiv v0.2s, v0.2s, v1.2s\n"), 8.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fdiv v0.4s, v0.4s, v1.4s\n"), 10.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-a720", "fsqrt v0.2d, v0.2d\n"), 13.0, 0.01);
+}
+
+// X1: the best latency of the SOG range (7 to 10 / 7 to 15 / 7 to 16).
+TEST(FacileTest, X1FpDivSqrtUsesBestLatencyOfTheSogRange) {
+    initLLVMAArch64();
+    EXPECT_NEAR(fpChainLatency("cortex-x1", "fdiv s0, s0, s1\n"), 7.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-x1", "fdiv d0, d0, d1\n"), 7.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-x1", "fsqrt d0, d0\n"), 7.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-x1", "fdiv v0.2d, v0.2d, v1.2d\n"), 7.0, 0.01);
+    // Q-form F16: FDIV 10 to 13, FSQRT 11 to 13.
+    EXPECT_NEAR(fpChainLatency("cortex-x1", "fdiv v0.8h, v0.8h, v1.8h\n"), 10.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("cortex-x1", "fsqrt v0.8h, v0.8h\n"), 11.0, 0.01);
+}
+
+// Apple: per form, from Dougall Johnson's tables.
+TEST(FacileTest, AppleFpDivSqrtLatencyPerForm) {
+    initLLVMAArch64();
+    EXPECT_NEAR(fpChainLatency("firestorm", "fdiv s0, s0, s1\n"), 8.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("firestorm", "fdiv d0, d0, d1\n"), 10.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("firestorm", "fsqrt d0, d0\n"), 13.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("firestorm", "fdiv v0.4s, v0.4s, v1.4s\n"), 8.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("icestorm", "fdiv v0.4s, v0.4s, v1.4s\n"), 9.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("icestorm", "fdiv v0.2d, v0.2d, v1.2d\n"), 11.0, 0.01);
+    EXPECT_NEAR(fpChainLatency("icestorm", "fsqrt v0.2d, v0.2d\n"), 15.0, 0.01);
+}
+
+// Occupancy of the divider (docs.md section 4.I): the BEST throughput of the SOG range,
+// rounded up to whole cycles.  Two independent instructions -> PortBound = twice the
+// per-instruction time on the unit(s).
+TEST(FacileTest, FpDivSqrtOccupancyIsBestThroughputRoundedUp) {
+    initLLVMAArch64();
+    auto port = [](const char *cpu, const std::string &code) {
+        AArch64TestContext TC(cpu);
+        return runFacileAArch64(TC, code).PortBound;
+    };
+    // X1 (V0/V2 pair): scalar D best 4/7 -> 1.75 cycles -> 2 per instruction; S 8/7 -> 1;
+    // ASIMD Q-form F32 2/7 -> 3.5.
+    EXPECT_NEAR(port("cortex-x1", "fdiv d0, d8, d9\nfdiv d1, d8, d9\n"), 4.0, 0.01);
+    EXPECT_NEAR(port("cortex-x1", "fdiv s0, s8, s9\nfdiv s1, s8, s9\n"), 2.0, 0.01);
+    EXPECT_NEAR(port("cortex-x1", "fdiv v0.4s, v8.4s, v9.4s\nfdiv v1.4s, v8.4s, v9.4s\n"), 7.0, 0.01);
+    // A720: scalar fully pipelined (1); ASIMD as the table prints it (Q-form F16 1/8, Q-form F64 1/2).
+    EXPECT_NEAR(port("cortex-a720", "fdiv d0, d8, d9\nfdiv d1, d8, d9\n"), 2.0, 0.01);
+    EXPECT_NEAR(port("cortex-a720", "fdiv v0.8h, v8.8h, v9.8h\nfdiv v1.8h, v8.8h, v9.8h\n"), 16.0, 0.01);
+    EXPECT_NEAR(port("cortex-a720", "fdiv v0.2d, v8.2d, v9.2d\nfdiv v1.2d, v8.2d, v9.2d\n"), 4.0, 0.01);
+}

@@ -103,22 +103,13 @@ def N1Write_3c_1V0    : SchedWriteRes<[N1UnitV0]> { let Latency = 3; }
 def N1Write_4c_1V0    : SchedWriteRes<[N1UnitV0]> { let Latency = 4; }
 def N1Write_7c7_1V0   : SchedWriteRes<[N1UnitV0]> { let Latency = 7;
                                                     let ReleaseAtCycles = [7]; }
-def N1Write_10c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 10;
+// FP divide / square root.  Every form has its own write below ("N1WriteFDS_<lat>c<occ>",
+// next to the InstRW rows): the A76 SOG gives a latency RANGE and a throughput RANGE that
+// depend on the operands, and the BEST of each is used - the shortest latency, and the
+// unit occupied for ceil(1 / best throughput) cycles.  N1Write_10c7_1V0 is only the
+// WriteFDiv fallback for a form with no row.
+def N1Write_10c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 7;
                                                     let ReleaseAtCycles = [7]; }
-// def N1Write_10c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 7; // Best latency from SOG (7 to 10 cycles)
-//                                                     let ReleaseAtCycles = [7]; }
-def N1Write_13c10_1V0 : SchedWriteRes<[N1UnitV0]> { let Latency = 13;
-                                                    let ReleaseAtCycles = [10]; }
-// def N1Write_13c10_1V0 : SchedWriteRes<[N1UnitV0]> { let Latency = 10; // Best latency from SOG (10 to 13/11 to 13 cycles)
-//                                                     let ReleaseAtCycles = [10]; }
-def N1Write_15c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 15;
-                                                    let ReleaseAtCycles = [7]; }
-// def N1Write_15c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 7; // Best latency from SOG (7 to 15 cycles)
-//                                                     let ReleaseAtCycles = [7]; }
-def N1Write_17c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 17;
-                                                    let ReleaseAtCycles = [7]; }
-// def N1Write_17c7_1V0  : SchedWriteRes<[N1UnitV0]> { let Latency = 7; // Best latency from SOG (7 to 17 cycles)
-//                                                     let ReleaseAtCycles = [7]; }
 def N1Write_2c_1V1    : SchedWriteRes<[N1UnitV1]> { let Latency = 2; }
 def N1Write_3c_1V1    : SchedWriteRes<[N1UnitV1]> { let Latency = 3; }
 def N1Write_4c_1V1    : SchedWriteRes<[N1UnitV1]> { let Latency = 4; }
@@ -468,19 +459,31 @@ def : SchedAlias<WriteFCmp, N1Write_2c_1V0>;
 // FP square root
 def : SchedAlias<WriteFDiv, N1Write_10c7_1V0>;
 
+// FP divide / square root, one write per (best latency, occupancy).  A76 SOG, FP and
+// ASIMD divide / square root tables; best throughput -> occupancy in cycles:
+//   scalar H 4/7 -> 2, S 4/7 -> 2, D 2/7 -> 4 (FSQRT D: 2/7 as well);
+//   ASIMD D-form F16 1/7 -> 7, D-form F32 2/7 -> 4, Q-form F16 1/10 (FDIV) / 1/11 (FSQRT)
+//   -> 10 / 11, Q-form F32 1/7 -> 7, Q-form F64 1/7 -> 7.
+// Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).
+def N1WriteFDS_7c2   : SchedWriteRes<[N1UnitV0]> { let Latency = 7;  let ReleaseAtCycles = [2]; }
+def N1WriteFDS_7c4   : SchedWriteRes<[N1UnitV0]> { let Latency = 7;  let ReleaseAtCycles = [4]; }
+def N1WriteFDS_7c7   : SchedWriteRes<[N1UnitV0]> { let Latency = 7;  let ReleaseAtCycles = [7]; }
+def N1WriteFDS_10c10 : SchedWriteRes<[N1UnitV0]> { let Latency = 10; let ReleaseAtCycles = [10]; }
+def N1WriteFDS_11c11 : SchedWriteRes<[N1UnitV0]> { let Latency = 11; let ReleaseAtCycles = [11]; }
+
 // FP divide, H-form
 // FP square root, H-form
-def : InstRW<[N1Write_7c7_1V0], (instrs FDIVHrr, FSQRTHr)>;
+def : InstRW<[N1WriteFDS_7c2], (instrs FDIVHrr, FSQRTHr)>;
 
 // FP divide, S-form
 // FP square root, S-form
-def : InstRW<[N1Write_10c7_1V0], (instrs FDIVSrr, FSQRTSr)>;
+def : InstRW<[N1WriteFDS_7c2], (instrs FDIVSrr, FSQRTSr)>;
 
 // FP divide, D-form
-def : InstRW<[N1Write_15c7_1V0], (instrs FDIVDrr)>;
+def : InstRW<[N1WriteFDS_7c4], (instrs FDIVDrr)>;
 
 // FP square root, D-form
-def : InstRW<[N1Write_17c7_1V0], (instrs FSQRTDr)>;
+def : InstRW<[N1WriteFDS_7c4], (instrs FSQRTDr)>;
 
 // FP multiply
 def : SchedAlias<WriteFMul, N1Write_3c_1V>;
@@ -757,25 +760,26 @@ def : InstRW<[N1Write_6c_4V0], (instregex "^[FSU]CVT[AMNPZ][SU]v8f16$",
 
 // ASIMD FP divide, D-form, F16
 // ASIMD FP square root, D-form, F16
-def : InstRW<[N1Write_7c7_1V0], (instrs FDIVv4f16, FSQRTv4f16)>;
+def : InstRW<[N1WriteFDS_7c7], (instrs FDIVv4f16, FSQRTv4f16)>;
 
 // ASIMD FP divide, D-form, F32
 // ASIMD FP square root, D-form, F32
-def : InstRW<[N1Write_10c7_1V0], (instrs FDIVv2f32, FSQRTv2f32)>;
+def : InstRW<[N1WriteFDS_7c4], (instrs FDIVv2f32, FSQRTv2f32)>;
 
 // ASIMD FP divide, Q-form, F16
 // ASIMD FP square root, Q-form, F16
-def : InstRW<[N1Write_13c10_1V0], (instrs FDIVv8f16, FSQRTv8f16)>;
+def : InstRW<[N1WriteFDS_10c10], (instrs FDIVv8f16)>;
+def : InstRW<[N1WriteFDS_11c11], (instrs FSQRTv8f16)>;
 
 // ASIMD FP divide, Q-form, F32
 // ASIMD FP square root, Q-form, F32
-def : InstRW<[N1Write_10c7_1V0], (instrs FDIVv4f32, FSQRTv4f32)>;
+def : InstRW<[N1WriteFDS_7c7], (instrs FDIVv4f32, FSQRTv4f32)>;
 
 // ASIMD FP divide, Q-form, F64
-def : InstRW<[N1Write_15c7_1V0], (instrs FDIVv2f64)>;
+def : InstRW<[N1WriteFDS_7c7], (instrs FDIVv2f64)>;
 
 // ASIMD FP square root, Q-form, F64
-def : InstRW<[N1Write_17c7_1V0], (instrs FSQRTv2f64)>;
+def : InstRW<[N1WriteFDS_7c7], (instrs FSQRTv2f64)>;
 
 // ASIMD FP max/min, reduce, F32 and D-form F16
 def : InstRW<[N1Write_5c_1V], (instregex "^F(MAX|MIN)(NM)?Vv4(i16|i32)v$")>;

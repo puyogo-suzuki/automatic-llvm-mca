@@ -226,7 +226,9 @@ def : WriteRes<WriteFCopy, [A720UnitV]> { let Latency = 1; }
 def : WriteRes<WriteFImm, [A720UnitV]> { let Latency = 1; }
 def : WriteRes<WriteFMul, [A720UnitV]> { let Latency = 3; }
 
-// Floating-Point Divide (SOG Table 3-12 variable latencies: 32-bit 7-10c [median 8], 64-bit 7-15c [median 11])
+// Floating-Point Divide / Square Root.  The scalar forms are given per form below
+// (A720 SOG: H 5, S 7, D 12 cycles, "performed using a fully pipelined data path");
+// this generic write is only the fallback for forms with no row below.
 def : WriteRes<WriteFDiv, [A720UnitV0]> { let Latency = 10; }
 
 def : WriteRes<WriteVd, [A720UnitV]> { let Latency = 2; }
@@ -318,5 +320,60 @@ def : InstRW<[A720Write_0or2c_1V],  (instrs MOVID, MOVIv2d_ns)>;
 def : InstRW<[A720Write_0or2c_1V],  (instrs ORRv16i8, ORRv8i8)>;
 // FMOV Sd,Sn / FMOV Dd,Dn  (FMOVHr deliberately absent - not in sec. 4.12)
 def : InstRW<[A720Write_0or2c_1V],  (instrs FMOVSr, FMOVDr)>;
+
+//===----------------------------------------------------------------------===//
+// FP multiply-accumulate.
+//
+// A720 SOG: "FP multiply accumulate | FMADD, FMSUB, FNMADD, FNMSUB | 4 (2) | 2 | V",
+// "ASIMD FP multiply accumulate | FMLA, FMLS | 4(2) | 2 | V" and
+// "ASIMD FP multiply accumulate long | FMLAL(2), FMLSL(2) | 4(2) | 2 | V", with
+// "FP multiply-accumulate pipelines support late-forwarding of accumulate operands
+// from similar uOPs, allowing a typical sequence of multiply-accumulate uOPs to
+// issue one every N cycles (accumulate latency N shown in parentheses)" and
+// "late forwarding of the result from FP multiply uOPs to the accumulate operands
+// of an FP multiply-accumulate uOP. The latter can potentially be issued 1 cycle
+// after the FP multiply uOP has been issued".
+// Result latency 4; the accumulate operand is needed 2 cycles early, which gives
+// 2 from a previous multiply-accumulate and 3 - 2 = 1 from an FMUL (WriteFMul, 3).
+// Without this the FMADD family fell into WriteFMul (latency 3, no early read).
+def A720Wr_FMA : SchedWriteRes<[A720UnitV]> { let Latency = 4; }
+def A720Rd_FMA : SchedReadAdvance<2, [WriteFMul, A720Wr_FMA]>;
+
+def : InstRW<[A720Wr_FMA, ReadDefault, ReadDefault, A720Rd_FMA], (instregex "^FN?M(ADD|SUB)[HSD]rrr$")>;
+def : InstRW<[A720Wr_FMA, A720Rd_FMA], (instregex "^FMLAv", "^FMLSv", "^FMLALv", "^FMLSLv")>;
+
+//===----------------------------------------------------------------------===//
+// FP divide / square root, per form.
+//
+// A720 SOG: "FP divide, H-form | FDIV | 5 | 1 | V0", "S-form | 7 | 1 | V0",
+// "D-form | 12 | 1 | V0", and the same three values for FSQRT, with the note "FP
+// divide and square root operations are now performed using a fully pipelined data
+// path": a fixed latency per form and a throughput of one per cycle, so the unit is
+// occupied for one cycle (no ReleaseAtCycles).
+def A720Write_5c_1V0  : SchedWriteRes<[A720UnitV0]> { let Latency = 5; }
+def A720Write_7c_1V0  : SchedWriteRes<[A720UnitV0]> { let Latency = 7; }
+def A720Write_12c_1V0 : SchedWriteRes<[A720UnitV0]> { let Latency = 12; }
+
+def : InstRW<[A720Write_5c_1V0],  (instrs FDIVHrr, FSQRTHr)>;
+def : InstRW<[A720Write_7c_1V0],  (instrs FDIVSrr, FSQRTSr)>;
+def : InstRW<[A720Write_12c_1V0], (instrs FDIVDrr, FSQRTDr)>;
+
+// The ASIMD forms (SOG "ASIMD FP divide / square root"): latency and throughput per
+// form, for FDIV and FSQRT alike: D-form F16 8 cycles 1/4 (occupancy 4), D-form F32 8
+// 1/2 (2), Q-form F16 12 1/8 (8), Q-form F32 10 1/4 (4), Q-form F64 13 1/2 (2).  The
+// table's throughput column is used as printed, although the note under the table says
+// the unit is fully pipelined (the scalar forms, whose table says 1, occupy it for one
+// cycle).
+def A720Write_8c4_1V0  : SchedWriteRes<[A720UnitV0]> { let Latency = 8;  let ReleaseAtCycles = [4]; }
+def A720Write_8c2_1V0  : SchedWriteRes<[A720UnitV0]> { let Latency = 8;  let ReleaseAtCycles = [2]; }
+def A720Write_12c8_1V0 : SchedWriteRes<[A720UnitV0]> { let Latency = 12; let ReleaseAtCycles = [8]; }
+def A720Write_10c4_1V0 : SchedWriteRes<[A720UnitV0]> { let Latency = 10; let ReleaseAtCycles = [4]; }
+def A720Write_13c2_1V0 : SchedWriteRes<[A720UnitV0]> { let Latency = 13; let ReleaseAtCycles = [2]; }
+
+def : InstRW<[A720Write_8c4_1V0],  (instrs FDIVv4f16, FSQRTv4f16)>;
+def : InstRW<[A720Write_8c2_1V0],  (instrs FDIVv2f32, FSQRTv2f32)>;
+def : InstRW<[A720Write_12c8_1V0], (instrs FDIVv8f16, FSQRTv8f16)>;
+def : InstRW<[A720Write_10c4_1V0], (instrs FDIVv4f32, FSQRTv4f32)>;
+def : InstRW<[A720Write_13c2_1V0], (instrs FDIVv2f64, FSQRTv2f64)>;
 
 } // SchedModel = CortexA720Model

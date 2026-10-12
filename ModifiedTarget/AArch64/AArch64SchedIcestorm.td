@@ -108,7 +108,10 @@ def : WriteRes<WriteFCvt, [IceUnitFP]> { let Latency = 4; } // Worst-case FP con
 def : WriteRes<WriteFCopy, [IceUnitFP]> { let Latency = 1; }
 def : WriteRes<WriteFImm, [IceUnitFP]> { let Latency = 1; }
 def : WriteRes<WriteFMul, [IceUnitFP]> { let Latency = 4; } // Worst-case FP multiply / FMA (3-4c)
-def : WriteRes<WriteFDiv, [IceUnitFP1]> { let Latency = 17; } // Worst-case FP divide / sqrt (7-17c)
+// FP divide / square root: one latency per form, from Dougall Johnson's Icestorm
+// tables (https://dougallj.github.io/applecpu/icestorm-simd.html).  WriteFDiv is
+// only the fallback for a form with no row below.
+def : WriteRes<WriteFDiv, [IceUnitFP1]> { let Latency = 17; }
 
 def : WriteRes<WriteVd, [IceUnitFP]> { let Latency = 2; }
 def : WriteRes<WriteVq, [IceUnitFP]> { let Latency = 2; }
@@ -161,8 +164,23 @@ def : InstRW<[WriteFCvt], (instregex "^FCVT.*")>;
 def : InstRW<[WriteFCvt], (instregex "^[SU]CVTF.*")>;
 
 // 9. Floating Point Divide & Square Root (Latency=10-15c on IceUnitFP1)
-def : InstRW<[WriteFDiv], (instregex "^FDIV.*")>;
-def : InstRW<[WriteFDiv], (instregex "^FSQRT.*")>;
+def IceWriteFDivSqrt_7c : SchedWriteRes<[IceUnitFP1]> { let Latency = 7; }
+def IceWriteFDivSqrt_8c : SchedWriteRes<[IceUnitFP1]> { let Latency = 8; }
+def IceWriteFDivSqrt_9c : SchedWriteRes<[IceUnitFP1]> { let Latency = 9; }
+def IceWriteFDivSqrt_10c : SchedWriteRes<[IceUnitFP1]> { let Latency = 10; }
+def IceWriteFDivSqrt_11c : SchedWriteRes<[IceUnitFP1]> { let Latency = 11; }
+def IceWriteFDivSqrt_12c : SchedWriteRes<[IceUnitFP1]> { let Latency = 12; }
+def IceWriteFDivSqrt_13c : SchedWriteRes<[IceUnitFP1]> { let Latency = 13; }
+def IceWriteFDivSqrt_15c : SchedWriteRes<[IceUnitFP1]> { let Latency = 15; }
+
+def : InstRW<[IceWriteFDivSqrt_7c], (instrs FDIVHrr, FDIVv4f16)>;
+def : InstRW<[IceWriteFDivSqrt_8c], (instrs FDIVSrr, FDIVv2f32, FDIVv8f16, FSQRTHr, FSQRTv4f16)>;
+def : InstRW<[IceWriteFDivSqrt_9c], (instrs FDIVv4f32)>;
+def : InstRW<[IceWriteFDivSqrt_10c], (instrs FDIVDrr, FSQRTSr, FSQRTv2f32, FSQRTv8f16)>;
+def : InstRW<[IceWriteFDivSqrt_11c], (instrs FDIVv2f64)>;
+def : InstRW<[IceWriteFDivSqrt_12c], (instrs FSQRTv4f32)>;
+def : InstRW<[IceWriteFDivSqrt_13c], (instrs FSQRTDr)>;
+def : InstRW<[IceWriteFDivSqrt_15c], (instrs FSQRTv2f64)>;
 
 // 10. Vector Permute, Extract, Table & Duplicate (Latency=2c, TP=0.5 on Dual IceUnitFP)
 def : InstRW<[WriteVd], (instregex "^(EXT|TBL|TBX|DUP|INS|UMOV|SMOV|REV|UZP|TRN|ZIP)[12]?v.*")>;

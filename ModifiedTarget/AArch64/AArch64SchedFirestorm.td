@@ -106,7 +106,20 @@ def : WriteRes<WriteFCvt, [FireUnitFP]> { let Latency = 4; } // Worst-case FP co
 def : WriteRes<WriteFCopy, [FireUnitFP]> { let Latency = 1; }
 def : WriteRes<WriteFImm, [FireUnitFP]> { let Latency = 1; }
 def : WriteRes<WriteFMul, [FireUnitFP]> { let Latency = 4; } // Worst-case FP multiply / FMA (4c)
-def : WriteRes<WriteFDiv, [FireUnitFP0]> { let Latency = 13; } // Worst-case FP divide / sqrt (7-13c)
+// FP divide / square root: one latency per form, from Dougall Johnson's Firestorm
+// tables (https://dougallj.github.io/applecpu/firestorm-simd.html).  WriteFDiv is
+// only the fallback for a form with no row below.
+def : WriteRes<WriteFDiv, [FireUnitFP0]> { let Latency = 13; }
+def FireWriteFDivSqrt_7c : SchedWriteRes<[FireUnitFP0]> { let Latency = 7; }
+def FireWriteFDivSqrt_8c : SchedWriteRes<[FireUnitFP0]> { let Latency = 8; }
+def FireWriteFDivSqrt_10c : SchedWriteRes<[FireUnitFP0]> { let Latency = 10; }
+def FireWriteFDivSqrt_13c : SchedWriteRes<[FireUnitFP0]> { let Latency = 13; }
+
+def : InstRW<[FireWriteFDivSqrt_7c], (instrs FDIVHrr, FDIVv4f16, FDIVv8f16)>;
+def : InstRW<[FireWriteFDivSqrt_8c], (instrs FDIVSrr, FDIVv2f32, FDIVv4f32, FSQRTHr, FSQRTv4f16, FSQRTv8f16)>;
+def : InstRW<[FireWriteFDivSqrt_10c], (instrs FDIVDrr, FDIVv2f64, FSQRTSr, FSQRTv2f32, FSQRTv4f32)>;
+def : InstRW<[FireWriteFDivSqrt_13c], (instrs FSQRTDr, FSQRTv2f64)>;
+
 
 def : WriteRes<WriteVd, [FireUnitFP]> { let Latency = 2; }
 def : WriteRes<WriteVq, [FireUnitFP]> { let Latency = 2; }

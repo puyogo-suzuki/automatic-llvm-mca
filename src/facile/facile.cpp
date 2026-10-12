@@ -451,6 +451,46 @@ bool definesReg(const llvm::MCInstrInfo &MCII, const llvm::MCRegisterInfo &MRI,
     return false;
 }
 
+// Size in bytes of the access made by an AArch64 register-offset load/store
+// (LDR/STR ... roW/roX); 0 if the opcode is not one of them.
+unsigned regOffsetAccessSize(llvm::StringRef Name) {
+    if (!Name.ends_with("roW") && !Name.ends_with("roX")) return 0;
+    llvm::StringRef B = Name.drop_back(3);
+    static const std::pair<const char *, unsigned> Sizes[] = {
+        {"STRBB", 1}, {"STRHH", 2}, {"STRW", 4}, {"STRX", 8},
+        {"LDRBB", 1}, {"LDRHH", 2}, {"LDRW", 4}, {"LDRX", 8},
+        {"LDRSBW", 1}, {"LDRSBX", 1}, {"LDRSHW", 2}, {"LDRSHX", 2}, {"LDRSW", 4},
+        {"STRB", 1}, {"STRH", 2}, {"STRS", 4}, {"STRD", 8}, {"STRQ", 16},
+        {"LDRB", 1}, {"LDRH", 2}, {"LDRS", 4}, {"LDRD", 8}, {"LDRQ", 16}};
+    for (const auto &E : Sizes)
+        if (B == E.first) return E.second;
+    return 0;
+}
+
+// The signed total added to `IdxReg` by the instructions strictly between `Lo` and
+// `Hi`, if every one of them that writes IdxReg is `add/sub IdxReg, IdxReg, #imm`
+// (no shift).  Returns false if any other instruction writes it (or an
+// instruction is unknown): the value is then not statically known.
+bool indexDeltaBetween(const llvm::MCInstrInfo &MCII, const llvm::MCRegisterInfo &MRI,
+                       llvm::ArrayRef<const llvm::MCInst *> MCInsts, unsigned IdxReg,
+                       size_t Lo, size_t Hi, int64_t &Delta) {
+    Delta = 0;
+    for (size_t k = Lo + 1; k < Hi; ++k) {
+        const llvm::MCInst *MCI = MCInsts[k];
+        if (!definesReg(MCII, MRI, MCI, IdxReg)) continue;
+        llvm::StringRef N = MCII.getName(MCI->getOpcode());
+        const bool IsAdd = N == "ADDXri" || N == "ADDWri";
+        const bool IsSub = N == "SUBXri" || N == "SUBWri";
+        if (!(IsAdd || IsSub) || MCI->getNumOperands() < 4 || !MCI->getOperand(0).isReg() ||
+            !MCI->getOperand(1).isReg() || !MCI->getOperand(2).isImm() || !MCI->getOperand(3).isImm() ||
+            MCI->getOperand(0).getReg() != IdxReg || MCI->getOperand(1).getReg() != IdxReg ||
+            MCI->getOperand(3).getImm() != 0)
+            return false;
+        Delta += IsAdd ? MCI->getOperand(2).getImm() : -MCI->getOperand(2).getImm();
+    }
+    return true;
+}
+
 void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
                            const llvm::MCRegisterInfo &MRI,
                            llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
@@ -497,6 +537,36 @@ void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
     };
     auto loopInvariant = [&](unsigned R) { return countRedefs(R)[N] == 0; };
 
+    // Store `i` and load `j` use the same register-offset addressing form
+    // (`[xB, xI{, ext #s}]`), and the only thing between them that changes the index
+    // register is `add/sub xI, xI, #imm`, so the load address minus the store address
+    // is a known number of bytes.  If the two accesses do not overlap, the load
+    // cannot take its data from the store (the SOG's store-to-load forwarding needs
+    // the load to start at the start or the middle of the older store), so there is
+    // no memory dependence.  Anything that is not statically known - a different
+    // form, another kind of index update, an unknown size - returns false and the
+    // dependence is kept.  See docs.md section 4.G.
+    auto provablyDisjoint = [&](size_t i, size_t j) {
+        const llvm::MCInst *SI = MCInsts[i], *LI = MCInsts[j];
+        if (!SI || !LI || IdxRegs[i] == 0 || IdxRegs[i] != IdxRegs[j]) return false;
+        const unsigned SizeS = regOffsetAccessSize(MCII.getName(SI->getOpcode()));
+        const unsigned SizeL = regOffsetAccessSize(MCII.getName(LI->getOpcode()));
+        if (SizeS == 0 || SizeL == 0) return false;
+        if (SI->getNumOperands() < 5 || LI->getNumOperands() < 5) return false;
+        // Same extend type and same scaled/unscaled flag (operands 3 and 4).
+        for (unsigned k : {3u, 4u}) {
+            if (!SI->getOperand(k).isImm() || !LI->getOperand(k).isImm() ||
+                SI->getOperand(k).getImm() != LI->getOperand(k).getImm())
+                return false;
+        }
+        const bool Scaled = SI->getOperand(4).getImm() != 0;
+        if (Scaled && SizeS != SizeL) return false;  // different scales of the index
+        int64_t Delta;
+        if (!indexDeltaBetween(MCII, MRI, MCInsts, IdxRegs[i], i, j, Delta) || Delta == 0) return false;
+        const int64_t Bytes = Delta * (Scaled ? static_cast<int64_t>(SizeS) : 1);  // load address - store address
+        return Bytes >= static_cast<int64_t>(SizeS) || Bytes <= -static_cast<int64_t>(SizeL);
+    };
+
     for (size_t j = 0; j < N; ++j) {
         const MemAccessInfo &L = MemInfos[j];
         if (!L.valid() || !L.is_load() || L.is_pc_relative() || L.base_reg == 0)
@@ -508,6 +578,7 @@ void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
             const MemAccessInfo &S = MemInfos[i];
             if (!S.is_store() || !mayAlias(S, L)) continue;
             if (!stableBetween(L.base_reg, i, j)) break; // base changed: earlier matches are stale
+            if (provablyDisjoint(i, j)) continue;        // statically different bytes: no forwarding
             Adj[i].push_back({j, getInstLatency(*SimInstrs[i]), 0});
             FoundIntra = true;
             break;

@@ -515,6 +515,24 @@ The fix gives such a store a second node. That node reads only the address regis
 
 Loads with writeback were not affected (their only use is the base), and neither were stores whose base is updated by a separate `add`.
 
+### G. Memory dependence when the index register changes (`addMemoryDependencies`)
+
+For a store followed by a load with the same base register and a register index (`strh w3,[x0,x4]` ... `ldrsh w5,[x0,x4]`), the memory edge used to be added whenever the base register was unchanged in between. If the index register was advanced in between (`add x4,x4,#2`), the load reads the next element, so the SOG's store-to-load forwarding (which needs the load to start at the start or the middle of the older store) cannot apply, and the edge created a recurrence the hardware does not have (x264 `quant_4x4`: 9 cycles instead of 2).
+
+The edge is now skipped only when the two accesses are **provably disjoint**: both use the same register-offset form (same index register, extend type and scaled/unscaled flag), the only instructions between them that write the index register are `add/sub idx, idx, #imm` (no shift), and the resulting byte distance (immediate sum, times the access size for a scaled index) is at least the store size forward or the load size backward. Different forms, any other kind of index update, an unknown access size or an overlap keep the edge, so nothing that is not statically known is assumed. The loop-carried rule is unchanged. The SOGs give no latency for store-to-load forwarding, only the conditions above; the edge latency (store write + load) is not touched.
+
+### H. FP multiply-accumulate on the A720
+
+The A720 SOG lists FMADD/FMSUB/FNMADD/FNMSUB and ASIMD FMLA/FMLS/FMLAL/FMLSL as "4 (2)" and adds that an FP multiply result is forwarded late to the accumulate operand of a multiply-accumulate (1 cycle after the multiply issues). The A720 model had no FMA rows, so FMADD behaved like an FMUL (latency 3, no early operand read), a 3-cycle accumulate chain against 2 on the A76/A78/X1, whose models already carry the same "4 (2)". The model now has `A720Wr_FMA` (latency 4) and `A720Rd_FMA` (`SchedReadAdvance<2, [WriteFMul, A720Wr_FMA]>`): 2 cycles from a previous multiply-accumulate and 3 - 2 = 1 from an FMUL.
+
+### I. FP divide and square root: latency and occupancy
+
+The SOGs give FP divide and square root a latency and a throughput that depend on the operands for the Neoverse-derived cores (A76/A78/X1: ranges such as "7 to 15" and "1/7 to 2/7" per form) and a fixed value per form for the A720. The model has one latency and one occupancy per `SchedWriteRes`, so a range needs one chosen value. Every form has its own write (`N1WriteFDS_*`, `N2WriteFDS_*`, `V1WriteFDS_*`, `A720Write_*`), listed next to the `InstRW` rows with the SOG values they come from.
+
+* **A76 (N1), A78 (N2), X1 (V1)**: the BEST of each range. Latency: the shortest (7 for the scalar and 2S/4S/2D ASIMD forms; Q-form F16 FDIV 10 and FSQRT 11, where the SOG ranges "10 to 13" and "11 to 13" start). Occupancy: the unit is busy for ceil(1 / best throughput) cycles. For the X1, whose SOG throughput is for the V0/V2 pair, the occupancy of one unit is ceil(2 / best throughput), so the instruction time is the same as on the A76 up to the pair. Examples (A76/A78): scalar H and S 4/7 -> 2, scalar D 2/7 -> 4; ASIMD D-form F32 2/7 -> 4, Q-form F32 and F64 1/7 -> 7, Q-form F16 1/10 (FDIV) and 1/11 (FSQRT) -> 10 and 11. The uOP counts of the A78 writes are those of the N2 writes they replace. The X1 SVE classes `V1Write_*_1V0` are not touched.
+* **A720**: one latency per form, as in the SOG: scalar H 5, S 7, D 12 and ASIMD D-form F16 8, D-form F32 8, Q-form F16 12, Q-form F32 10, Q-form F64 13, for FDIV and FSQRT alike. The scalar throughput is 1 ("fully pipelined"), so the unit is busy one cycle. The ASIMD table's throughput column (1/4, 1/2, 1/8 -> occupancy 4, 2, 8) contradicts the note under it ("fully pipelined"); the table is used as printed.
+* **Apple (firestorm, icestorm)**: one latency per form from Dougall Johnson's tables (scalar H/S/D and vector 4H/8H/2S/4S/2D), replacing the single worst-case value. Port and occupancy are as before (Apple is not in a SOG).
+
 ## 5. Scheduling-Model Plumbing
 
 ### A. SchedClass index remapping (`remapSchedClassIndices`)

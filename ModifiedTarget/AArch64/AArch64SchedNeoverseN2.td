@@ -1061,19 +1061,38 @@ def : SchedAlias<WriteFCmp,  N2Write_2c_1V0>;
 // FP divide, square root
 def : SchedAlias<WriteFDiv,  N2Write_7c_7V0>;
 
+// FP divide / square root, one write per (best latency, occupancy, uOPs).  A78 SOG, FP and
+// ASIMD divide / square root tables: the BEST latency of each range, and the V0 unit is
+// occupied for ceil(1 / best throughput) cycles:
+//   scalar H 4/7 -> 2, S 4/7 -> 2, D 2/7 -> 4 (FSQRT: H 4/7, S 4/7, D 2/7);
+//   ASIMD D-form F16 1/7 -> 7, D-form F32 2/7 -> 4, Q-form F16 1/10 (FDIV) / 1/11 (FSQRT)
+//   -> 10 / 11, Q-form F32 1/7 -> 7, Q-form F64 1/7 -> 7.
+// Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).  The uOP counts are the ones the
+// replaced N2 writes had (7, 10, 15, 9, 16 for the scalar forms, 1 or 2 for ASIMD).
+def N2WriteFDS_7c2_7   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 7;  let ReleaseAtCycles = [2]; }
+def N2WriteFDS_7c2_10  : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 10; let ReleaseAtCycles = [2]; }
+def N2WriteFDS_7c2_9   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 9;  let ReleaseAtCycles = [2]; }
+def N2WriteFDS_7c4_15  : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 15; let ReleaseAtCycles = [4]; }
+def N2WriteFDS_7c4_16  : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 16; let ReleaseAtCycles = [4]; }
+def N2WriteFDS_7c7_1   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 1;  let ReleaseAtCycles = [7]; }
+def N2WriteFDS_7c7_2   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [7]; }
+def N2WriteFDS_7c4_2   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [4]; }
+def N2WriteFDS_10c10_2 : SchedWriteRes<[N2UnitV0]> { let Latency = 10; let NumMicroOps = 2;  let ReleaseAtCycles = [10]; }
+def N2WriteFDS_11c11_2 : SchedWriteRes<[N2UnitV0]> { let Latency = 11; let NumMicroOps = 2;  let ReleaseAtCycles = [11]; }
+
 // FP divide, H-form
-def : InstRW<[N2Write_7c_7V0],  (instrs FDIVHrr)>;
+def : InstRW<[N2WriteFDS_7c2_7],  (instrs FDIVHrr)>;
 // FP divide, S-form
-def : InstRW<[N2Write_10c_10V0], (instrs FDIVSrr)>;
+def : InstRW<[N2WriteFDS_7c2_10], (instrs FDIVSrr)>;
 // FP divide, D-form
-def : InstRW<[N2Write_15c_15V0], (instrs FDIVDrr)>;
+def : InstRW<[N2WriteFDS_7c4_15], (instrs FDIVDrr)>;
 
 // FP square root, H-form
-def : InstRW<[N2Write_7c_7V0],  (instrs FSQRTHr)>;
+def : InstRW<[N2WriteFDS_7c2_7],  (instrs FSQRTHr)>;
 // FP square root, S-form
-def : InstRW<[N2Write_9c_9V0],  (instrs FSQRTSr)>;
+def : InstRW<[N2WriteFDS_7c2_9],  (instrs FSQRTSr)>;
 // FP square root, D-form
-def : InstRW<[N2Write_16c_16V0], (instrs FSQRTDr)>;
+def : InstRW<[N2WriteFDS_7c4_16], (instrs FSQRTDr)>;
 
 // FP multiply
 def : WriteRes<WriteFMul, [N2UnitV]> { let Latency = 3; }
@@ -1350,19 +1369,19 @@ def : InstRW<[N2Write_6c_4V0], (instregex "^[FSU]CVT[AMNPZ][SU]v8f16$",
                                           "^[SU]CVTFv8f16$")>;
 
 // ASIMD FP divide, D-form, F16
-def : InstRW<[N2Write_7c_1V0], (instrs FDIVv4f16)>;
+def : InstRW<[N2WriteFDS_7c7_1], (instrs FDIVv4f16)>;
 
 // ASIMD FP divide, D-form, F32
-def : InstRW<[N2Write_10c_2V0], (instrs FDIVv2f32)>;
+def : InstRW<[N2WriteFDS_7c4_2], (instrs FDIVv2f32)>;
 
 // ASIMD FP divide, Q-form, F16
-def : InstRW<[N2Write_13c_2V0], (instrs FDIVv8f16)>;
+def : InstRW<[N2WriteFDS_10c10_2], (instrs FDIVv8f16)>;
 
 // ASIMD FP divide, Q-form, F32
-def : InstRW<[N2Write_10c_2V0], (instrs FDIVv4f32)>;
+def : InstRW<[N2WriteFDS_7c7_2], (instrs FDIVv4f32)>;
 
 // ASIMD FP divide, Q-form, F64
-def : InstRW<[N2Write_15c_2V0], (instrs FDIVv2f64)>;
+def : InstRW<[N2WriteFDS_7c7_2], (instrs FDIVv2f64)>;
 
 // ASIMD FP max/min, reduce, F32 and D-form F16
 def : InstRW<[N2Write_4c_1V], (instregex "^(FMAX|FMIN)(NM)?Vv4(i16|i32)v$")>;
@@ -1394,19 +1413,19 @@ def : InstRW<[N2Write_4c_2V0],
 def : InstRW<[N2Write_6c_4V0], (instregex "^FRINT[AIMNPXZ]v8f16$")>;
 
 // ASIMD FP square root, D-form, F16
-def : InstRW<[N2Write_7c_1V0], (instrs FSQRTv4f16)>;
+def : InstRW<[N2WriteFDS_7c7_1], (instrs FSQRTv4f16)>;
 
 // ASIMD FP square root, D-form, F32
-def : InstRW<[N2Write_10c_2V0], (instrs FSQRTv2f32)>;
+def : InstRW<[N2WriteFDS_7c4_2], (instrs FSQRTv2f32)>;
 
 // ASIMD FP square root, Q-form, F16
-def : InstRW<[N2Write_13c_2V0], (instrs FSQRTv8f16)>;
+def : InstRW<[N2WriteFDS_11c11_2], (instrs FSQRTv8f16)>;
 
 // ASIMD FP square root, Q-form, F32
-def : InstRW<[N2Write_10c_2V0], (instrs FSQRTv4f32)>;
+def : InstRW<[N2WriteFDS_7c7_2], (instrs FSQRTv4f32)>;
 
 // ASIMD FP square root, Q-form, F64
-def : InstRW<[N2Write_16c_2V0], (instrs FSQRTv2f64)>;
+def : InstRW<[N2WriteFDS_7c7_2], (instrs FSQRTv2f64)>;
 
 // ASIMD BFloat16 (BF16) instructions
 // -----------------------------------------------------------------------------
