@@ -57,3 +57,20 @@ TEST(CpuTraitsTest, CoalescedROBSubtargetFromSchedModel) {
         EXPECT_FALSE(isCoalescedROBSubtarget(*a78.STI));
     }
 }
+
+
+TEST(CpuTraitsTest, AppleWindowResources) {
+    const WindowResources &F = getCpuTraits("firestorm").MlpWindow;
+    EXPECT_TRUE(F.enabled());
+    EXPECT_EQ(F.RenameEntries, 623u);
+    EXPECT_EQ(F.LoadSlots, 130u);
+    EXPECT_EQ(F.StoreSlots, 60u);
+    EXPECT_EQ(F.BranchSlots, 144u);
+    const WindowResources &I = getCpuTraits("icestorm").MlpWindow;
+    EXPECT_TRUE(I.enabled());
+    EXPECT_EQ(I.RenameEntries, 111u);
+    EXPECT_EQ(I.LoadSlots, 30u);
+    EXPECT_EQ(I.StoreSlots, 18u);
+    EXPECT_EQ(I.BranchSlots, 0u);   // the source gives no branch limit: unlimited
+    EXPECT_FALSE(getCpuTraits("cortex-a78").MlpWindow.enabled());
+}

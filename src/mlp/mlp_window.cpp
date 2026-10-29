@@ -63,10 +63,13 @@ struct WindowBudget {
     bool exceeds(const MLPInstInfo &I) const {
         if (!spec.res) return uops + std::max(1, static_cast<int>(I.num_uops)) > spec.width;
         const WindowResources &r = *spec.res;
-        return rename + I.rename_entries > static_cast<int>(r.RenameEntries) ||
-               loads + I.load_slots > static_cast<int>(r.LoadSlots) ||
-               stores + I.store_slots > static_cast<int>(r.StoreSlots) ||
-               branches + I.branch_slots > static_cast<int>(r.BranchSlots) ||
+        auto over = [](int used, int add, unsigned limit) {
+            return limit != 0 && used + add > static_cast<int>(limit);   // 0 = unlimited
+        };
+        return over(rename, I.rename_entries, r.RenameEntries) ||
+               over(loads, I.load_slots, r.LoadSlots) ||
+               over(stores, I.store_slots, r.StoreSlots) ||
+               over(branches, I.branch_slots, r.BranchSlots) ||
                insts + 1 > static_cast<int>(r.MaxInsts);
     }
     void add(const MLPInstInfo &I) {

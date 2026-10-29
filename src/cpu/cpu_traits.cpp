@@ -59,6 +59,14 @@ llvm::StringMap<CpuTraits> buildTable() {
     T["neoverse-v1"] = V1;
 
     CpuTraits Ice;  Ice.Model = CpuModel::Icestorm;
+    // MLP window limits, from Dougall Johnson's Icestorm page
+    // (https://dougallj.github.io/applecpu/icestorm.html): ~111 renames in flight,
+    // 30 load buffers, 18 store buffers.  The page gives NO branch limit (0 =
+    // unlimited here, so the window can come out too wide), no retire-group size
+    // (MaxInsts reuses Firestorm's "at most 7 uops per group": ~60 groups * 7), and
+    // itself warns the M1 does not use "an entirely conventional reorder buffer" so
+    // the figures "may or may not be accurate".
+    Ice.MlpWindow = {111, 30, 18, 0, 60 * 7};
     T["icestorm"] = Ice;
     CpuTraits Fire; Fire.Model = CpuModel::Firestorm;
     // MLP window limits, from Dougall Johnson's Firestorm page

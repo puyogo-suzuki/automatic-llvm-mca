@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
                     auto ExpectedInst = IB.createInstruction(I.Inst, {});
                     if (ExpectedInst) {
                         std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
-                        if (isCoalescedROBCPU(TI.STI->getCPU())) {
+                        if (isCoalescedROBSubtarget(*TI.STI)) {
                             mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
                             MutableDesc.NumMicroOps = 1;
                         }

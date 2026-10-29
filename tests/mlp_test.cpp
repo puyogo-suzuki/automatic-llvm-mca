@@ -796,3 +796,26 @@ TEST(MLPTest, AArch64WindowResourcesRenameEntries) {
     // First load's window = {ldr, add}: 1 load.  Second load: 1.
     EXPECT_NEAR(val, 1.0, 0.01);
 }
+
+
+TEST(MLPTest, AArch64WindowResourcesZeroMeansUnlimited) {
+    initLLVMAArch64();
+    AArch64TestContext TC;
+    AArch64MLPAnalyzer analyzer;
+    // BranchSlots = 0: branches (and the other 0-limited resources) never end the
+    // window; only the stated limits and MaxInsts do.
+    auto instrs = parseAsm(TC, "ldr x1, [x2]\nb 4\nb 4\nb 4\nldr x3, [x4]");
+    ASSERT_EQ(instrs.size(), 5u);
+    float ratio = 0.0f;
+    analyzer.setWindowResources({1000, 1000, 1000, 0, 100});
+    float val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                                     *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    EXPECT_NEAR(val, 2.0 / (1.0 / 2 + 1.0), 0.01);   // windows: 2 loads, then 1
+
+    // A 2-branch limit cuts the first window before the third branch: it holds
+    // ldr + 2 branches, so only 1 load.
+    analyzer.setWindowResources({1000, 1000, 1000, 2, 100});
+    val = analyzer.compute_mlp(instrs, 4, DependencyKind::OOO, MLPWindowAssignmentKind::Forward,
+                               *TC.STI, *TC.MCII, *TC.MRI, ratio, false);
+    EXPECT_NEAR(val, 1.0, 0.01);
+}

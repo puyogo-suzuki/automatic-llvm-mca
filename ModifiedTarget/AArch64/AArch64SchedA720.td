@@ -15,7 +15,13 @@
 
 def CortexA720Model : SchedMachineModel {
   let IssueWidth = 5;           // 5 MOPs per cycle decode / dispatch
-  let MicroOpBufferSize = 160;  // Reorder Buffer (ROB)
+  // Reorder Buffer (ROB) = 192 entries.  NOT from the SOG, which gives no ROB size.
+  // Source: Cardyak's Microarchitecture Cheat Sheet (unofficial, secondary; the author
+  // notes information on the 2023 Arm cores is scarce).  Another secondary source
+  // (a 2026 blog) says 160, which is also the value stock LLVM's N2 model (the model
+  // LLVM assigns to cortex-a720) carries, and which this file used before.
+  // Sets the MLP window width (and MicroOpQueueSize) for the A720.
+  let MicroOpBufferSize = 192;
   let LoadLatency = 3;          // L1 hit latency (3 cycles from Cortex-A720 SOG)
   let MispredictPenalty = 11;
   let CompleteModel = 0;

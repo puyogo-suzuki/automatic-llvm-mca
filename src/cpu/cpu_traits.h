@@ -38,18 +38,19 @@ enum class FusionTable {
 // instruction that would exceed any of them.  All zero = not used (the window is
 // then `MicroOpBufferSize` uops, or --window-width).
 struct WindowResources {
+    // 0 = this resource is not limited (the source gives no figure for it).
     unsigned RenameEntries = 0;   // architectural-register writes in flight (zero registers excluded)
     unsigned LoadSlots = 0;       // loads in flight (an LDP counts as 2)
     unsigned StoreSlots = 0;      // stores in flight (an STP counts as 2)
     unsigned BranchSlots = 0;     // branches (incl. calls/returns) in flight
-    unsigned MaxInsts = 0;        // absolute cap on instructions in the window
+    unsigned MaxInsts = 0;        // absolute cap on instructions in the window; 0 = struct unused
     bool enabled() const { return MaxInsts != 0; }
 };
 
 struct CpuTraits {
     CpuModel Model = CpuModel::None;
 
-    // See WindowResources.  Only Firestorm sets it.
+    // See WindowResources.  Only Firestorm and Icestorm set it.
     WindowResources MlpWindow;
 
     // Real uOP dispatch/issue width from the SOG, in uops per cycle.  Used as
