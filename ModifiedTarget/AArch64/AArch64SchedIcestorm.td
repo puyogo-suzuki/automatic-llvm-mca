@@ -130,7 +130,7 @@ def WriteZeroIce : SchedWriteRes<[]> { let Latency = 0; }
 def : InstRW<[WriteZeroIce], (instrs MOVZWi, MOVZXi, MOVNWi, MOVNXi, MOVKWi, MOVKXi, FMOVDr, FMOVSr, NOP)>;
 def : InstRW<[WriteAdr], (instrs ADR, ADRP)>;
 
-// 2. Scalar Loads & Stores (3c load / 1c store)
+// 2. Scalar Loads & Stores (4c general load, 3c load-to-load base forwarding / 1c store)
 def : InstRW<[WriteLD], (instregex "^LDR[BHSDQ]?(ui|l|ro[WX])?$")>;
 def : InstRW<[WriteLD], (instregex "^LDP[WXSDQ]i$")>;
 def : InstRW<[WriteST], (instregex "^STR[BHSDQ]?(ui|ro[WX])?$")>;
@@ -202,7 +202,11 @@ def : ReadAdvance<ReadIMA, 2, [WriteIM32, WriteIM64]>;
 def : ReadAdvance<ReadID, 0>;
 def : ReadAdvance<ReadST, 0>;
 def : ReadAdvance<ReadExtrHi, 0>;
-def : ReadAdvance<ReadAdrBase, 0>;
+// Dougall Johnson's complex-latency measurements report that a load result can
+// feed the base address of a following load in 3 cycles, while the general
+// load-to-consumer latency is 4 cycles.  The 1-cycle advance is restricted to
+// load writes; vector-load timing is kept separate.
+def : ReadAdvance<ReadAdrBase, 1, [WriteLD, WriteLDIdx, WriteLDHi]>;
 def : ReadAdvance<ReadVLD, 0>;
 
 } // SchedModel = IcestormModel
