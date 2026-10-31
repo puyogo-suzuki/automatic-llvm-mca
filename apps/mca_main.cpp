@@ -198,6 +198,10 @@ int main(int argc, char **argv) {
                 std::vector<MemAccessInfo> MemInfos;
                 for (const auto &I : region_instrs) {
                     auto ExpectedInst = IB.createInstruction(I.Inst, {});
+                    if (!ExpectedInst) {
+                        consumeError(ExpectedInst.takeError());
+                        noteDroppedInstruction(TI.MCII->getName(I.Inst.getOpcode()));
+                    }
                     if (ExpectedInst) {
                         std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
                         if (isCoalescedROBSubtarget(*TI.STI)) {
@@ -284,6 +288,10 @@ int main(int argc, char **argv) {
             printResultCsv(r.StartAddr, r.EndAddr, r.AnalysisStartAddr, r.AnalysisEndAddr, r.SimulatedSize, r.IsLoop, r.Metrics);
         }
     }
+
+    // stderr is silenced while regions are analysed (ScopedSilence above), so
+    // the instructions InstrBuilder rejected are reported once, here.
+    reportDroppedInstructions(llvm::errs());
 
     return 0;
 }

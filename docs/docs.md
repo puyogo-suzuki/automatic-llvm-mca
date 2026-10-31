@@ -1,114 +1,18 @@
 # automatic-llvm-mca Technical Documentation
 
-This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here.
+This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here. The Cortex-A55 model and its conformance to the Arm Cortex-A55 Software Optimization Guide are described separately in [a55-sog.md](a55-sog.md); [README.md](README.md) lists the documents.
 
 ---
 
 ## 1. Processor Scheduling Model Customizations & Forwarding Paths
 
-To accurately simulate the execution timeline of target processors (specifically the dual-issue in-order **ARM Cortex-A55**), the scheduling model has been customized at both the **TableGen** description level (`ModifiedTarget/AArch64/AArch64SchedA55.td`) and the **C++ runtime simulation layer** (`src/mca/mca_simulation.cpp`, `src/a55/`).
+The scheduling models are customized at the **TableGen** description level (`ModifiedTarget/AArch64/*.td`, compiled into the tool's own tables, see section 5) and, for the in-order Cortex-A55, in the **C++ runtime simulation layer** (`src/mca/mca_simulation.cpp`, `src/a55/`).
 
-### A. TableGen Scheduling Model Customizations (`AArch64SchedA55.td`)
-
-The scheduling model defines how machine instructions are dispatched, executed, and retired on specific hardware ports. Key modifications and optimizations include:
-
-#### 1. Hardware Pipeline & Resource Unit Definitions
-The Cortex-A55 is modeled as a fully in-order processor (`let MicroOpBufferSize = 0;`). The execution units are represented by five core pipeline resources with zero queuing buffer size, preventing out-of-order execution inside the simulation:
-*   `CortexA55UnitALU` (2 ports): Dual integer arithmetic units.
-*   `CortexA55UnitMAC` (1 port): 64-bit wide multiply-accumulate pipe.
-*   `CortexA55UnitDiv` (1 port): Non-pipelined integer division unit.
-*   `CortexA55UnitLd` (1 port): Memory load pipeline.
-*   `CortexA55UnitSt` (1 port): Memory store pipeline.
-*   `CortexA55UnitB` (1 port): Branch unit.
-
-#### 2. Forwarding Paths (Bypassing & Read-Advance Paths)
-On physical hardware, to avoid stalling subsequent instructions when data is produced by a preceding instruction, the CPU implements **bypassing network/forwarding paths**. In the TableGen model, these are represented as `ReadAdvance` statements:
-
-*   **EX1-stage ALU-to-ALU Forwarding (`ReadI`)**:
-    Under standard operations, ALU input operands are consumed in the **EX1** stage. If an operand is produced in **EX2** by a preceding ALU operation, a forwarding path allows the data to be routed directly to the EX1 stage of the next instruction without waiting for register write-back.
-    ```tablegen
-    def : ReadAdvance<ReadI, 1>; // Decrements latency by 1 for back-to-back ALU execution
-    ```
-*   **Shifted vs. Shift-less Register Operands (`CortexA55ReadISReg`)**:
-    If an ALU instruction requires a shift (e.g., `ADD Xd, Xn, Xm, LSL #2`), the shift operation must occur early in the **ISS (Issue)** stage. Therefore, it cannot benefit from EX2-to-EX1 forwarding. However, if the shift amount is 0, the instruction behaves like a standard ALU instruction and can receive forwarded operands in EX1.
-    We implement a `SchedReadVariant` using the subtarget predicate `RegShiftedPred` to resolve this:
-    ```tablegen
-    def CortexA55ReadShifted    : SchedReadAdvance<0>; // Stalls: must be ready at ISS
-    def CortexA55ReadNotShifted : SchedReadAdvance<1>; // Forwarded: ready at EX1
-    def CortexA55ReadISReg : SchedReadVariant<[
-            SchedVar<RegShiftedPred, [CortexA55ReadShifted]>,
-            SchedVar<NoSchedPred,    [CortexA55ReadNotShifted]>]>;
-    def : SchedAlias<ReadISReg, CortexA55ReadISReg>;
-    ```
-
-#### 3. Multiply-Accumulate Forwarding (`ReadIM` / `ReadIMA`)
-For integer multiplications, the operands are forwarded with varying latencies:
-*   `ReadIM` (Multiplicand/Multiplier): Forwarded with 1-cycle advance from producing ALU operations.
-*   `ReadIMA` (Accumulator operand): Consumed later in the multiply pipe, permitting a 2-cycle advance. This allows back-to-back multiply-accumulate chains (like `madd`) to execute without bubbles.
+The Cortex-A55 material that used to be here is now in [a55-sog.md](a55-sog.md), which also compares each part of the A55 model with the Cortex-A55 Software Optimization Guide. (It was the former sections 1.A, the TableGen model `AArch64SchedA55.td`, and 1.B, the A55 issue stage, the flag and pointer bypasses and the other C++ corrections.) The remaining sections of this chapter were renumbered: the former 1.C is now 1.A and the former 1.D is now 1.B.
 
 ---
 
-### B. C++ Runtime Simulation Adaptations (`src/mca/mca_simulation.cpp`, `src/a55/`)
-
-While TableGen provides the static structural definition, the LLVM MCA runtime library does not always fully resolve variant scheduling classes at runtime because of limitations in the static analyzer's register-state operand representation. Therefore, several dynamic modifications are applied during the construction of the simulation pipeline:
-
-#### 1. Conditional Flags (NZCV) Dependency Breaking
-Conditional instructions (like `csel`, `cset`, `csneg`) and conditional branches (`b.ne`, `cbz`) depend on the status register `NZCV` written by flags-setting instructions (like `cmp`, `subs`).
-*   **LLVM MCA Behavior**: By default, LLVM MCA introduces a mandatory 1-cycle data dependency bubble between the flag-producer and flag-consumer.
-*   **Physical Hardware**: Cortex-A55 features a zero-latency condition flag bypass network enabling same-cycle dual-issue of `cmp` $\to$ `b.ne` or `cmp` $\to$ `csel`.
-*   **C++ Override**: During instruction construction in `analyzeMcaRegion` and dispatch in `SteadyStateTracker::onEvent`, we programmatically break the NZCV dependency:
-    ```cpp
-    // For Writes (Defs)
-    if (WS.getRegisterID() == AArch64::NZCV) {
-        WS.setRegisterID(0); // Erase register write-back dependency
-    }
-    // For Reads (Uses)
-    if (RS.getRegisterID() == AArch64::NZCV) {
-        RS.IsReady = true;               // Force ready state
-        RS.setIndependentFromDef();      // Prevent dependency stall
-    }
-    ```
-
-#### 2. Shift-less Register-Shifted ALU Latency Correction
-For instruction opcodes that permit optional register shifts (`ADDXrs`, `ADDWrs`, `SUBXrs`, `SUBWrs`, `SUBSXrs`, `SUBSWrs`, `ADDSXrs`, `ADDSWrs`), LLVM statically assigns a latency of 2 cycles.
-*   **C++ Override**: We check the immediate value of the shift operand (operand index 3). If the shift value resolves to `0` (or the operand is missing), we dynamically overwrite the instruction descriptor:
-    ```cpp
-    MutableDesc.MaxLatency = 1;
-    for (auto &W : MutableDesc.Writes) {
-        if (W.Latency > 1) W.Latency = 1;
-    }
-    ```
-    This shortens the ALU path to a single cycle, allowing back-to-back execution when combined with the EX1 forwarding path.
-
-#### 3. Speculative Branch Predictor Bubble Correction
-Cortex-A55 utilizes a non-blocking speculative branch predictor. When branch prediction succeeds, instruction fetching from the target address continues without bubble cycles.
-*   **LLVM MCA Behavior**: Because the in-order pipeline simulation model enforces strict retirement order, the branch unit (`CortexA55UnitB`) remains locked until the branch retires, causing a mandatory 1-cycle dispatch bubble in every loop iteration.
-*   **C++ Override**:
-    1.  At construction, conditional and unconditional branches (`Bcc`, `B`) are stripped of their pipeline resource consumption, converting them to true zero-latency instructions:
-        ```cpp
-        MutableDesc.MaxLatency = 0;
-        MutableDesc.Resources.clear();
-        MutableDesc.UsedProcResUnits = 0;
-        MutableDesc.UsedProcResGroups = 0;
-        MutableDesc.UsedBuffers = 0;
-        ```
-    2.  Since the LLVM MCA simulation engine still incurs a 1-cycle retirement overhead at loop boundaries, we compensate for the speculative fetch capability at the metric aggregation step. We subtract `0.5` cycles per loop iteration from the steady-state cycle count:
-        ```cpp
-        double correctedCycles = static_cast<double>(M.Cycles) - (static_cast<double>(NumSteadyIterations) * 0.5);
-        M.Cycles = static_cast<unsigned>(correctedCycles + 0.5);
-        ```
-        This brings the calculated loop CPI of tight blocks down to **`0.56`**.
-
-#### 4. Flag-Transfer Penalty and A64 Low Latency Pointer Forwarding (SOG-Compliant)
-To align the C++ simulation engine exactly with the *Cortex-A55 Software Optimization Guide (v3.0)*, we added dynamic dependency checking during the instruction dispatch phase:
-*   **Flag-Transfer Penalty (SOG Section 5.11)**:
-    While integer compare-to-branch dependencies are bypassed with 0-cycle latency, flag transfers from the floating-point unit to integer status flags (e.g. `fcmp` $\to$ `b.ne` or `vmrs` flag writes) take a mandatory **1-cycle stall** on physical hardware. We intercept `NZCV` uses during dispatch; if the register definition originates from an FP comparison or flag-transfer instruction (`FCMP`, `VMRS`, `VMSR`), we retain the 1-cycle data dependency instead of clearing it.
-*   **A64 Low Latency Pointer Forwarding (SOG Section 5.10)**:
-    A dedicated forwarding path allows `adrp x0, <const>` followed by `ldr x0, [x0, #lo12]` to execute without any dependency stall. In `SteadyStateTracker::onEvent(Dispatched)`, if the current instruction is a load (`LDR`/`LDUR` family) and its base register dependency originates from an `ADRP` instruction, we dynamically bypass the register dependency (setting `IsReady = true` and `IndependentFromDef = true`), enabling 0-cycle AGU forwarding.
-
----
-
-### C. Neoverse Architecture Validations (N1, N2, V1)
+### A. Neoverse Architecture Validations (N1, N2, V1)
 
 We verified the scheduling models for high-performance out-of-order Neoverse cores (`NeoverseN1.td`, `NeoverseN2.td`, `NeoverseV1.td`).
 *   Unlike the Cortex-A55, these architectures utilize the TableGen predicate `IsCheapLSL` (which checks if the shift type is LSL and the shift amount is $\le 4$).
@@ -118,7 +22,7 @@ We verified the scheduling models for high-performance out-of-order Neoverse cor
 
 ---
 
-### D. Cortex-X1 Model (`NeoverseV1Model`)
+### B. Cortex-X1 Model (`NeoverseV1Model`)
 
 The Cortex-X1 runs on `AArch64SchedNeoverseV1.td`. That file is compiled into the tool's own tables and installed **only** for `cortex-x1` / `cortex-x1c` (`neoverse-v1` keeps libLLVM's stock model), so its machine parameters are the X1's:
 
@@ -183,6 +87,7 @@ For basic block throughput estimation, loop-carried register dependencies (e.g.,
     ```
 *   When a new iteration starts (tracked by `readerIID / LoopSize`), we clear the history of register writes from prior iterations by resetting their `WriteRef`.
 *   We intercept the instruction dispatch phase and manually mark any pending input operands (`mca::ReadState`) as ready if their critical dependency originates from a previous loop iteration.
+*   **Timing of the reset (#12).** The Dispatched event is raised by the issue stage only after the instruction has passed its register hazard check. Resetting the mappings there is in time for every instruction of an iteration except the first one, whose own check still saw the previous iteration's producers; a basic block whose first instruction depended on the previous iteration was therefore simulated as if the dependency were kept (e.g. `fadd d0, d0, d1; add; add`: 4.0 cycles/iteration under both `--ignore-loop-carried=default` and `disable`, against 2.01 with the `fadd` in second position; measured with `--iterations=200`). For the Cortex-A55, whose issue stage is the project's own, the reset is now performed before each hazard check (`LoopCarriedIgnoreSteadyStateTracker::beforeRegisterHazardCheck()`; see [a55-sog.md](a55-sog.md#22-issue-stage-srca55a55_issue_stagecpp)). **Not fixed for the other cores:** the stock `llvm::mca::InOrderIssueStage` used for Cortex-A520 raises Dispatched after its hazard check too and has no hook, so the A520 still keeps the first instruction's loop-carried dependency (`fadd d0, d0, d1; fadd d2, d3, d1` as a basic block: 4.0 under both modes, 3.0 vs 4.0 with the two instructions swapped). The out-of-order pipeline is unchanged as well.
 
 ### D. Basic Block Partitioning under Size Limits
 To prevent long instruction sequences from being completely skipped when size limits are applied:
@@ -195,6 +100,9 @@ Instead of simple linear scanning, we build a Control Flow Graph (CFG) of each f
 2.  **Natural Loop Detection**: We run DFS to find back-edges. For each back-edge `U -> V` where `V` is an active ancestor, we collect all nodes reachable from `U` to `V` without going through `V` to identify the Natural Loop nodes. We build a Loop Nest Tree to filter loops by nesting depth (`depth < nestLimitOuter`) and height (`height < nestLimitInner`).
 3.  **Post-Dominator Analysis**: We compute the Immediate Post-dominator (`ipdom`) relation for all CFG nodes using the Lengauer-Tarjan algorithm on the reverse CFG (starting from a virtual exit node).
 4.  **Loop Merging**: If a basic block node `U` is not part of a valid loop but is post-dominated by a loop's header, it is classified as a pre-header or post-exit block that will always execute in tandem with the loop. Rather than processing it independently, `U` is merged into the loop, and is not emitted as a standalone basic block. This eliminates redundant basic block simulations.
+
+### F. Instructions rejected by InstrBuilder
+An instruction whose scheduling class cannot be modelled (e.g. a `SchedWrite` marked `Unsupported`) is left out of the simulated sequence. This is no longer silent: `analyzeMcaRegion` (and the `--facile` path of `mca_tool`) count each drop per opcode, and `mca_tool` / `mlp-objdump` print a `[WARN]` summary to stderr once the (stderr-silenced) analysis is over. The CSV output is unchanged.
 
 ---
 

@@ -60,6 +60,17 @@ struct LoopCarriedIgnoreSteadyStateTracker : public BaseSteadyStateTracker {
         : BaseSteadyStateTracker(WarmupRetiredLimit), LoopSize(LoopSize), PRF(PRF) {}
 
     void onInstructionDispatched(const llvm::mca::HWInstructionEvent &Event) override;
+
+    // Drops the producers of earlier iterations from the register mappings as
+    // soon as `IR` (an instruction about to be checked for issue) starts a new
+    // iteration.  onInstructionDispatched() does the same, but the Dispatched
+    // event comes after the issue stage's register hazard check, so on its own
+    // it is too late for the first instruction of each iteration.  An issue
+    // stage that calls this before its hazard check makes the first instruction
+    // independent of the previous iteration like every other one.  Only the
+    // Cortex-A55 issue stage (src/a55/a55_issue_stage.cpp) calls it; the stock
+    // llvm::mca stages offer no such hook.
+    void beforeRegisterHazardCheck(const llvm::mca::InstRef &IR);
 };
 
 #endif // MCA_STEADY_STATE_TRACKER_H

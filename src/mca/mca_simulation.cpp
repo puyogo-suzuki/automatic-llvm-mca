@@ -5,7 +5,10 @@
 #include "cpu/sched_model.h"
 #include "mca/steady_state_tracker.h"
 #include <algorithm>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <string>
 
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MCA/Context.h"
@@ -40,6 +43,40 @@ unsigned getWarmupWindowSize(const MCSubtargetInfo &STI) {
 
 } // namespace
 
+namespace {
+struct DroppedInstructionTally {
+    std::mutex Lock;
+    std::map<std::string, uint64_t> ByOpcode;
+};
+DroppedInstructionTally &droppedInstructionTally() {
+    static DroppedInstructionTally T;
+    return T;
+}
+} // namespace
+
+void noteDroppedInstruction(StringRef OpcodeName) {
+    DroppedInstructionTally &T = droppedInstructionTally();
+    std::lock_guard<std::mutex> G(T.Lock);
+    ++T.ByOpcode[OpcodeName.str()];
+}
+
+void reportDroppedInstructions(raw_ostream &OS) {
+    DroppedInstructionTally &T = droppedInstructionTally();
+    std::lock_guard<std::mutex> G(T.Lock);
+    if (T.ByOpcode.empty())
+        return;
+    uint64_t Total = 0;
+    for (const auto &KV : T.ByOpcode)
+        Total += KV.second;
+    OS << "[WARN] " << Total << " instruction(s) were left out of the MCA simulation because "
+       << "llvm::mca::InstrBuilder rejected them (scheduling model has no usable data); "
+       << "regions containing them are simulated without them:\n";
+    for (const auto &KV : T.ByOpcode)
+        OS << "[WARN]   " << KV.first << ": " << KV.second << "\n";
+    OS.flush();
+    T.ByOpcode.clear();
+}
+
 unsigned computeSteadyIterations(const MCSubtargetInfo &STI, size_t regionInstrCount, unsigned iterations) {
     if (regionInstrCount == 0) return 1;
     const unsigned WindowSize = std::max(1u, getWarmupWindowSize(STI));
@@ -67,7 +104,9 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     for (const auto &I : instrs) {
         auto ExpectedInst = IB.createInstruction(I.Inst, IVec);
         if (!ExpectedInst) {
+            // Not silently: see noteDroppedInstruction() in mca_simulation.h.
             consumeError(ExpectedInst.takeError());
+            noteDroppedInstruction(MCII.getName(I.Inst.getOpcode()));
             continue;
         }
         
@@ -101,13 +140,15 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     mca::CustomBehaviour CB(STI, CSM, MCII);
     bool IsA55 = (getCpuTraits(STI.getCPU()).Model == CpuModel::A55);
     std::unique_ptr<mca::Pipeline> P;
+    mca::A55DecoupledIssueStage *A55Issue = nullptr;
     if (STI.getSchedModel().isOutOfOrder()) {
         P = MCAContext.createDefaultPipeline(PO, CSM, CB);
     } else if (IsA55) {
         auto PRF_unique = std::make_unique<mca::RegisterFile>(STI.getSchedModel(), MRI);
         mca::RegisterFile *PRF_ptr = PRF_unique.get();
         MCAContext.addHardwareUnit(std::move(PRF_unique));
-        P = mca::createA55DecoupledPipeline(PO, CSM, CB, STI, MRI, *PRF_ptr, MCII, CSM.getInstructions());
+        P = mca::createA55DecoupledPipeline(PO, CSM, CB, STI, MRI, *PRF_ptr, MCII, CSM.getInstructions(),
+                                            &A55Issue);
     } else {
         P = MCAContext.createInOrderPipeline(PO, CSM, CB);
     }
@@ -125,8 +166,20 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     unsigned WarmupLimit = instrs.size() * WarmupIterations;
 
     if (ignoreLoopCarriedDep) {
-        Tracker = std::make_unique<LoopCarriedIgnoreSteadyStateTracker>(
+        auto LCI = std::make_unique<LoopCarriedIgnoreSteadyStateTracker>(
             WarmupLimit, instrs.size(), PRF);
+        // #12: the tracker drops the previous iteration's producers on the
+        // Dispatched event, which the issue stages raise only after their
+        // register hazard check, so the first instruction of every iteration
+        // still waited for the previous iteration.  The A55 issue stage calls the
+        // tracker before that check.  The stock in-order (e.g. cortex-a520) and
+        // out-of-order pipelines have no such hook and are left as they were.
+        if (A55Issue) {
+            LoopCarriedIgnoreSteadyStateTracker *T = LCI.get();
+            A55Issue->setBeforeRegisterHazardCheckHook(
+                [T](const mca::InstRef &IR) { T->beforeRegisterHazardCheck(IR); });
+        }
+        Tracker = std::move(LCI);
     } else {
         Tracker = std::make_unique<BaseSteadyStateTracker>(
             WarmupLimit);

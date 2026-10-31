@@ -1,4 +1,5 @@
 #include "frontend/frontend.h"
+#include "a55/a55_issue_stage.h"
 #include "core/object_loader.h"
 #include "cpu/cpu_traits.h"
 #include "cpu/sched_model.h"

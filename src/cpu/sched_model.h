@@ -16,7 +16,7 @@ class MCInstrInfo;
 // `CPUName`; leaves CPUs without a local model (e.g. "generic") untouched.
 void installLocalSchedModel(llvm::MCSubtargetInfo &STI, llvm::StringRef CPUName);
 // Must be called on every MCInstrInfo used alongside
-// installLocalSchedModel(); see docs.md section 5.A.
+// installLocalSchedModel(); see docs/docs.md section 5.A.
 void remapSchedClassIndices(llvm::MCInstrInfo &MCII, llvm::StringRef CPUName);
 // True when `STI` runs Apple Firestorm's or Icestorm's sched model.  Apple's cores
 // coalesce several uops into one ROB entry, so every instruction counts as a

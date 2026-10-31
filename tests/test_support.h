@@ -143,9 +143,16 @@ struct AArch64TestContext {
         // cortex-x1/-x1c are added for the same reason as the A720: stock LLVM
         // maps them to its own NeoverseV1Model (ROB 256, IssueWidth 8, no
         // load-pair latency fix), which is not the model the tool installs.
+        // cortex-a55 joins the list for the same reason: the A55 tests pin
+        // values of ModifiedTarget/AArch64/AArch64SchedA55.td (the Software
+        // Optimization Guide numbers), which libLLVM's stock CortexA55Model does
+        // not carry (e.g. it has no atomics at all and a 4-cycle LDR Q).  The
+        // two older A55 tests that want the stock model (MLPTest.A55*) still
+        // reset TC.STI to it explicitly.
         if (cpu == "icestorm" || cpu == "firestorm" ||
             cpu == "cortex-a720" || cpu == "cortex-a720ae" ||
-            cpu == "cortex-x1" || cpu == "cortex-x1c") {
+            cpu == "cortex-x1" || cpu == "cortex-x1c" ||
+            cpu == "cortex-a55") {
             const std::string llvm_cpu =
                 (cpu == "icestorm" || cpu == "firestorm") ? "apple-m1" : cpu;
             STI.reset(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));

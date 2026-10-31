@@ -15,6 +15,19 @@ set(FIRESTORM_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64
 set(A520_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedA520.td)
 set(A720_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64SchedA720.td)
 set(A76_PROC_TD_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/AArch64Processors.td)
+# Every TableGen output is derived from the whole AArch64.td include tree, and the
+# ModifiedTarget/AArch64/*.td files shadow their llvm-source counterparts (the -I
+# order below).  AArch64GenInstrInfo.inc in particular carries the per-opcode
+# SchedClass index, so it must be regenerated whenever an InstRW is added or
+# removed in any scheduling model -- otherwise the opcode -> SchedClass mapping in
+# the binary disagrees with AArch64GenSubtargetInfo.inc and unrelated
+# latencies/resources are reported.  All three outputs therefore depend on all
+# of these .td files.
+file(GLOB AARCH64_MODIFIED_TD_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ModifiedTarget/AArch64/*.td)
+file(GLOB AARCH64_UPSTREAM_TD_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/*.td)
+set(AARCH64_TD_DEPENDS ${AARCH64_MODIFIED_TD_FILES} ${AARCH64_UPSTREAM_TD_FILES}
+    ${A55_TD_FILE} ${A76_TD_FILE} ${A78_TD_FILE} ${X1_TD_FILE} ${ICESTORM_TD_FILE} ${FIRESTORM_TD_FILE}
+    ${A520_TD_FILE} ${A720_TD_FILE} ${A76_PROC_TD_FILE})
 set(GEN_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenSubtargetInfo.inc)
 set(GEN_REG_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenRegisterInfo.inc)
 set(GEN_INSTR_INC_FILE ${CMAKE_CURRENT_BINARY_DIR}/AArch64GenInstrInfo.inc)
@@ -28,8 +41,7 @@ add_custom_command(
             -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_INC_FILE}
-    DEPENDS ${A55_TD_FILE} ${A76_TD_FILE} ${A78_TD_FILE} ${X1_TD_FILE} ${ICESTORM_TD_FILE} ${FIRESTORM_TD_FILE} ${A520_TD_FILE} ${A720_TD_FILE} ${A76_PROC_TD_FILE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+    DEPENDS ${AARCH64_TD_DEPENDS}
     COMMENT "Generating AArch64GenSubtargetInfo.inc using llvm-tblgen"
 )
 
@@ -42,7 +54,7 @@ add_custom_command(
             -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_REG_INC_FILE}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+    DEPENDS ${AARCH64_TD_DEPENDS}
     COMMENT "Generating AArch64GenRegisterInfo.inc using llvm-tblgen"
 )
 
@@ -55,7 +67,7 @@ add_custom_command(
             -I /usr/include/llvm-22
             ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
             -o ${GEN_INSTR_INC_FILE}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/llvm-source/llvm/lib/Target/AArch64/AArch64.td
+    DEPENDS ${AARCH64_TD_DEPENDS}
     COMMENT "Generating AArch64GenInstrInfo.inc using llvm-tblgen"
 )
 
@@ -120,7 +132,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-add_executable(mca_unit_tests tests/mlp_test.cpp tests/splitter_test.cpp tests/facile_test.cpp tests/cpu_traits_test.cpp)
+add_executable(mca_unit_tests tests/mlp_test.cpp tests/splitter_test.cpp tests/facile_test.cpp tests/cpu_traits_test.cpp
+               tests/a55_sog_test.cpp)
 target_link_libraries(mca_unit_tests PRIVATE gtest_main mca_common_lib ${llvm_libs})
 
 include(GoogleTest)

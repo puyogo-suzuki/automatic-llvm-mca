@@ -6,13 +6,12 @@ using mca_common_detail::ReadState_IsReady_Tag;
 
 namespace {
 
-void applyLoopCarriedIgnore(const mca::HWInstructionEvent &Event, unsigned LoopSize, unsigned &CurrentIteration, mca::RegisterFile *PRF) {
-    if (LoopSize == 0) return;
-    mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
-    unsigned readerIID = Event.IR.getSourceIndex();
+// When `readerIID` starts a new iteration, removes the producers of earlier
+// iterations from the register mappings.
+void dropEarlierIterationProducers(unsigned readerIID, unsigned LoopSize, unsigned &CurrentIteration, mca::RegisterFile *PRF) {
     unsigned readerIteration = readerIID / LoopSize;
     unsigned limitIID = readerIteration * LoopSize;
-    
+
     if (readerIteration > CurrentIteration) {
         CurrentIteration = readerIteration;
         if (PRF) {
@@ -28,6 +27,16 @@ void applyLoopCarriedIgnore(const mca::HWInstructionEvent &Event, unsigned LoopS
             }
         }
     }
+}
+
+void applyLoopCarriedIgnore(const mca::HWInstructionEvent &Event, unsigned LoopSize, unsigned &CurrentIteration, mca::RegisterFile *PRF) {
+    if (LoopSize == 0) return;
+    mca::Instruction &Inst = *const_cast<mca::Instruction *>(Event.IR.getInstruction());
+    unsigned readerIID = Event.IR.getSourceIndex();
+    unsigned readerIteration = readerIID / LoopSize;
+    unsigned limitIID = readerIteration * LoopSize;
+
+    dropEarlierIterationProducers(readerIID, LoopSize, CurrentIteration, PRF);
 
     for (mca::ReadState &RS : Inst.getUses()) {
         if (!RS.isReady()) {
@@ -44,4 +53,9 @@ void applyLoopCarriedIgnore(const mca::HWInstructionEvent &Event, unsigned LoopS
 
 void LoopCarriedIgnoreSteadyStateTracker::onInstructionDispatched(const mca::HWInstructionEvent &Event) {
     applyLoopCarriedIgnore(Event, LoopSize, CurrentIteration, PRF);
+}
+
+void LoopCarriedIgnoreSteadyStateTracker::beforeRegisterHazardCheck(const mca::InstRef &IR) {
+    if (LoopSize == 0) return;
+    dropEarlierIterationProducers(IR.getSourceIndex(), LoopSize, CurrentIteration, PRF);
 }

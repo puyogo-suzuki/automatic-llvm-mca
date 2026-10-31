@@ -99,7 +99,7 @@ bool usesLocalSchedTables(llvm::StringRef CPUName) {
 // stock libLLVM's (which differs for ~11% of opcodes once ModifiedTarget/*.td add
 // InstRW rules).  This is a correctness fix, not an accuracy claim.  The full
 // rationale, the measured extent of the mismatch and the safety checks:
-// docs.md section 5.A.
+// docs/docs.md section 5.A.
 void remapSchedClassIndices(llvm::MCInstrInfo &MCII, llvm::StringRef CPUName) {
     if (!usesLocalSchedTables(CPUName))
         return;

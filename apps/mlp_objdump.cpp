@@ -172,5 +172,8 @@ int main(int argc, char **argv) {
         }
     }
 
+    // stderr is silenced while regions are analysed; report InstrBuilder drops now.
+    reportDroppedInstructions(llvm::errs());
+
     return 0;
 }

@@ -22,7 +22,7 @@
 // cortex-x1 / cortex-x1c (neoverse-v1 keeps libLLVM's stock model), so the machine
 // parameters below are the Cortex-X1's.  Issue width 16 uOPs/cycle, ROB 224; the
 // 8-Mop rename width lives in cpu_traits.cpp; decode width (5) and scheduler
-// entries (150) are not modelled.  See docs.md section 1.D.
+// entries (150) are not modelled.  See docs/docs.md section 1.B.
 def NeoverseV1Model : SchedMachineModel {
   let IssueWidth            =  16; // uOPs dispatched per cycle (X1 SOG sec. 4.1).
   let MicroOpBufferSize     = 224; // Cortex-X1 re-order buffer.
