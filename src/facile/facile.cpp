@@ -3,6 +3,8 @@
 #include "cpu/sched_model.h"
 #include "facile/fusion.h"
 #include "mlp/mlp_types.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/Format.h"
@@ -45,15 +47,20 @@ bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
 // instruction-wide MaxLatency), minus the consumer's ReadAdvance, floored at one
 // cycle.  See docs/docs.md section 4.A.
 // ---------------------------------------------------------------------------
-// 2026-10-30 (proposed, a720_td_fix2): registers are compared by their first register unit, so that
-// aliasing sub-/super-registers (W0/X0, B0/H0/S0/D0/Q0) form one dependence chain.  Before, the
-// maps below were keyed by the exact register id and e.g. "ldr w0,[x0]" chains had no RAW edge.
+// Registers are tracked by their register units, so that aliasing sub-/super-registers
+// (W0/X0, B0/H0/S0/D0/Q0) form one dependence chain ("ldr w0,[x0]" chains need a RAW
+// edge), and so that a register tuple (the destination of LD1-LD4, the source of ST1-ST4:
+// Q0_Q1, ...) is both a producer and a consumer of each of its registers: a consumer
+// of v1 after "ld1 {v0, v1}" depends on the load.  A register with a single unit
+// (every non-tuple register) has one key, as before.
 static const llvm::MCRegisterInfo *GFacileMRI = nullptr;
-unsigned regKey(unsigned Reg) {
-    if (Reg == 0 || !GFacileMRI || (Reg & 0x80000000u)) return Reg;
+static void regKeys(unsigned Reg, llvm::SmallVectorImpl<unsigned> &Keys) {
+    Keys.clear();
+    if (Reg == 0) return;
+    if (!GFacileMRI || (Reg & 0x80000000u)) { Keys.push_back(Reg); return; }
     for (llvm::MCRegUnit U : GFacileMRI->regunits(llvm::MCRegister(Reg)))
-        return static_cast<unsigned>(U) | 0x80000000u;
-    return Reg;
+        Keys.push_back(static_cast<unsigned>(U) | 0x80000000u);
+    if (Keys.empty()) Keys.push_back(Reg);
 }
 
 double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
@@ -61,8 +68,10 @@ double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
                       const llvm::mca::ReadState &Use,
                       unsigned Reg) {
     const llvm::mca::WriteState *WS = nullptr;
+    llvm::SmallVector<unsigned, 4> DefKeys;
     for (const llvm::mca::WriteState &W : Writer.getDefs()) {
-        if (regKey(W.getRegisterID()) == regKey(Reg)) {
+        regKeys(W.getRegisterID(), DefKeys);
+        if (llvm::is_contained(DefKeys, Reg)) {
             WS = &W;
             break;
         }
@@ -258,32 +267,40 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
         }
 
         size_t UseSlot = 0;
+        llvm::SmallVector<unsigned, 4> Keys;
         for (const auto &Op : Inst->getUses()) {
-            unsigned Reg = regKey(Op.getRegisterID());
+            regKeys(Op.getRegisterID(), Keys);
             size_t ThisSlot = UseSlot++;
-            if (Reg == 0) continue;
-
-            if (DefinedRegs.find(Reg) == DefinedRegs.end()) {
-                if (FirstReader.find(Reg) == FirstReader.end()) {
-                    FirstReader[Reg] = {i, ThisSlot};
-                }
-            }
+            if (Keys.empty()) continue;
 
             const bool IsAddressUse = AddrOp >= 0 && Op.getDescriptor().OpIndex >= AddrOp;
-            if (IsAddressUse && DefinedRegs.find(Reg) == DefinedRegs.end())
-                EarlyReads.push_back({WbNode, i, ThisSlot, Reg});
+            // One edge per producing node even when several register units of a tuple
+            // were written by the same instruction.
+            llvm::SmallVector<size_t, 4> EdgeFrom;
+            for (unsigned Reg : Keys) {
+                if (DefinedRegs.find(Reg) == DefinedRegs.end()) {
+                    if (FirstReader.find(Reg) == FirstReader.end()) {
+                        FirstReader[Reg] = {i, ThisSlot};
+                    }
+                }
 
-            auto it = LastWriter.find(Reg);
-            if (it != LastWriter.end() && it->second.Inst < i) {
-                double Lat = getEdgeLatency(STI, *SimInstrs[it->second.Inst], Op, Reg);
-                Adj[it->second.Node].push_back({i, Lat, 0});
-                if (IsAddressUse) Adj[it->second.Node].push_back({WbNode, Lat, 0});
+                if (IsAddressUse && DefinedRegs.find(Reg) == DefinedRegs.end())
+                    EarlyReads.push_back({WbNode, i, ThisSlot, Reg});
+
+                auto it = LastWriter.find(Reg);
+                if (it != LastWriter.end() && it->second.Inst < i) {
+                    if (llvm::is_contained(EdgeFrom, it->second.Node)) continue;
+                    EdgeFrom.push_back(it->second.Node);
+                    double Lat = getEdgeLatency(STI, *SimInstrs[it->second.Inst], Op, Reg);
+                    Adj[it->second.Node].push_back({i, Lat, 0});
+                    if (IsAddressUse) Adj[it->second.Node].push_back({WbNode, Lat, 0});
+                }
             }
         }
 
         for (const auto &Op : Inst->getDefs()) {
-            unsigned Reg = regKey(Op.getRegisterID());
-            if (Reg != 0) {
+            regKeys(Op.getRegisterID(), Keys);
+            for (unsigned Reg : Keys) {
                 LastWriter[Reg] = {(AddrOp >= 0 && isStoreWritebackDef(*Inst, Op)) ? WbNode : i, i};
                 DefinedRegs.insert(Reg);
             }

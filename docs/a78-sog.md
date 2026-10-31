@@ -30,7 +30,7 @@ Contents
 | D, deliberate deviation or interpretation | [D-1](#d-1) to [D-11](#d-11) |
 | U, unclear in the SOG | [U-1](#u-1) to [U-12](#u-12) |
 | I, inconsistent within the SOG | [I-1](#i-1) to [I-7](#i-7) |
-| X, outside the A78 path | [X-1](#x-1) to [X-3](#x-3) |
+| X, outside the A78 path | [X-1](#x-1) to [X-2](#x-2) |
 | B, taken over from the Cortex-A55 / Cortex-A520 / Cortex-A76 (not SOG-based) | [B-1](#b-1) |
 
 ---
@@ -888,15 +888,6 @@ does.
 LLVM MCA's `InstrBuilder` sets the latency of BL, BLR (and other calls) to 0, whatever the
 scheduling model says; Facile then floors the LR edge to 1, which meets the SOG's BL / BLR latency 1
 (C-8). Shared LLVM behaviour; not changed.
-
-<a id="x-3"></a>
-**X-3. Multi-register destinations: only the first register gets a dependence edge.**
-Facile keys registers by their first register unit (`regKey` in `src/facile/facile.cpp`). A
-register tuple written by LD1-LD4 (e.g. `Q0_Q1`) is keyed by its first register only, so a consumer
-of the second and later registers of the tuple sees no edge. Measured: `ld1 {v0.16b, v1.16b}, [x0];
-add v1.16b, v1.16b, v1.16b; fmov x0, d1` + branch 2.0 (a recurrence of 5 + 2 + 2 = 9 through v1 is
-missed), while the same loop through v0 gives 9.0. Affects every core; not changed (the research
-binaries contain 869 LD/ST of this family in all).
 
 ---
 

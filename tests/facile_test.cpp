@@ -70,6 +70,23 @@ TEST(FacileTest, MemoryLoopCarriedRecurrence) {
 }
 
 
+// A register tuple (LD1-LD4 destination, ST1-ST4 source) is a producer and a consumer of EACH of its
+// registers: a recurrence through the second register of "ld1 {v0, v1}" is as long as one through
+// the first (before, only the first register of the tuple had dependence edges).
+TEST(FacileTest, RegisterTupleDefinesAndUsesEveryRegister) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a78");
+    auto ViaV0 = runFacileAArch64(TC, "ld1 {v0.16b, v1.16b}, [x0]\nadd v0.16b, v0.16b, v0.16b\nfmov x0, d0\n");
+    auto ViaV1 = runFacileAArch64(TC, "ld1 {v0.16b, v1.16b}, [x0]\nadd v1.16b, v1.16b, v1.16b\nfmov x0, d1\n");
+    EXPECT_GT(ViaV0.PrecedenceBound, 5.0);
+    EXPECT_DOUBLE_EQ(ViaV1.PrecedenceBound, ViaV0.PrecedenceBound);
+    // The tuple as a source: a write of v1 reaches "st1 {v0, v1}", the store's result feeds the
+    // load through x0.
+    auto Store = runFacileAArch64(TC, "ld1 {v2.16b}, [x0]\nadd v1.16b, v2.16b, v2.16b\nst1 {v0.16b, v1.16b}, [x1]\nfmov x0, d2\n");
+    auto StoreFirst = runFacileAArch64(TC, "ld1 {v2.16b}, [x0]\nadd v0.16b, v2.16b, v2.16b\nst1 {v0.16b, v1.16b}, [x1]\nfmov x0, d2\n");
+    EXPECT_DOUBLE_EQ(Store.PrecedenceBound, StoreFirst.PrecedenceBound);
+}
+
 // Dependence-distance test: identical subscript expressions with a
 // loop-varying index are an array read-modify-write (a[i] = f(a[i])).  Their
 // dependence distance is 0, so there must be NO loop-carried edge -- the next
