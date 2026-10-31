@@ -9,7 +9,7 @@ TEST(CpuTraitsTest, TableContents) {
         EXPECT_EQ(T.UopDispatchWidth, 12u) << n;
         EXPECT_EQ(T.MopDispatchWidth, 6u) << n;
         EXPECT_EQ(T.Fusion, FusionTable::A78) << n;
-        EXPECT_TRUE(T.ZeroLatencyMov && T.N2ModelCorrections) << n;
+        EXPECT_TRUE(T.ZeroLatencyMov) << n;
     }
     for (const char *n : {"cortex-x1", "cortex-x1c"}) {
         const CpuTraits &T = getCpuTraits(n);
@@ -18,7 +18,6 @@ TEST(CpuTraitsTest, TableContents) {
         EXPECT_EQ(T.MopDispatchWidth, 8u) << n;
         EXPECT_EQ(T.Fusion, FusionTable::X1) << n;
         EXPECT_TRUE(T.ZeroLatencyMov) << n;
-        EXPECT_FALSE(T.N2ModelCorrections) << n;  // V1 model has no N2 defects
     }
     // Stock-model cores that only share a uop width keep no Mop cap and no local model.
     EXPECT_EQ(getCpuTraits("neoverse-v1").UopDispatchWidth, 16u);

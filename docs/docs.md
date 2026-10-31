@@ -1,6 +1,6 @@
 # automatic-llvm-mca Technical Documentation
 
-This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here. The Cortex-A55 model and its conformance to the Arm Cortex-A55 Software Optimization Guide are described separately in [a55-sog.md](a55-sog.md), the Cortex-A520 and Cortex-A76 ones in [a520-sog.md](a520-sog.md) and [a76-sog.md](a76-sog.md); [README.md](README.md) lists the documents.
+This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here. The Cortex-A55 model and its conformance to the Arm Cortex-A55 Software Optimization Guide are described separately in [a55-sog.md](a55-sog.md), the Cortex-A520, Cortex-A76 and Cortex-A78 ones in [a520-sog.md](a520-sog.md), [a76-sog.md](a76-sog.md) and [a78-sog.md](a78-sog.md); [README.md](README.md) lists the documents.
 
 ---
 
@@ -47,7 +47,7 @@ The decode width and the scheduler size are not in the SOG; they were supplied b
 * `PMULL` (64x64): V01, latency 2, 2 per cycle. `SHA1SU0` / `SHA256SU1` three-register forms: V0 (the stock regular expressions only matched the two-register forms).
 * High half of `LDPW`/`LDPSW`/`LDP[SD]`: latency of the load itself, zero uops (`V1Write_{4,5,6}c_0Z`). Stock V1 uses `V1Write_0c_0Z` (latency 0), which cannot be told apart from a rename-time zero-latency MOV (see section 4.B) and would make the high half free.
 
-Facile-side X1 behaviour: the fusion table is the A78 table without the CMP + CSEL/CSET rows, and the zero-latency MOV list is the A78's (sections 4.B and 4.C). The A78-specific corrections of section 4.D are not needed because V1 does not have those defects.
+Facile-side X1 behaviour: the fusion table is the A78 table without the CMP + CSEL/CSET rows, and the zero-latency MOV list is the A78's (sections 4.B and 4.C). The Cortex-A78 changes of section 4.D are made in the A78's own model file and do not reach the X1.
 
 The model was compared against the X1 SOG tables with `tools/sog_compare.py` (see the README). Differences that were left as they are: `SMADDL`-family throughput (the SOG prints throughput 2 for the single M0 pipe), `LD4` Q-form throughput (SOG 1/2, model about 3/4 per cycle), `EXTR` with two distinct source registers (SOG: 3 cycles, I and M; model: 1 cycle, I), and the data-side pipes of ASIMD stores (the SOG table says V, its Table 2-1 says only V0/V1 take store data; the model follows Table 2-1).
 
@@ -201,9 +201,11 @@ and AArch64SchedPredNeoverse.td's NeoverseZeroMove enumerates precisely sec. 4.1
 The floor is right for every other write (a dependent operation cannot issue in the same cycle as a producer that really has to compute something), but a zero-latency MOV is not computed at all: there is no producer to wait for.  Charging it a cycle inflates every dependence chain that passes through a register copy. WHY THIS IS GATED ON THE TARGET AND NOT JUST ON "Latency == 0". A zero-latency write means "renamed away" only in the N2 model. Checked every other model this tool uses, and a blanket rule would have been wrong in two of them:
 
 ```text
-      * N2 (cortex-a78): N2Write_0c appears at exactly three places,
-        all three of them the NeoverseZeroMove arm of a
-        SchedWriteVariant.  Here Latency==0 <=> SOG sec. 4.15 move.
+      * N2 (cortex-a78): N2Write_0c is reached only through the
+        NeoverseZeroMove arm of the MOVZ[WX]i and ORR[WX]rs variants
+        (the FMOV-from-ZR and MOVI #0 rows do not use the variant on the
+        A78, whose sec. 4.15 does not list them: a78-sog.md C-4).  Here
+        Latency==0 <=> SOG sec. 4.15 move.
       * N1 (cortex-a76): N1Write_0c_0Z (Latency 0, NumMicroOps 0) was
         used as the SECOND write of LDPWi / LDNPWi / LDPSWi, i.e. the
         second destination register of a load pair.  It was a micro-op
@@ -269,6 +271,8 @@ NOT VALIDATED AGAINST HARDWARE.  This change rests entirely on SOG sec. 4.12 bei
 Each core has its **own** table (`CpuTraits::Fusion`); there is deliberately no shared "Arm fusion" path. The second instruction of a fused pair consumes no issue slot and no execution-port resource (for "NOP + Any" it is the first).
 
 #### Cortex-A78 (SOG sec. 4.14)
+
+The row-by-row comparison with the SOG, and the open questions about the register forms and the AES pairs, are in [a78-sog.md](a78-sog.md) C-5, D-11, U-6 and U-11.
 
 Cortex-A78 Software Optimization Guide sec. 4.14 "Instruction fusion": specific adjacent AArch64 instruction pairs execute as a single fused operation on Cortex-A78 ("These instruction pairs must be adjacent to each other in program code"). The second instruction of a fused pair consumes no additional issue-width or execution-port resource. Confirmed this is A78-specific: the Cortex-A76 SOG documents no equivalent CMP/CSEL or CMP/B.cond fusion (only unrelated FP fused-multiply-accumulate), so this must not be applied there.
 
@@ -347,55 +351,7 @@ NOT MODELLED HERE, DELIBERATELY - and why, row by row:
 
 ### D. Corrections on top of `NeoverseN2Model` (Cortex-A78)
 
-The A78 borrows `NeoverseN2Model`. Where it disagrees with the A78 SOG, `src/facile/n2_corrections.cpp` and `calculatePortUsageBound()` correct the port usage after the fact (`CpuTraits::N2ModelCorrections`).
-
-#### Register-offset loads and stores (`isA78RegOffsetNoAlu`)
-
-A78 SOG correction: integer register-offset loads/stores on Cortex-A78 do NOT use an integer (I) pipe.
-
-cortex-a78 borrows NeoverseN2Model (AArch64Processors.td), whose
-
-```text
-  SchedAlias<WriteLDIdx, N2Write_4c_1I_1L>        (every reg-offset load)
-  SchedAlias<WriteSTIdx, N2Write_1c_1L01_1D_1I>   (every reg-offset store)
-```
-
-charge one extra N2UnitI uop to EVERY integer register-offset access. The Arm Cortex-A78 Core SOG (PJDOC-466751330-9691 Issue 4.0, Table 3-12/3-14) says otherwise:
-
-```text
-  Load register, register offset, basic            4  3  L
-  Load register, register offset, scale by 4/8     4  3  L
-  Load register, register offset, scale by 2       5  3  I, L   (LDRH/LDRSH)
-  Load register, register offset, extend           4  3  L
-```
-
-Load register, register offset, extend, sc. 4/8  4  3  L
-
-```text
-  Load register, register offset, extend, sc. 2    5  3  I, L   (LDRH/LDRSH)
-```
-
-Store register, register offset, basic/scaled 4/8/extend  1 2 L01, D
-
-```text
-  Store register, register offset, scaled by 2 (STRH)       2 2 I, L01, D
-```
-
-i.e. only the halfword forms WITH a shift need the I uop. (Cortex-A76's NeoverseN1Model already has WriteLDIdx = 1L, WriteSTIdx = 1L_1D, matching the A76 SOG, which is why only the A78 is affected; since 2026-10-31 it also gives the halfword forms scaled by 2 their I uop, see [a76-sog.md](a76-sog.md) C-11 and C-12.) Consequence of the bug: integer-ALU-heavy loops with many indexed accesses (e.g. a 59-instruction loop with 17 LDRWroX + 10 STRWroX) become falsely N2UnitI-bound.
-
-#### M0 occupancy, `LDPSW` and integer divide (`classifyA78ResOverride`)
-
-A78 SOG correction: NeoverseN2Model gives several Cortex-A78 instructions a MULTI-cycle occupancy of the single M0 pipe although the A78 SOG lists them as fully pipelined (throughput 1):
-
-```text
-  SCVTF/UCVTF (gen->vec)  N2Write_3c_1M0  ReleaseAtCycles=3   SOG 3-18: lat 3, thr 1, M0
-  FMOV W/X -> S/D/H       N2Write_0or3c_1M0 (3)               SOG: lat 3, thr 1, M0
-  DUP (vector, from GPR)  N2Write_3c_1M0 (3)                  SOG 3-26: lat 3, thr 1, M0
-```
-
-and LDPSW, which the SOG lists as "5, 3/2, I, L" (as NeoverseN1Model models it for the A76: N1Write_5c_1I_1L), is modelled as N2Write_5c_1M0 (5 cycles of M0, no load pipe at all).
-
-A76/A78 model-convention alignment: both the A76 and the A78 SOG give integer divide "latency 5 to 12(20), throughput 1/12(20) to 1/5". NeoverseN1Model (A76) occupied its divider for the BEST case (5, N1Write_12c5_1M / N1Write_20c5_1M); NeoverseN2Model (A78) for the WORST case (12 / 20). (Since 2026-10-31 the A76 has latency 5 as well and holds a divider resource of its own for the 5 cycles, M only one cycle: [a76-sog.md](a76-sog.md) D-1, D-3. The A78 correction below is unchanged.) This is a convention mismatch between the two borrowed upstream models, not a hardware difference; the A76 model's occupancy (5) is applied to the A78 so the two cores are modelled alike. This correction is always on.
+The A78 borrows LLVM's `NeoverseN2Model`. The local copy `ModifiedTarget/AArch64/AArch64SchedNeoverseN2.td` is installed only for cortex-a78 / -a78ae / -a78c (neoverse-n2, cortex-a710 and cortex-a715 keep libLLVM's stock model), so the places where the N2 rows disagree with the Cortex-A78 SOG are corrected in that file; Facile has no A78-specific port or uop correction. This covers, among others, the register-offset loads and stores (no I µOP except the halfword forms with a scale, and LDRH/LDRSH scaled latency 5), the M0 occupancy of SCVTF/UCVTF, FMOV and DUP from a GPR (one cycle), LDPSW (I and two L-cycles, both registers 5) and the integer divide (best case: latency 5, the divider held 5 cycles). The comparison with the SOG, item by item, and every change are in [a78-sog.md](a78-sog.md) (C-10, C-12, C-15, C-20 for the four just named).
 
 ### E. Front-end bounds: uops and Mops (`calculateIssueBound`)
 
@@ -440,7 +396,7 @@ The A720 SOG lists FMADD/FMSUB/FNMADD/FNMSUB and ASIMD FMLA/FMLS/FMLAL/FMLSL as 
 
 The SOGs give FP divide and square root a latency and a throughput that depend on the operands for the Neoverse-derived cores (A76/A78/X1: ranges such as "7 to 15" and "1/7 to 2/7" per form) and a fixed value per form for the A720. The model has one latency and one occupancy per `SchedWriteRes`, so a range needs one chosen value. Every form has its own write (`N1WriteFDS_*`, `N2WriteFDS_*`, `V1WriteFDS_*`, `A720Write_*`), listed next to the `InstRW` rows with the SOG values they come from.
 
-* **A76 (N1), A78 (N2), X1 (V1)**: the BEST of each range. Latency: the shortest (7 for the scalar and 2S/4S/2D ASIMD forms; Q-form F16 FDIV 10 and FSQRT 11, where the SOG ranges "10 to 13" and "11 to 13" start). Occupancy: the unit is busy for ceil(1 / best throughput) cycles. For the X1, whose SOG throughput is for the V0/V2 pair, the occupancy of one unit is ceil(2 / best throughput), so the instruction time is the same as on the A76 up to the pair. Examples (A76/A78): scalar H and S 4/7 -> 2, scalar D 2/7 -> 4; ASIMD D-form F32 2/7 -> 4, Q-form F32 and F64 1/7 -> 7, Q-form F16 1/10 (FDIV) and 1/11 (FSQRT) -> 10 and 11. The uOP counts of the A78 writes are those of the N2 writes they replace. The X1 SVE classes `V1Write_*_1V0` are not touched. On the A76 the occupancy is held on an FP divide unit of its own (`N1UnitFDiv`), V0 only one cycle, since 2026-10-31 ([a76-sog.md](a76-sog.md) D-3).
+* **A76 (N1), A78 (N2), X1 (V1)**: the BEST of each range. Latency: the shortest (7 for the scalar and 2S/4S/2D ASIMD forms; Q-form F16 FDIV 10 and FSQRT 11, where the SOG ranges "10 to 13" and "11 to 13" start). Occupancy: the unit is busy for ceil(1 / best throughput) cycles. For the X1, whose SOG throughput is for the V0/V2 pair, the occupancy of one unit is ceil(2 / best throughput), so the instruction time is the same as on the A76 up to the pair. Examples (A76/A78): scalar H and S 4/7 -> 2, scalar D 2/7 -> 4; ASIMD D-form F32 2/7 -> 4, Q-form F32 and F64 1/7 -> 7, Q-form F16 1/10 (FDIV) and 1/11 (FSQRT) -> 10 and 11. The uOP counts of the A78 writes are those of the N2 writes they replace. The X1 SVE classes `V1Write_*_1V0` are not touched. On the A76 and the A78 the occupancy is held on an FP divide unit of its own (`N1UnitFDiv`, `A78UnitFDiv`), V0 only one cycle ([a76-sog.md](a76-sog.md) D-3, [a78-sog.md](a78-sog.md) D-3).
 * **A720**: one latency per form, as in the SOG: scalar H 5, S 7, D 12 and ASIMD D-form F16 8, D-form F32 8, Q-form F16 12, Q-form F32 10, Q-form F64 13, for FDIV and FSQRT alike. The scalar throughput is 1 ("fully pipelined"), so the unit is busy one cycle. The ASIMD table's throughput column (1/4, 1/2, 1/8 -> occupancy 4, 2, 8) contradicts the note under it ("fully pipelined"); the table is used as printed.
 * **Apple (firestorm, icestorm)**: one latency per form from Dougall Johnson's tables (scalar H/S/D and vector 4H/8H/2S/4S/2D), replacing the single worst-case value. Port and occupancy are as before (Apple is not in a SOG).
 
@@ -504,4 +460,4 @@ This is a correctness fix, not an accuracy claim: InstRW rules in ModifiedTarget
 
 ### B. Per-CPU parameters (`cpu_traits.cpp`)
 
-Facts about a core that LLVM's scheduling model cannot express live in one table, `getCpuTraits()`: which local `.td` model is installed, the SOG's uop and Mop dispatch widths, which fusion table applies, whether the model's zero-latency writes are rename-time moves, and whether the `NeoverseN2Model` corrections of section 4.D apply. Adding a core or a variant of one is a single line there.
+Facts about a core that LLVM's scheduling model cannot express live in one table, `getCpuTraits()`: which local `.td` model is installed, the SOG's uop and Mop dispatch widths, which fusion table applies, and whether the model's zero-latency writes are rename-time moves. Adding a core or a variant of one is a single line there.

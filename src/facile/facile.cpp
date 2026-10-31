@@ -2,7 +2,6 @@
 #include "cpu/cpu_traits.h"
 #include "cpu/sched_model.h"
 #include "facile/fusion.h"
-#include "facile/n2_corrections.h"
 #include "mlp/mlp_types.h"
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -44,15 +43,26 @@ bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
 // Latency of a RAW dependence edge (Writer defines Reg -> Reader reads Reg
 // through use slot Use): the individual write's own latency (not the
 // instruction-wide MaxLatency), minus the consumer's ReadAdvance, floored at one
-// cycle.  See docs.md section 4.A.
+// cycle.  See docs/docs.md section 4.A.
 // ---------------------------------------------------------------------------
+// 2026-10-30 (proposed, a720_td_fix2): registers are compared by their first register unit, so that
+// aliasing sub-/super-registers (W0/X0, B0/H0/S0/D0/Q0) form one dependence chain.  Before, the
+// maps below were keyed by the exact register id and e.g. "ldr w0,[x0]" chains had no RAW edge.
+static const llvm::MCRegisterInfo *GFacileMRI = nullptr;
+unsigned regKey(unsigned Reg) {
+    if (Reg == 0 || !GFacileMRI || (Reg & 0x80000000u)) return Reg;
+    for (llvm::MCRegUnit U : GFacileMRI->regunits(llvm::MCRegister(Reg)))
+        return static_cast<unsigned>(U) | 0x80000000u;
+    return Reg;
+}
+
 double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
                       const llvm::mca::Instruction &Writer,
                       const llvm::mca::ReadState &Use,
                       unsigned Reg) {
     const llvm::mca::WriteState *WS = nullptr;
     for (const llvm::mca::WriteState &W : Writer.getDefs()) {
-        if (W.getRegisterID() == Reg) {
+        if (regKey(W.getRegisterID()) == regKey(Reg)) {
             WS = &W;
             break;
         }
@@ -64,7 +74,7 @@ double getEdgeLatency(const llvm::MCSubtargetInfo &STI,
 
     // Rename-time zero-latency MOVs: a Latency==0 write in the model means "no
     // dependence at all" - but only for CPUs whose model uses Latency==0 for
-    // nothing else (CpuTraits::ZeroLatencyMov).  See docs.md section 4.B.
+    // nothing else (CpuTraits::ZeroLatencyMov).  See docs/docs.md section 4.B.
     if (Lat == 0.0 && isZeroLatencyMovTarget(STI))
         return 0.0;
 
@@ -105,14 +115,13 @@ const llvm::MCSchedClassDesc *resolveSchedClass(const llvm::MCSubtargetInfo &STI
 
 // 1. Issue bound: max(uops / uop dispatch width, Mops / Mop dispatch width).
 // The Mop bound is skipped when MopWidth == 0 (CPU not verified, or Apple's
-// coalesced-ROB cores).  Why there are two bounds: docs.md section 4.E.
+// coalesced-ROB cores).  Why there are two bounds: docs/docs.md section 4.E.
 double calculateIssueBound(const llvm::MCSchedModel &SM,
                             llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                             unsigned &TotalUops,
                             unsigned DispatchWidthOverride,
                             unsigned MopWidth,
-                            const std::vector<bool> &FusedMask,
-                            const std::vector<bool> &NoAluMask = {}) {
+                            const std::vector<bool> &FusedMask) {
     unsigned IssueWidth = DispatchWidthOverride > 0 ? DispatchWidthOverride
                          : (SM.IssueWidth > 0 ? SM.IssueWidth : 1);
     TotalUops = 0;
@@ -121,9 +130,8 @@ double calculateIssueBound(const llvm::MCSchedModel &SM,
         if (i < FusedMask.size() && FusedMask[i])
             continue;
         unsigned NumUops = SimInstrs[i]->getNumMicroOps();
-        if (i < NoAluMask.size() && NoAluMask[i] && NumUops > 1) --NumUops;  // A78 SOG reg-offset correction
         TotalUops += (NumUops > 0 ? NumUops : 1);
-        ++NumMops; // one Mop per non-fused instruction (see docs.md section 4.E)
+        ++NumMops; // one Mop per non-fused instruction (see docs/docs.md section 4.E)
     }
     double UopBound = static_cast<double>(TotalUops) / static_cast<double>(IssueWidth);
     double MopBound = MopWidth > 0
@@ -138,8 +146,7 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
                                llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                llvm::ArrayRef<const llvm::MCInst *> MCInsts,
                                std::string &BottleneckPortName,
-                               const std::vector<bool> &FusedMask,
-                               const std::vector<bool> &NoAluMask = {}) {
+                               const std::vector<bool> &FusedMask) {
     const llvm::MCSchedModel &SM = STI.getSchedModel();
     unsigned NumProcResources = SM.NumProcResourceKinds;
     std::vector<double> ProcResUsage(NumProcResources, 0.0);
@@ -154,28 +161,11 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
         const llvm::MCSchedClassDesc *SCDesc = resolveSchedClass(STI, MCII, MCID.getSchedClass(), MCI);
         if (!SCDesc) continue;
 
-        A78ResOverride Ovr = classifyA78ResOverride(STI, MCII, *Inst);
-        if (Ovr == A78ResOverride::LDPSW) {  // A78 SOG: LDPSW "I, L", 3/2 per cycle
-            for (unsigned r = 1; r < NumProcResources; ++r) {
-                const llvm::MCProcResourceDesc *P = SM.getProcResource(r);
-                if (!P || !P->Name) continue;
-                llvm::StringRef PN(P->Name);
-                if (PN == "N2UnitI") ProcResUsage[r] += 1;
-                if (PN == "N2UnitL") ProcResUsage[r] += 2;
-            }
-            continue;
-        }
         for (const llvm::MCWriteProcResEntry *WPR = STI.getWriteProcResBegin(SCDesc);
              WPR != STI.getWriteProcResEnd(SCDesc); ++WPR) {
             unsigned ProcResIdx = WPR->ProcResourceIdx;
             unsigned Cycles = WPR->ReleaseAtCycle - WPR->AcquireAtCycle;
             if (Cycles == 0) continue; // Skip entries that consume 0 resource cycles
-            if (Ovr == A78ResOverride::OccupancyCap1) Cycles = std::min(Cycles, 1u);
-            if (Ovr == A78ResOverride::DivCap5) Cycles = std::min(Cycles, 5u);
-            if (i < NoAluMask.size() && NoAluMask[i]) {  // A78 SOG reg-offset correction
-                const llvm::MCProcResourceDesc *P = SM.getProcResource(ProcResIdx);
-                if (P && P->Name && llvm::StringRef(P->Name) == "N2UnitI") continue;
-            }
             if (ProcResIdx < NumProcResources) {
                 ProcResUsage[ProcResIdx] += Cycles;
             }
@@ -206,7 +196,7 @@ double calculatePortUsageBound(const llvm::MCSubtargetInfo &STI,
 // `Inst` is not such a store, or has no store data to separate from.
 //
 // The writeback is produced by the address-generation side (the SOGs split a store
-// into an address and a data uOP), so it does not wait for the data.  See docs.md
+// into an address and a data uOP), so it does not wait for the data.  See docs/docs.md
 // section 4.F.
 int storeWritebackAddressOperand(const llvm::mca::Instruction &Inst) {
     if (!Inst.getMayStore()) return -1;
@@ -269,7 +259,7 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
 
         size_t UseSlot = 0;
         for (const auto &Op : Inst->getUses()) {
-            unsigned Reg = Op.getRegisterID();
+            unsigned Reg = regKey(Op.getRegisterID());
             size_t ThisSlot = UseSlot++;
             if (Reg == 0) continue;
 
@@ -292,7 +282,7 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
         }
 
         for (const auto &Op : Inst->getDefs()) {
-            unsigned Reg = Op.getRegisterID();
+            unsigned Reg = regKey(Op.getRegisterID());
             if (Reg != 0) {
                 LastWriter[Reg] = {(AddrOp >= 0 && isStoreWritebackDef(*Inst, Op)) ? WbNode : i, i};
                 DefinedRegs.insert(Reg);
@@ -546,7 +536,7 @@ void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
     // the load to start at the start or the middle of the older store), so there is
     // no memory dependence.  Anything that is not statically known - a different
     // form, another kind of index update, an unknown size - returns false and the
-    // dependence is kept.  See docs.md section 4.G.
+    // dependence is kept.  See docs/docs.md section 4.G.
     auto provablyDisjoint = [&](size_t i, size_t j) {
         const llvm::MCInst *SI = MCInsts[i], *LI = MCInsts[j];
         if (!SI || !LI || IdxRegs[i] == 0 || IdxRegs[i] != IdxRegs[j]) return false;
@@ -739,17 +729,15 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     }
 
     std::vector<bool> FusedMask = computeFusedMask(STI, MCII, SimInstrs, MCInsts);
-    std::vector<bool> NoAluMask(SimInstrs.size(), false);
-    for (size_t i = 0; i < SimInstrs.size(); ++i)
-        NoAluMask[i] = isA78RegOffsetNoAlu(STI, MCII, *SimInstrs[i], i < MCInsts.size() ? MCInsts[i] : nullptr);
 
     // 1. Issue Limit
-    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, MopWidth, FusedMask, NoAluMask);
+    Res.IssueBound = calculateIssueBound(STI.getSchedModel(), SimInstrs, Res.TotalMicroOps, DispatchWidth, MopWidth, FusedMask);
 
     // 2. Execution Ports Limit
-    Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask, NoAluMask);
+    Res.PortBound = calculatePortUsageBound(STI, MCII, SimInstrs, MCInsts, Res.PortBottleneckName, FusedMask);
 
     // 3. Precedence Constraints Limit
+    GFacileMRI = &MRI;
     auto Adj = buildDependencyGraph(STI, SimInstrs);
     if (!MemInfos.empty())
         addMemoryDependencies(MCII, MRI, SimInstrs, MCInsts, MemInfos, Adj);

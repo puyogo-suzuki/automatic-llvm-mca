@@ -192,7 +192,7 @@ std::vector<SimpleLoop> detectAndMergeAbabChains(const std::vector<SimpleLoop> &
 // target address are, by the standard natural-loop definition (one loop per header,
 // all back-edges to it belong to that loop), ONE loop - not a set of concentric loops.
 // detectBackwardBranchLoops() emits one span per backward branch, so a loop body with an
-// early "continue" (e.g. mcf primal_bea_mpp: `if (arc->ident <= BASIC) continue;`, which
+// early "continue" (e.g. `if (arc->ident <= BASIC) continue;`, which
 // compiles to a 6-instruction `add; cmp; b.ls; ldr; cmp; b.le <hdr>` back-edge) produced
 // a short same-header partial path that was then analyzed as if it repeated back-to-back. This keeps only the widest span per
 // header, unchanged, and drops

@@ -1,7 +1,7 @@
 #ifndef FACILE_FUSION_H
 #define FACILE_FUSION_H
 
-// Adjacent-pair macro-op fusion (docs.md section 4.C).  Each core has its own SOG
+// Adjacent-pair macro-op fusion (docs/docs.md section 4.C).  Each core has its own SOG
 // table, selected by CpuTraits::Fusion.
 
 #include <memory>

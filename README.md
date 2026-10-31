@@ -188,7 +188,7 @@ tools/sog_compare.py --sog x1sog.txt --csv x1.csv
 The SOGs are Arm's documents and are not part of this repository (the `tmp/` directory is
 git-ignored for keeping local copies). The output is a triage list: it has false
 positives (rows the SOG itself prints inconsistently, forms that cannot be told apart by
-mnemonic) and it cannot see corrections applied on top of the model in `src/facile/n2_corrections.cpp`.
+mnemonic). The Cortex-A78 model is compared with its SOG item by item in `docs/a78-sog.md`.
 See the script's docstring for details.
 
 ## Per-CPU parameters

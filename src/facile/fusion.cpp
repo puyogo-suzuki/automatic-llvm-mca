@@ -10,10 +10,10 @@ namespace {
 // Cortex-A78 macro-op fusion (SOG sec. 4.14).  The SOG's list is NOT the cross
 // product of its producers and consumers: classifyA78Producer(),
 // classifyA78Consumer() and isA78FusiblePair() transcribe it row by row.  The
-// AES pair is deliberately not part of the mask.  See docs.md section 4.C.
+// AES pair is deliberately not part of the mask.  See docs/docs.md section 4.C.
 
 // Cortex-X1 macro-op fusion: the A78 table without the CMP + CSEL / CMP + CSET
-// rows (FusionTable::X1).  See docs.md section 4.C.
+// rows (FusionTable::X1).  See docs/docs.md section 4.C.
 
 // mca::Instruction::getDefs() elides writes to the discarded zero register
 // (nothing can ever depend on WZR/XZR's value, so the register-renaming
@@ -94,11 +94,11 @@ A78Consumer classifyA78Consumer(const llvm::MCInstrInfo &MCII, const llvm::mca::
 }
 
 // The sec. 4.14 pairing table, transcribed row by row.  Producers down,
-// consumers across; see docs.md section 4.C for why this is NOT the cross
+// consumers across; see docs/docs.md section 4.C for why this is NOT the cross
 // product of the two sets.
 //
 // `HasSelectFusion` is false for the Cortex-X1, whose SOG omits items 3-6
-// (CMP + CSEL / CSET); see docs.md section 4.C.
+// (CMP + CSEL / CSET); see docs/docs.md section 4.C.
 bool isA78FusiblePair(A78Producer P, A78Consumer C, bool HasSelectFusion = true) {
     switch (P) {
     case A78Producer::CMP:  // items 1,2 (+B.cond), 3,4 (+CSEL), 5,6 (+CSET)
@@ -164,11 +164,11 @@ std::vector<bool> computeA78FusedMask(const llvm::MCInstrInfo &MCII,
 
 // Cortex-A720 macro-op fusion (SOG sec. 4.11).  Its table is NOT the A78 table:
 // three rows differ and further rows exist that are deliberately not modelled.
-// The row-by-row comparison and the reasons: docs.md section 4.C.
+// The row-by-row comparison and the reasons: docs/docs.md section 4.C.
 
 // The four producers A720 sec. 4.11 names among the rows modelled here.  Note
 // the absence of NOP: sec. 4.11 has no "NOP + Any instruction" row (see
-// difference (1) in docs.md section 4.C), so unlike the A78 enum this one has
+// difference (1) in docs/docs.md section 4.C), so unlike the A78 enum this one has
 // no NOP member and computeA720FusedMask() has no NOP path.
 enum class A720Producer { None, CMP, CMN, TST, BICS };
 // The three consumers sec. 4.11 names among the rows modelled here.
@@ -308,7 +308,7 @@ std::vector<bool> computeA720FusedMask(const llvm::MCInstrInfo &MCII,
 
 // Per-target dispatch.  Each core gets its OWN SOG's table; there is
 // deliberately no shared "Arm fusion" path, because A78 sec. 4.14 and A720
-// sec. 4.11 disagree on three rows (see docs.md section 4.C).  The X1 is the
+// sec. 4.11 disagree on three rows (see docs/docs.md section 4.C).  The X1 is the
 // A78 table with the CSEL/CSET rows removed.  Which table a CPU uses is
 // CpuTraits::Fusion (cpu_traits.cpp).
 std::vector<bool> computeFusedMask(const llvm::MCSubtargetInfo &STI,

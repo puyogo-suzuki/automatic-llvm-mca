@@ -94,7 +94,6 @@ set(MCA_SOURCES
     src/mlp/seen_regs.cpp
     src/facile/facile.cpp
     src/facile/fusion.cpp
-    src/facile/n2_corrections.cpp
     src/frontend/frontend.cpp
     src/frontend/options.cpp)
 add_library(mca_common_lib STATIC ${MCA_SOURCES} ${GEN_INC_FILE} ${GEN_REG_INC_FILE} ${GEN_INSTR_INC_FILE})
@@ -134,7 +133,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 add_executable(mca_unit_tests tests/mlp_test.cpp tests/splitter_test.cpp tests/facile_test.cpp tests/cpu_traits_test.cpp
-               tests/a55_sog_test.cpp tests/a520_sog_test.cpp tests/a76_sog_test.cpp)
+               tests/a55_sog_test.cpp tests/a520_sog_test.cpp tests/a76_sog_test.cpp tests/a78_sog_test.cpp)
 target_link_libraries(mca_unit_tests PRIVATE gtest_main mca_common_lib ${llvm_libs})
 
 include(GoogleTest)

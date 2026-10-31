@@ -36,7 +36,7 @@ llvm::StringMap<CpuTraits> buildTable() {
     T["neoverse-n1"] = N1;
 
     CpuTraits A78;  A78.Model = CpuModel::A78; A78.UopDispatchWidth = 12; A78.MopDispatchWidth = 6;
-    A78.Fusion = FusionTable::A78; A78.ZeroLatencyMov = true; A78.N2ModelCorrections = true;
+    A78.Fusion = FusionTable::A78; A78.ZeroLatencyMov = true;
     T["cortex-a78"] = A78;
     T["cortex-a78ae"] = A78;
     T["cortex-a78c"] = A78;

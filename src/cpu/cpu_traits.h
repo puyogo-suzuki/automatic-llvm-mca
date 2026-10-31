@@ -70,12 +70,6 @@ struct CpuTraits {
     // them (see getEdgeLatency() in facile/facile.cpp).  NOT set for models that use
     // Latency==0 as an accounting marker.
     bool ZeroLatencyMov = false;
-
-    // The core is modelled by NeoverseN2Model, which disagrees with the
-    // Cortex-A78 SOG on register-offset load/store uops, M0 occupancy, LDPSW
-    // and integer divide; facile/n2_corrections.cpp corrects those on top of the model.
-    // (The X1's NeoverseV1Model does not have these defects.)
-    bool N2ModelCorrections = false;
 };
 
 // Unknown CPU names (including "generic") get a default-constructed CpuTraits.

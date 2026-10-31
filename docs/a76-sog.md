@@ -60,7 +60,7 @@ this and other sessions):
   `mca-insts-info` output is unchanged by this audit). The file was therefore edited in place; no
   separate A76 model was needed.
 * `src/cpu/cpu_traits.cpp`: the A76 entry (`UopDispatchWidth = 8`, `MopDispatchWidth = 4`, no
-  fusion table, `ZeroLatencyMov = false`, no N2 corrections, no MLP window resources).
+  fusion table, `ZeroLatencyMov = false`, no MLP window resources).
 * `src/facile/facile.cpp`: the Facile predictor, which produces the A76 cycle counts (the research
   runs `mca_tool --merge-same-header --dependency ooo --mcpu cortex-a76 --facile`; with `--facile`
   the MCA simulation is not run, the CSV `cycles` column is the rounded Facile estimate).
@@ -137,7 +137,7 @@ For `--facile`, every region gets `EstimatedCycles = max(IssueBound, PortBound, 
 * `calculateIssueBound`: `max(uops / 8, instructions / 4)` (uops = the model's `NumMicroOps`, one
   Mop per instruction; [C-1](#c-1), [U-2](#u-2)).
 * `calculatePortUsageBound`: for every resource (pipelines and groups), the sum of the resource
-  cycles divided by its units; the A78-only corrections (`n2_corrections.cpp`) do not apply.
+  cycles divided by its units.
 * `calculatePrecedenceBound`: the maximum cycle ratio of the dependence graph. Register edges have
   the latency of the producing def minus the consumer's `ReadAdvance`, floored at 1 (`getEdgeLatency`,
   [C-5](#c-5)); a store with a base update has a second node for the update ([C-6](#c-6)); store ->

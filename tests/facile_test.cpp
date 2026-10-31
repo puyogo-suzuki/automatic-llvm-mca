@@ -747,7 +747,7 @@ TEST(FacileTest, X1DotProductAccumulatorLatency) {
 }
 
 // ---------------------------------------------------------------------------
-// Stores with a writeback base update (docs.md section 4.F).  The base update is
+// Stores with a writeback base update (docs/docs.md section 4.F).  The base update is
 // produced by the address side of the store, so it must not wait for the store
 // data.  The recurrences below are written without a branch: facile adds the
 // loop-carried edges itself.
@@ -794,7 +794,7 @@ TEST(FacileTest, StoreWritebackStillDependsOnItsBaseRegister) {
 
 // ---------------------------------------------------------------------------
 // Memory dependence when the index register changes between store and load
-// (docs.md section 4.G).  The loops are written so that the memory edge is part
+// (docs/docs.md section 4.G).  The loops are written so that the memory edge is part
 // of a cycle: the loaded value feeds the data of the store.
 // ---------------------------------------------------------------------------
 namespace {
@@ -858,7 +858,7 @@ TEST(FacileTest, A720FmulToAccumulateForwarding) {
 }
 
 // ---------------------------------------------------------------------------
-// FP divide / square root latency, one value per form (docs.md section 4.I).
+// FP divide / square root latency, one value per form (docs/docs.md section 4.I).
 // A self-dependent chain makes the precedence bound equal to the latency.
 // ---------------------------------------------------------------------------
 namespace {
@@ -906,7 +906,7 @@ TEST(FacileTest, AppleFpDivSqrtLatencyPerForm) {
     EXPECT_NEAR(fpChainLatency("icestorm", "fsqrt v0.2d, v0.2d\n"), 15.0, 0.01);
 }
 
-// Occupancy of the divider (docs.md section 4.I): the BEST throughput of the SOG range,
+// Occupancy of the divider (docs/docs.md section 4.I): the BEST throughput of the SOG range,
 // rounded up to whole cycles.  Two independent instructions -> PortBound = twice the
 // per-instruction time on the unit(s).
 TEST(FacileTest, FpDivSqrtOccupancyIsBestThroughputRoundedUp) {

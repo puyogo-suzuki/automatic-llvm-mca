@@ -50,6 +50,21 @@ def N2UnitM : ProcResGroup<[N2UnitM0, N2UnitM1]>;  // Integer single/multicycle 
 def N2UnitL : ProcResGroup<[N2UnitL01, N2UnitL2]>; // Load/Store 0/1 and Load 2
 def N2UnitI : ProcResGroup<[N2UnitS, N2UnitM0, N2UnitM1]>; // Integer single cycle 0/1 and single/multicycle 0/1
 
+// This local copy of the Neoverse N2 model is installed only for cortex-a78 / -a78ae / -a78c
+// (src/cpu/cpu_traits.cpp, CpuModel::A78); neoverse-n2, cortex-a710 and cortex-a715 keep libLLVM's
+// stock model.  The edits below follow the Cortex-A78 Software Optimization Guide
+// (PJDOC-466751330-9691, Issue 4.0); docs/a78-sog.md lists them item by item, and the tags
+// [a78_...] name the items (docs/a78-sog.md section 2.4).
+//
+// [a78_dividers] docs/a78-sog.md D-3: the iterative dividers.  An integer divide "block[s] any
+// subsequent divide operations until complete" (l.787, note 1 of sec. 3.6) and an FP divide /
+// square root blocks "subsequent similar operations to the same pipeline until complete"
+// (l.1286-1287, l.1919-1920); every issue pipeline "can accept one µOP per cycle" (l.389-390).  So a
+// divide takes its pipeline (M0, V0) for one cycle and holds the divider, not the pipeline, for
+// its occupancy (as for the Cortex-A76, docs/a76-sog.md D-3).
+def A78UnitIDiv : ProcResource<1>;  // integer divider, in the M0 pipeline
+def A78UnitFDiv : ProcResource<1>;  // FP divide / square root unit, in the V0 pipeline
+
 // Define commonly used read types.
 
 // No forwarding is provided for these types.
@@ -61,13 +76,25 @@ def : ReadAdvance<ReadIMA,     0>;
 def : ReadAdvance<ReadID,      0>;
 def : ReadAdvance<ReadExtrHi,  0>;
 def : ReadAdvance<ReadAdrBase, 0>;
-def : ReadAdvance<ReadST,      0>;
+// [a78_from_a55_store_data] docs/a78-sog.md B-1: the data operand of a store is read one cycle
+// late (advance 1 from every producer).  The A78 SOG says only that stores are split into address
+// and data µOPs (l.1102-1103, l.1455, l.2245); it gives no operand timing.  This is the project's
+// decision for the in-order cores (Cortex-A55, SOG-based there; Cortex-A520, borrowed) that was
+// applied to the Cortex-A76 for consistency (docs/a76-sog.md B-1), and is applied here likewise:
+// ReadST is attached to the data operands of every store form (STXR/STXP and the atomics
+// excepted, as there).  NOT SOG-based.  It acts only on Facile's store -> load memory edges.
+def : ReadAdvance<ReadST,      1>;
 def : ReadAdvance<ReadVLD,     0>;
 
 def : WriteRes<WriteAtomic,  []> { let Unsupported = 1; }
 def : WriteRes<WriteBarrier, []> { let Latency = 1; }
 def : WriteRes<WriteHint,    []> { let Latency = 1; }
-def : WriteRes<WriteLDHi,    []> { let Latency = 4; }
+// [a78_ldp_hi] docs/a78-sog.md D-10: the second destination of a load pair is loaded by the same
+// access as the first one ("the maximum latency to load all the registers written by the
+// instruction", l.957-958) and takes no µOP of its own (the row's pipelines are those of the
+// first write).  WriteLDHi is the second write of the integer LDP W/X (latency 4, l.994-997); it
+// used to count one µOP.  LDPSW and the FP pairs use A78Write_5c_0Z.
+def : WriteRes<WriteLDHi,    []> { let Latency = 4; let NumMicroOps = 0; }
 
 //===----------------------------------------------------------------------===//
 // Define customized scheduler read/write types specific to the Neoverse N2.
@@ -706,6 +733,80 @@ def N2Write_11c_9L01_9S_9V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
 }
 
 //===----------------------------------------------------------------------===//
+// Cortex-A78 writes (docs/a78-sog.md).  Each is used by the rows below that name its tag.
+
+// [a78_div_best] C-10, D-1, D-3: integer divide, the best value of "5 to 12, 1/12 to 1/5" (W) and
+// "5 to 20, 1/20 to 1/5" (X) (l.699-700): latency 5, the divider held 5 cycles, M0 one cycle.
+def A78Write_5c_1M0_IDiv : SchedWriteRes<[N2UnitM0, A78UnitIDiv]> { let Latency = 5;
+                                                                   let ReleaseAtCycles = [1, 5]; }
+// [a78_m0_pipelined] C-15, C-20: SCVTF/UCVTF from a GPR, FMOV from a GPR to the low half and DUP
+// from a GPR are "3 1 M0" (l.1302, l.1310, l.1937): one cycle of M0, not three.
+def A78Write_3c_1M0 : SchedWriteRes<[N2UnitM0]> { let Latency = 3; }
+// [a78_ldp_hi] D-10: second destination of LDPSW and of the FP load pairs (latency 5).
+def A78Write_5c_0Z : SchedWriteRes<[]> { let Latency = 5; let NumMicroOps = 0; }
+// [a78_ldpsw] C-12: "Load pair, signed immed offset, signed words LDPSW 5 3/2 I, L" (l.998-999,
+// l.1019-1020): one I µOP and the load pipes held two cycles (3/2 per cycle on three L pipes).
+def A78Write_5c_1I_2L : SchedWriteRes<[N2UnitI, N2UnitL]> { let Latency = 5; let NumMicroOps = 2;
+                                                          let ReleaseAtCycles = [1, 2]; }
+// [a78_reg_offset_h] C-12, C-16: register-offset loads with an I µOP.
+def A78Write_5c_1I_1L : SchedWriteRes<[N2UnitI, N2UnitL]> { let Latency = 5; let NumMicroOps = 2; }
+def A78Write_6c_1I_1L : SchedWriteRes<[N2UnitI, N2UnitL]> { let Latency = 6; let NumMicroOps = 2; }
+// [a78_fp_ld] C-16: FP loads, latency 5 (l.1366-1419).
+def A78Write_5c_1L    : SchedWriteRes<[N2UnitL]> { let Latency = 5; }
+def A78Write_5c_2L    : SchedWriteRes<[N2UnitL, N2UnitL]> { let Latency = 5; let NumMicroOps = 2; }
+// [a78_store_rows] C-13, C-17: register-offset stores with an I µOP.
+def A78Write_2c_1I_1L01_1D : SchedWriteRes<[N2UnitI, N2UnitL01, N2UnitD]> { let Latency = 2;
+                                                                         let NumMicroOps = 3; }
+def A78Write_2c_1I_1L01_1V : SchedWriteRes<[N2UnitI, N2UnitL01, N2UnitV]> { let Latency = 2;
+                                                                         let NumMicroOps = 3; }
+// [a78_asimd_ld] C-21: ASIMD loads (l.2060-2172).
+def A78Write_5c_3L      : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL]> { let Latency = 5;
+                                                                       let NumMicroOps = 3; }
+def A78Write_6c_4L      : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL, N2UnitL]> { let Latency = 6;
+                                                                                let NumMicroOps = 4; }
+def A78Write_7c_1L_1V   : SchedWriteRes<[N2UnitL, N2UnitV]> { let Latency = 7; let NumMicroOps = 2; }
+def A78Write_7c_1L_2V   : SchedWriteRes<[N2UnitL, N2UnitV, N2UnitV]> { let Latency = 7;
+                                                                       let NumMicroOps = 3; }
+def A78Write_7c_2L_2V   : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitV, N2UnitV]> { let Latency = 7;
+                                                                                let NumMicroOps = 4; }
+// [a78_ls_throughput] C-21, C-22, D-6: a load or store whose throughput T is below (or, for
+// LD1 four registers D-form, above) what its µOPs give on the three load pipes L (two store
+// pipes L01) and the two V pipes.  The µOP count and the V cycles are those of the write it
+// replaces; the L (L01) pipes are held 3/T (2/T) cycles in total, so that the row's throughput is
+// reached.  Which pipeline limits is not stated; L is taken, as for the Cortex-A76.
+class A78WriteLDV<int lat, int uops, int lcyc, int vcyc> : SchedWriteRes<[N2UnitL, N2UnitV]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [lcyc, vcyc];
+}
+class A78WriteSTV<int lat, int uops, int lcyc, int vcyc> : SchedWriteRes<[N2UnitL01, N2UnitV]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [lcyc, vcyc];
+}
+def A78Write_5c_4L_2cyc : SchedWriteRes<[N2UnitL]> { let Latency = 5; let NumMicroOps = 4;
+                                                     let ReleaseAtCycles = [2]; }
+// [a78_v_throughput] C-18, C-19, C-20: a V-pipe row whose throughput is below what its µOPs give:
+// the pipe(s) held 1/T (V1, V0) or 2/T (V) cycles in total; the µOP count is the replaced write's.
+class A78WriteV<int lat, int uops, int vcyc> : SchedWriteRes<[N2UnitV]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [vcyc];
+}
+def A78Write_4c_1V1_2cyc : SchedWriteRes<[N2UnitV1]> { let Latency = 4; let ReleaseAtCycles = [2]; }
+
+// [a78_extr] C-11: "Bitfield extract, one reg EXTR 1 4 I", note 1: "One reg form is when Rn==Rm
+// or imm==0, all other forms are considered two regs" (l.886-887, l.899).  The stock
+// IsRORImmIdiomPred checks only Rn == Rm.
+def A78IsExtrOneRegPred : MCSchedPredicate<
+                            CheckAll<[CheckOpcode<[EXTRWrri, EXTRXrri]>,
+                                      CheckAny<[CheckSameRegOperand<1, 2>,
+                                                CheckImmOperand<3, 0>]>]>>;
+// [a78_reg_offset_h] "Scaled" = the S bit of the register-offset addressing mode
+// (AArch64_AM::getMemDoShift), as for the Cortex-A76.
+def A78IsMemScaled : MCSchedPredicate<CheckMemScaled>;
+
+//===----------------------------------------------------------------------===//
 // Define predicate-controlled types
 
 def N2Write_0or1c_1I : SchedWriteVariant<[
@@ -721,7 +822,7 @@ def N2Write_0or3c_1M0 : SchedWriteVariant<[
                       SchedVar<NoSchedPred,      [N2Write_3c_1M0]>]>;
 
 def N2Write_Extr : SchedWriteVariant<[
-                      SchedVar<IsRORImmIdiomPred, [N2Write_1c_1I]>,
+                      SchedVar<A78IsExtrOneRegPred, [N2Write_1c_1I]>,  // [a78_extr]
                       SchedVar<NoSchedPred,       [N2Write_3c_1I_1M]>]>;
 
 //===----------------------------------------------------------------------===//
@@ -746,16 +847,26 @@ def N2Wr_IMA  : SchedWriteRes<[N2UnitM0]> { let Latency = 2; }
 def N2Wr_IMUL : SchedWriteVariant<[
                   SchedVar<IsReg3ZeroPred, [N2Wr_IM]>,
                   SchedVar<NoSchedPred,    [N2Wr_IMA]>]>;
-def N2Rd_IMA  : SchedReadAdvance<1, [N2Wr_IMA]>;
+// [a78_maddl] docs/a78-sog.md C-10, U-5: "Multiply accumulate long SMADDL, SMSUBL, UMADDL, UMSUBL
+// 2(1) 2 M" (l.704-705): on M (both pipes), not M0 like MADD/MSUB (l.702-703).  The accumulator
+// forwarding (note 2, l.789-791) is taken to work from either kind to either kind.
+def A78Wr_IMAL  : SchedWriteRes<[N2UnitM]> { let Latency = 2; }
+def A78Wr_IMULL : SchedWriteVariant<[
+                    SchedVar<IsReg3ZeroPred, [N2Wr_IM]>,
+                    SchedVar<NoSchedPred,    [A78Wr_IMAL]>]>;
+def N2Rd_IMA  : SchedReadAdvance<1, [N2Wr_IMA, A78Wr_IMAL]>;
 
 def N2Wr_FMA : SchedWriteRes<[N2UnitV]> { let Latency = 4; }
 def N2Rd_FMA : SchedReadAdvance<2, [WriteFMul, N2Wr_FMA]>;
 
-def N2Wr_VA : SchedWriteRes<[N2UnitV1]> { let Latency = 4; }
-def N2Rd_VA : SchedReadAdvance<3, [N2Wr_VA]>;
+// [a78_asimd_acc] docs/a78-sog.md C-18: "ASIMD absolute diff accum SABA, UABA" and "... long
+// SABAL(2), UABAL(2)" are 3(1) 1 V1 (l.1559-1561); they were 4(1).
+def N2Wr_VA : SchedWriteRes<[N2UnitV1]> { let Latency = 3; }
+def N2Rd_VA : SchedReadAdvance<2, [N2Wr_VA]>;
 
-def N2Wr_VDOT : SchedWriteRes<[N2UnitV]> { let Latency = 3; }
-def N2Rd_VDOT : SchedReadAdvance<2, [N2Wr_VDOT]>;
+// [a78_asimd_acc] "ASIMD dot product SDOT, UDOT 2(1) 2 V" (l.1597); it was 3(1).
+def N2Wr_VDOT : SchedWriteRes<[N2UnitV]> { let Latency = 2; }
+def N2Rd_VDOT : SchedReadAdvance<1, [N2Wr_VDOT]>;
 
 def N2Wr_VMMA : SchedWriteRes<[N2UnitV]> { let Latency = 3; }
 def N2Rd_VMMA : SchedReadAdvance<2, [N2Wr_VMMA]>;
@@ -763,8 +874,8 @@ def N2Rd_VMMA : SchedReadAdvance<2, [N2Wr_VMMA]>;
 def N2Wr_VMA : SchedWriteRes<[N2UnitV0]> { let Latency = 4; }
 def N2Rd_VMA : SchedReadAdvance<3, [N2Wr_VMA]>;
 
-def N2Wr_VMAH : SchedWriteRes<[N2UnitV0]> { let Latency = 4; }
-def N2Rd_VMAH : SchedReadAdvance<2, [N2Wr_VMAH]>;
+// (N2Wr_VMAH / N2Rd_VMAH, the accumulator forwarding of SQRDMLAH/SQRDMLSH, removed:
+// [a78_asimd_acc] docs/a78-sog.md C-18.)
 
 def N2Wr_VMAL : SchedWriteRes<[N2UnitV0]> { let Latency = 4; }
 def N2Rd_VMAL : SchedReadAdvance<3, [N2Wr_VMAL]>;
@@ -928,8 +1039,10 @@ def : SchedAlias<WriteImm, N2Write_1c_1I>;
 // -----------------------------------------------------------------------------
 
 // SDIV, UDIV
-def : SchedAlias<WriteID32,  N2Write_12c_1M0>;
-def : SchedAlias<WriteID64,  N2Write_20c_1M0>;
+// [a78_div_best] docs/a78-sog.md C-10, D-1, D-3: latency 5 and the divider held 5 cycles (the
+// best value of each range); it used to be the worst case, 12 / 20 with M0 held 12 / 20 cycles.
+def : SchedAlias<WriteID32,  A78Write_5c_1M0_IDiv>;
+def : SchedAlias<WriteID64,  A78Write_5c_1M0_IDiv>;
 
 def : WriteRes<WriteIM32, [N2UnitM]> { let Latency = 2; }
 def : WriteRes<WriteIM64, [N2UnitM]> { let Latency = 2; }
@@ -940,7 +1053,9 @@ def : InstRW<[N2Wr_IMUL, ReadIM, ReadIM, N2Rd_IMA],
              (instregex "^M(ADD|SUB)[WX]rrr$")>;
 
 // Multiply accumulate long
-def : InstRW<[N2Wr_IMUL, ReadIM, ReadIM, N2Rd_IMA],
+// [a78_maddl] on M, 2 per cycle; the zero-accumulator forms (SMULL, UMULL, SMNEGL, UMNEGL:
+// "Multiply long 2 2 M", l.707-708) stay N2Wr_IM.
+def : InstRW<[A78Wr_IMULL, ReadIM, ReadIM, N2Rd_IMA],
              (instregex "^(S|U)M(ADD|SUB)Lrrr$")>;
 
 // Multiply high
@@ -987,7 +1102,18 @@ def : InstRW<[N2Write_2c_1M], (instregex "^BFM[WX]ri$")>;
 // -----------------------------------------------------------------------------
 
 def : SchedAlias<WriteLD,    N2Write_4c_1L>;
-def : SchedAlias<WriteLDIdx, N2Write_4c_1I_1L>;
+// [a78_reg_offset] docs/a78-sog.md C-12: "Load register, register offset, basic / scale by 4/8 /
+// extend / extend, scale by 4/8 ... 4 3 L" (l.980-991): no I µOP.  (The stock N2 class has one;
+// it used to be removed by a correction in the Facile C++.)
+def : SchedAlias<WriteLDIdx, N2Write_4c_1L>;
+
+// [a78_reg_offset_h] docs/a78-sog.md C-12: "Load register, register offset, scale by 2" and
+// "..., extend, scale by 2" LDRH, LDRSH: "5 3 I, L" (l.985-986, l.992-993); without the scale
+// they are "basic" / "extend" (4 3 L).  They used to be 4 (I, L) whatever the scale.
+def A78WriteLDRH : SchedWriteVariant<[
+                     SchedVar<A78IsMemScaled, [A78Write_5c_1I_1L]>,
+                     SchedVar<NoSchedPred,    [N2Write_4c_1L]>]>;
+def : InstRW<[A78WriteLDRH, ReadAdrBase], (instregex "^LDRHHro[WX]$", "^LDRSH[WX]ro[WX]$")>;
 
 // Load pair, signed immed offset, normal, X-form
 def : InstRW<[N2Write_4c_2L, WriteLDHi],
@@ -999,18 +1125,42 @@ def : InstRW<[WriteAdr, N2Write_4c_2L, WriteLDHi],
              (instregex "^LDPX(post|pre)$")>;
 
 // Load pair, signed immed offset, signed words
-def : InstRW<[N2Write_5c_1M0, WriteLDHi], (instrs LDPSWi)>;
+// [a78_ldpsw] docs/a78-sog.md C-12: 5 3/2 I, L (l.998-999, l.1019-1020), both registers 5.  It
+// used to be five cycles of M0 and no load pipe (corrected afterwards by the Facile C++), the
+// second register 4.
+def : InstRW<[A78Write_5c_1I_2L, A78Write_5c_0Z], (instrs LDPSWi)>;
 // Load pair, immed post-index or immed pre-index, signed words
-def : InstRW<[WriteAdr, N2Write_5c_1M0, WriteLDHi],
+def : InstRW<[WriteAdr, A78Write_5c_1I_2L, A78Write_5c_0Z],
              (instregex "^LDPSW(post|pre)$")>;
 
 // Store instructions
 // -----------------------------------------------------------------------------
 
 def : SchedAlias<WriteST,    N2Write_1c_1L01_1D>;
-def : SchedAlias<WriteSTIdx, N2Write_1c_1L01_1D_1I>;
+// [a78_reg_offset] docs/a78-sog.md C-13: "Store register, register offset, basic / scaled by 4/8 /
+// extend / extend, scale by 4/8 ... 1 2 L01, D" (l.1127-1136): no I µOP (it used to be removed by
+// the Facile C++).
+def : SchedAlias<WriteSTIdx, N2Write_1c_1L01_1D>;
 def : SchedAlias<WriteSTP,   N2Write_1c_1L01_1D>;
 def : SchedAlias<WriteAdr,   N2Write_1c_1I>; // copied from A57.
+
+// [a78_store_rows] docs/a78-sog.md C-13, I-3: "Store register, register offset, scaled by 2" and
+// "..., extend, scale by 1" (sic) STRH: "2 2 I, L01, D" (l.1131-1132, l.1137-1138).  It used to be
+// latency 1 (I, L01, D).
+def A78WriteSTRH : SchedWriteVariant<[
+                     SchedVar<A78IsMemScaled, [A78Write_2c_1I_1L01_1D]>,
+                     SchedVar<NoSchedPred,    [N2Write_1c_1L01_1D]>]>;
+def : InstRW<[A78WriteSTRH, ReadST, ReadAdrBase], (instregex "^STRHHro[WX]$")>;
+
+// [a78_from_a55_store_data] docs/a78-sog.md B-1: the integer store forms whose stock Sched lists
+// name no reads: same writes, plus ReadST on the data.
+def : InstRW<[WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)ui$", "^STUR(BB|HH|W|X)i$",
+                                                        "^STTR(B|H|W|X)i$", "^STL?LR(B|H|W|X)$")>;
+def : InstRW<[WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P(W|X)i$")>;
+def : InstRW<[WriteSTX, ReadST, ReadAdrBase], (instregex "^STLXR(B|H|W|X)$")>;
+def : InstRW<[WriteSTX, ReadST, ReadST, ReadAdrBase], (instregex "^STLXP(W|X)$")>;
+def : InstRW<[WriteAdr, WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)(pre|post)$")>;
+def : InstRW<[WriteAdr, WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STP(W|X)(pre|post)$")>;
 
 // Tag load instructions
 // -----------------------------------------------------------------------------
@@ -1061,24 +1211,27 @@ def : SchedAlias<WriteFCmp,  N2Write_2c_1V0>;
 // FP divide, square root
 def : SchedAlias<WriteFDiv,  N2Write_7c_7V0>;
 
-// FP divide / square root, one write per (best latency, occupancy, uOPs).  A78 SOG, FP and
-// ASIMD divide / square root tables: the BEST latency of each range, and the V0 unit is
+// [a78_fdiv_best] docs/a78-sog.md C-14, C-19, D-1, D-3: FP divide / square root, one write per
+// (best latency, occupancy, uOPs).  FP and ASIMD divide / square root tables (l.1213-1215,
+// l.1239-1241, l.1809-1813, l.1852-1861): the BEST latency of each range, and the divide unit is
 // occupied for ceil(1 / best throughput) cycles:
 //   scalar H 4/7 -> 2, S 4/7 -> 2, D 2/7 -> 4 (FSQRT: H 4/7, S 4/7, D 2/7);
 //   ASIMD D-form F16 1/7 -> 7, D-form F32 2/7 -> 4, Q-form F16 1/10 (FDIV) / 1/11 (FSQRT)
 //   -> 10 / 11, Q-form F32 1/7 -> 7, Q-form F64 1/7 -> 7.
-// Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).  The uOP counts are the ones the
-// replaced N2 writes had (7, 10, 15, 9, 16 for the scalar forms, 1 or 2 for ASIMD).
-def N2WriteFDS_7c2_7   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 7;  let ReleaseAtCycles = [2]; }
-def N2WriteFDS_7c2_10  : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 10; let ReleaseAtCycles = [2]; }
-def N2WriteFDS_7c2_9   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 9;  let ReleaseAtCycles = [2]; }
-def N2WriteFDS_7c4_15  : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 15; let ReleaseAtCycles = [4]; }
-def N2WriteFDS_7c4_16  : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 16; let ReleaseAtCycles = [4]; }
-def N2WriteFDS_7c7_1   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 1;  let ReleaseAtCycles = [7]; }
-def N2WriteFDS_7c7_2   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [7]; }
-def N2WriteFDS_7c4_2   : SchedWriteRes<[N2UnitV0]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [4]; }
-def N2WriteFDS_10c10_2 : SchedWriteRes<[N2UnitV0]> { let Latency = 10; let NumMicroOps = 2;  let ReleaseAtCycles = [10]; }
-def N2WriteFDS_11c11_2 : SchedWriteRes<[N2UnitV0]> { let Latency = 11; let NumMicroOps = 2;  let ReleaseAtCycles = [11]; }
+// Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).  [a78_dividers] the occupancy is on the
+// FP divide unit A78UnitFDiv; V0 is taken for one cycle (it used to be held for the occupancy).
+// The uOP counts are the ones the replaced N2 writes had (7, 10, 15, 9, 16 for the scalar forms,
+// 1 or 2 for ASIMD; docs/a78-sog.md U-2).
+def N2WriteFDS_7c2_7   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 7;  let ReleaseAtCycles = [1, 2]; }
+def N2WriteFDS_7c2_10  : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 10; let ReleaseAtCycles = [1, 2]; }
+def N2WriteFDS_7c2_9   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 9;  let ReleaseAtCycles = [1, 2]; }
+def N2WriteFDS_7c4_15  : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 15; let ReleaseAtCycles = [1, 4]; }
+def N2WriteFDS_7c4_16  : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 16; let ReleaseAtCycles = [1, 4]; }
+def N2WriteFDS_7c7_1   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 1;  let ReleaseAtCycles = [1, 7]; }
+def N2WriteFDS_7c7_2   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [1, 7]; }
+def N2WriteFDS_7c4_2   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [1, 4]; }
+def N2WriteFDS_10c10_2 : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 10; let NumMicroOps = 2;  let ReleaseAtCycles = [1, 10]; }
+def N2WriteFDS_11c11_2 : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 11; let NumMicroOps = 2;  let ReleaseAtCycles = [1, 11]; }
 
 // FP divide, H-form
 def : InstRW<[N2WriteFDS_7c2_7],  (instrs FDIVHrr)>;
@@ -1101,21 +1254,39 @@ def : WriteRes<WriteFMul, [N2UnitV]> { let Latency = 3; }
 def : InstRW<[N2Wr_FMA, ReadDefault, ReadDefault, N2Rd_FMA], (instregex "^FN?M(ADD|SUB)[HSD]rrr$")>;
 
 // FP round to integral
-def : InstRW<[N2Write_3c_1V0], (instregex "^FRINT[AIMNPXZ][HSD]r$",
+// [a78_frint] docs/a78-sog.md C-14: "FP round to integral FRINTA, ... FRINTZ 2 1 V0" (l.1234-1237);
+// it was 3.
+def : InstRW<[N2Write_2c_1V0], (instregex "^FRINT[AIMNPXZ][HSD]r$",
                                           "^FRINT(32|64)[XZ][SD]r$")>;
 
 // FP miscellaneous instructions
 // -----------------------------------------------------------------------------
 
 // FP convert, from gen to vec reg
-def : InstRW<[N2Write_3c_1M0], (instregex "^[SU]CVTF[SU][WX][HSD]ri$")>;
+// [a78_m0_pipelined] docs/a78-sog.md C-15: "3 1 M0" (l.1302): M0 one cycle (it was three; the Facile
+// C++ used to cap it).
+def : InstRW<[A78Write_3c_1M0], (instregex "^[SU]CVTF[SU][WX][HSD]ri$")>;
 
 // FP convert, from vec to gen reg
-def : InstRW<[N2Write_3c_1V], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
+// [a78_fp_cvt] docs/a78-sog.md C-15: "FP convert, from vec to gen reg FCVTAS, ... FCVTZU 3 1 V0"
+// (l.1303-1307); the integer forms used to be on V (2 per cycle).  The fixed-point forms
+// (FCVTZS/FCVTZU Rd, Fn, #fbits) are WriteFCvt below, 3 1 V0 as well.
+def : InstRW<[N2Write_3c_1V0], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
 
 // FP convert, Javascript from vec to gen reg
 // FP convert, from vec to vec reg
 def : SchedAlias<WriteFCvt, N2Write_3c_1V0>;
+// [a78_fp_cvt] "FP convert, from vec to vec reg FCVT, FCVTXN 2 1 V0" (l.1301): the precision
+// conversions (WriteFCvt) were 3, the scalar FCVTXN 2 on V.
+def : InstRW<[N2Write_2c_1V0], (instregex "^FCVT[HSD][HSD]r$", "^FCVTXNv1i64$")>;
+// [a78_fp_cvt_scalar] docs/a78-sog.md D-4: FCVT[AMNPZ][SU], SCVTF, UCVTF with the operand and the
+// result in FP/ASIMD registers (scalar forms, integer and fixed-point) have no row of their own; the
+// rows of the same mnemonics give 3 1 (V0 from a vector register, M0 from a GPR, l.1302-1307) and
+// the ASIMD rows 3 1 V0 for two lanes, more for four and eight (l.1791-1808).  One lane is taken as
+// the two-lane row, as for the Cortex-A76.  They used to be 2 on V (the stock class).
+def : InstRW<[N2Write_3c_1V0], (instregex "^FCVT[AMNPZ][SU]v1(i32|i64|f16)$",
+                                          "^[SU]CVTFv1(i16|i32|i64)$",
+                                          "^FCVTZ[SU][hsd]$", "^[SU]CVTF[hsd]$")>;
 
 // FP move, immed
 def : SchedAlias<WriteFImm, N2Write_2c_1V>;
@@ -1124,72 +1295,86 @@ def : SchedAlias<WriteFImm, N2Write_2c_1V>;
 def : InstRW<[N2Write_2c_1V], (instrs FMOVHr, FMOVSr, FMOVDr)>;
 
 // FP transfer, from gen to low half of vec reg
-def : InstRW<[N2Write_0or3c_1M0], (instrs FMOVWHr, FMOVXHr, FMOVWSr, FMOVXDr)>;
+// [a78_zero_mov] docs/a78-sog.md C-4: "FMOV Hd/Sd/Dd, WZR/XZR" is not among the zero-latency MOVs
+// of the A78 (sec. 4.15, l.2829-2848); the stock NeoverseZeroMove variant made it latency 0 with no
+// pipeline.  [a78_m0_pipelined] C-15: "3 1 M0" (l.1310): M0 one cycle (it was three).
+def : InstRW<[A78Write_3c_1M0], (instrs FMOVWHr, FMOVXHr, FMOVWSr, FMOVXDr)>;
 
 // FP transfer, from gen to high half of vec reg
 def : InstRW<[N2Write_5c_1M0_1V], (instrs FMOVXDHighr)>;
 
 // FP transfer, from vec to gen reg
-def : SchedAlias<WriteFCopy, N2Write_2c_1V>;
+// [a78_fp_cvt] docs/a78-sog.md C-15: "FP transfer, from vec to gen reg FMOV 2 1 V1" (l.1314); it was
+// on V.  WriteFCopy is left with FMOV Wd/Xd, Hn/Sn/Dn and FMOV Xd, Vn.D[1] (the other direction has
+// the rows above).
+def : SchedAlias<WriteFCopy, N2Write_2c_1V1>;
 
 // FP load instructions
 // -----------------------------------------------------------------------------
+// [a78_fp_ld] docs/a78-sog.md C-16: Table 3-20 (l.1366-1419) gives latency 5 for the FP loads and 6
+// for the register-offset scaled H/Q forms; the Neoverse N2 rows had 6 and 7.
 
-// Load vector reg, literal, S/D/Q forms
-// Load vector reg, unscaled immed
-def : InstRW<[N2Write_6c_1L], (instregex "^LDR[SDQ]l$",
-                                         "^LDUR[BHSDQ]i$")>;
-
-// Load vector reg, immed post-index
-// Load vector reg, immed pre-index
-def : InstRW<[WriteAdr, N2Write_6c_1I_1L], (instregex "^LDR[BHSDQ](post|pre)$")>;
-
-// Load vector reg, unsigned immed
-def : InstRW<[N2Write_6c_1L], (instregex "^LDR[BHSDQ]ui$")>;
-
-// Load vector reg, register offset, basic
-// Load vector reg, register offset, scale, S/D-form
-// Load vector reg, register offset, extend
-// Load vector reg, register offset, extend, scale, S/D-form
-def : InstRW<[N2Write_6c_1L, ReadAdrBase], (instregex "^LDR[BSD]ro[WX]$")>;
-
-// Load vector reg, register offset, scale, H/Q-form
-// Load vector reg, register offset, extend, scale, H/Q-form
-def : InstRW<[N2Write_7c_1I_1L, ReadAdrBase], (instregex "^LDR[HQ]ro[WX]$")>;
-
-// Load vector pair, immed offset, S/D-form
-def : InstRW<[N2Write_6c_1L, WriteLDHi], (instregex "^LDN?P[SD]i$")>;
-
-// Load vector pair, immed offset, Q-form
-def : InstRW<[N2Write_6c_2L, WriteLDHi], (instrs LDPQi, LDNPQi)>;
-
-// Load vector pair, immed post-index, S/D-form
-// Load vector pair, immed pre-index, S/D-form
-def : InstRW<[WriteAdr, N2Write_6c_1I_1L, WriteLDHi],
+// Load vector reg, literal, S/D/Q forms (5, L) / unscaled immed (5, L)
+def : InstRW<[A78Write_5c_1L], (instregex "^LDR[SDQ]l$",
+                                          "^LDUR[BHSDQ]i$")>;
+// Load vector reg, immed post-index / pre-index (5, L, I)
+// [a78_fp_ld] the I of "L, I" is the base update (WriteAdr); the load itself used to take a
+// second I µOP.
+def : InstRW<[WriteAdr, A78Write_5c_1L], (instregex "^LDR[BHSDQ](post|pre)$")>;
+// Load vector reg, unsigned immed (5, L)
+def : InstRW<[A78Write_5c_1L], (instregex "^LDR[BHSDQ]ui$")>;
+// [a78_reg_offset_h] docs/a78-sog.md C-16, I-4: register offset (l.1384-1407): "basic" 5 L, I;
+// "scale, S/D-form" 5 L; "scale, H/Q-form" 6 I, L; "extend" 5 L; "extend, scale, S/D-form" 5 L;
+// "extend, scale, H/Q-form" 6 I, L.  Basic = X index without the scale, extend = W index without
+// the scale.  B has no scaled row: B with an X index is "basic", with a W index "extend".
+def A78WriteLDRSDroX : SchedWriteVariant<[
+                         SchedVar<A78IsMemScaled, [A78Write_5c_1L]>,
+                         SchedVar<NoSchedPred,    [A78Write_5c_1I_1L]>]>;
+def A78WriteLDRHQroX : SchedWriteVariant<[
+                         SchedVar<A78IsMemScaled, [A78Write_6c_1I_1L]>,
+                         SchedVar<NoSchedPred,    [A78Write_5c_1I_1L]>]>;
+def A78WriteLDRHQroW : SchedWriteVariant<[
+                         SchedVar<A78IsMemScaled, [A78Write_6c_1I_1L]>,
+                         SchedVar<NoSchedPred,    [A78Write_5c_1L]>]>;
+def : InstRW<[A78Write_5c_1I_1L, ReadAdrBase], (instrs LDRBroX)>;
+def : InstRW<[A78WriteLDRSDroX, ReadAdrBase], (instregex "^LDR[SD]roX$")>;
+def : InstRW<[A78Write_5c_1L, ReadAdrBase], (instregex "^LDR[BSD]roW$")>;
+def : InstRW<[A78WriteLDRHQroX, ReadAdrBase], (instregex "^LDR[HQ]roX$")>;
+def : InstRW<[A78WriteLDRHQroW, ReadAdrBase], (instregex "^LDR[HQ]roW$")>;
+// [a78_ldp_hi] docs/a78-sog.md D-10: the second register of every FP load pair has the row's
+// latency 5 and no µOP (it was WriteLDHi: 4, one µOP).
+// Load vector pair, immed offset, S/D-form (5, 3, L)
+def : InstRW<[A78Write_5c_1L, A78Write_5c_0Z], (instregex "^LDN?P[SD]i$")>;
+// Load vector pair, immed offset, Q-form (5, 3/2, L)
+def : InstRW<[A78Write_5c_2L, A78Write_5c_0Z], (instrs LDPQi, LDNPQi)>;
+// Load vector pair, immed post/pre-index, S/D-form (5, 3, I, L)
+// [a78_fp_ld] one I µOP, the base update (the load used to take one or two more).
+def : InstRW<[WriteAdr, A78Write_5c_1L, A78Write_5c_0Z],
              (instregex "^LDP[SD](pre|post)$")>;
-
-// Load vector pair, immed post-index, Q-form
-// Load vector pair, immed pre-index, Q-form
-def : InstRW<[WriteAdr, N2Write_6c_2I_2L, WriteLDHi], (instrs LDPQpost,
-                                                              LDPQpre)>;
+// Load vector pair, immed post/pre-index, Q-form (5, 3/2, L, I)
+def : InstRW<[WriteAdr, A78Write_5c_2L, A78Write_5c_0Z], (instrs LDPQpost, LDPQpre)>;
 
 // FP store instructions
 // -----------------------------------------------------------------------------
+// [a78_from_a55_store_data] docs/a78-sog.md B-1: the data operands read ReadST, the base
+// ReadAdrBase.
 
 // Store vector reg, unscaled immed, B/H/S/D-form
 // Store vector reg, unscaled immed, Q-form
-def : InstRW<[N2Write_2c_1L01_1V], (instregex "^STUR[BHSDQ]i$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase], (instregex "^STUR[BHSDQ]i$")>;
 
 // Store vector reg, immed post-index, B/H/S/D-form
 // Store vector reg, immed post-index, Q-form
 // Store vector reg, immed pre-index, B/H/S/D-form
 // Store vector reg, immed pre-index, Q-form
-def : InstRW<[WriteAdr, N2Write_2c_1L01_1V_1I, ReadAdrBase],
+// [a78_fp_st] docs/a78-sog.md C-17: "2 2 L01, V, I" (l.1465-1472): the I is the base update
+// (WriteAdr); the store itself used to take a second I µOP.
+def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
              (instregex "^STR[BHSDQ](pre|post)$")>;
 
 // Store vector reg, unsigned immed, B/H/S/D-form
 // Store vector reg, unsigned immed, Q-form
-def : InstRW<[N2Write_2c_1L01_1V], (instregex "^STR[BHSDQ]ui$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase], (instregex "^STR[BHSDQ]ui$")>;
 
 // Store vector reg, register offset, basic, B/H/S/D-form
 // Store vector reg, register offset, basic, Q-form
@@ -1197,35 +1382,41 @@ def : InstRW<[N2Write_2c_1L01_1V], (instregex "^STR[BHSDQ]ui$")>;
 // Store vector reg, register offset, extend, B/H/S/D-form
 // Store vector reg, register offset, extend, Q-form
 // Store vector reg, register offset, extend, scale, S/D-form
-def : InstRW<[N2Write_2c_1L01_1V, ReadAdrBase],
-             (instregex "^STR[BSD]ro[WX]$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "^STR[BSD]ro[WX]$", "^STRQroX$")>;
 
-// Store vector reg, register offset, scale, H-form
-// Store vector reg, register offset, scale, Q-form
-// Store vector reg, register offset, extend, scale, H-form
-// Store vector reg, register offset, extend, scale, Q-form
-def : InstRW<[N2Write_2c_1L01_1V, ReadAdrBase],
-             (instregex "^STR[HQ]ro[WX]$")>;
+// [a78_store_rows] docs/a78-sog.md C-17, I-5: "Store vector reg, register offset, scale, H-form"
+// and "..., extend, scale, H-form" 2 2 I, L01, V (l.1481-1482, l.1491-1492); "..., extend, scale,
+// Q-form" 2 2 I, L01, V (l.1495-1496), while "..., scale, Q-form" is L01, V (l.1485-1486).  The
+// scaled H forms and the scaled Q form with a W index used to have no I µOP.
+def A78WriteSTRHro : SchedWriteVariant<[
+                       SchedVar<A78IsMemScaled, [A78Write_2c_1I_1L01_1V]>,
+                       SchedVar<NoSchedPred,    [N2Write_2c_1L01_1V]>]>;
+def : InstRW<[A78WriteSTRHro, ReadST, ReadAdrBase], (instregex "^STRHro[WX]$", "^STRQroW$")>;
 
 // Store vector pair, immed offset, S-form
 // Store vector pair, immed offset, D-form
-def : InstRW<[N2Write_2c_1L01_1V], (instregex "^STN?P[SD]i$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P[SD]i$")>;
 
 // Store vector pair, immed offset, Q-form
-def : InstRW<[N2Write_2c_1L01_2V], (instrs STPQi, STNPQi)>;
+// [a78_fp_st] docs/a78-sog.md C-17, I-6: "2 2 L01, V" (l.1510-1511): one V µOP, 2 per cycle (it
+// was two V µOPs, 1 per cycle).
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadST, ReadAdrBase], (instrs STPQi, STNPQi)>;
 
 // Store vector pair, immed post-index, S-form
 // Store vector pair, immed post-index, D-form
 // Store vector pair, immed pre-index, S-form
 // Store vector pair, immed pre-index, D-form
-def : InstRW<[WriteAdr, N2Write_2c_1L01_1V_1I],
+// [a78_fp_st] "2 2 I, L01, V" (l.1512-1515, l.1518-1521): one I µOP, the base update.
+def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadST, ReadAdrBase],
              (instregex "^STP[SD](pre|post)$")>;
 
 // Store vector pair, immed post-index, Q-form
-def : InstRW<[N2Write_2c_1L01_2V_1I], (instrs STPQpost)>;
-
 // Store vector pair, immed pre-index, Q-form
-def : InstRW<[N2Write_2c_1L01_2V_2I], (instrs STPQpre)>;
+// [a78_fp_st] "2 1 I, L01, V" (l.1516-1517, l.1522-1523): the base update is WriteAdr (latency 1,
+// the "(1)" of the writeback notes, l.1537-1542); the post-index form used to give the base
+// register the store's latency 2, the pre-index form two I µOPs.
+def : InstRW<[WriteAdr, N2Write_2c_1L01_2V, ReadST, ReadST, ReadAdrBase], (instrs STPQpost, STPQpre)>;
 
 // ASIMD integer instructions
 // -----------------------------------------------------------------------------
@@ -1254,8 +1445,10 @@ def : InstRW<[N2Write_4c_1V1_1V],
              (instregex "^(ADDV|[SU]ADDLV)v8(i8|i16)v$")>;
 
 // ASIMD arith, reduce, 16B
-def : InstRW<[N2Write_4c_1V1], (instrs ADDVv16i8v, SADDLVv16i8v,
-                                       UADDLVv16i8v)>;
+// [a78_v_throughput] docs/a78-sog.md C-18: "4 1/2 V1" (l.1591-1592): V1 held 2 cycles (it was 1,
+// throughput 1).
+def : InstRW<[A78Write_4c_1V1_2cyc], (instrs ADDVv16i8v, SADDLVv16i8v,
+                                             UADDLVv16i8v)>;
 
 // ASIMD dot product
 // ASIMD dot product using signed and unsigned integers
@@ -1283,42 +1476,52 @@ def : InstRW<[N2Write_4c_1V0], (instregex "^MULv", "^SQ(R)?DMULHv")>;
 def : InstRW<[N2Wr_VMA, N2Rd_VMA], (instregex "^MLAv", "^MLSv")>;
 
 // ASIMD multiply accumulate high
-def : InstRW<[N2Wr_VMAH, N2Rd_VMAH], (instregex "^SQRDMLAHv", "^SQRDMLSHv")>;
+// [a78_asimd_acc] docs/a78-sog.md C-18: "SQRDMLAH, SQRDMLSH 4 1 V0" (l.1626-1627), with no
+// accumulate latency in parentheses and no note; the N2 row forwarded the accumulator (advance 2).
+def : InstRW<[N2Write_4c_1V0], (instregex "^SQRDMLAHv", "^SQRDMLSHv")>;
 
 // ASIMD multiply accumulate long
 def : InstRW<[N2Wr_VMAL, N2Rd_VMAL], (instregex "^[SU]MLALv", "^[SU]MLSLv")>;
 
 // ASIMD multiply accumulate saturating long
-def : InstRW<[N2Write_4c_1V0], (instregex "^SQDMLALv", "^SQDMLSLv")>;
+// [a78_asimd_scalar] docs/a78-sog.md D-5: the scalar SQDMLAL/SQDMLSL (i16/i32) as well.
+def : InstRW<[N2Write_4c_1V0], (instregex "^SQDMLALv", "^SQDMLSLv", "^SQDML[AS]Li(16|32)$")>;
 
 // ASIMD multiply/multiply long (8x8) polynomial, D-form
 // ASIMD multiply/multiply long (8x8) polynomial, Q-form
 def : InstRW<[N2Write_3c_1V0], (instregex "^PMULL?(v8i8|v16i8)$")>;
 
 // ASIMD multiply long
-def : InstRW<[N2Write_3c_1V], (instregex "^[SU]MULLv", "^SQDMULLv")>;
+// [a78_asimd_mull] docs/a78-sog.md C-18: "SMULL(2), UMULL(2), SQDMULL(2) 3 1 V0" (l.1638-1640); it
+// was on V (2 per cycle).  [a78_asimd_scalar] D-5: the scalar SQDMULL (i16/i32) as well.
+def : InstRW<[N2Write_3c_1V0], (instregex "^[SU]MULLv", "^SQDMULLv", "^SQDMULLi(16|32)$")>;
 
 // ASIMD pairwise add and accumulate long
 def : InstRW<[N2Wr_VPA, N2Rd_VPA], (instregex "^[SU]ADALPv")>;
 
 // ASIMD shift accumulate
-def : InstRW<[N2Wr_VSA, N2Rd_VSA], (instregex "^[SU]SRAv", "^[SU]RSRAv")>;
+// [a78_asimd_scalar] docs/a78-sog.md D-5: the scalar forms (SSRA Dd, ... "d") as well.
+def : InstRW<[N2Wr_VSA, N2Rd_VSA], (instregex "^[SU]SRAv", "^[SU]RSRAv", "^[SU]R?SRAd$")>;
 
 // ASIMD shift by immed, basic
+// [a78_asimd_scalar] the scalar SHL, SSHR, USHR (Dd, "d") as well.
 def : InstRW<[N2Write_2c_1V1], (instregex "^SHLv", "^SHLLv", "^SHRNv",
                                           "^SSHLLv", "^SSHRv", "^USHLLv",
-                                          "^USHRv")>;
+                                          "^USHRv", "^(SHL|[SU]SHR)d$")>;
 
 // ASIMD shift by immed and insert, basic
-def : InstRW<[N2Write_2c_1V1], (instregex "^SLIv", "^SRIv")>;
+// [a78_asimd_scalar] the scalar SLI, SRI (Dd, "d") as well.
+def : InstRW<[N2Write_2c_1V1], (instregex "^SLIv", "^SRIv", "^S[LR]Id$")>;
 
 // ASIMD shift by immed, complex
+// [a78_asimd_scalar] the scalar SRSHR/URSHR (d) and the scalar narrowing shifts (b, h, s) as well.
 def : InstRW<[N2Write_4c_1V1],
              (instregex "^RSHRNv", "^SQRSHRNv", "^SQRSHRUNv",
                         "^(SQSHLU?|UQSHL)[bhsd]$",
                         "^(SQSHLU?|UQSHL)(v8i8|v16i8|v4i16|v8i16|v2i32|v4i32|v2i64)_shift$",
                         "^SQSHRNv", "^SQSHRUNv", "^SRSHRv", "^UQRSHRNv",
-                        "^UQSHRNv", "^URSHRv")>;
+                        "^UQSHRNv", "^URSHRv", "^[SU]RSHRd$",
+                        "^(SQR?SHRU?N|UQR?SHRN)[bhs]$")>;
 
 // ASIMD shift by register, basic
 def : InstRW<[N2Write_2c_1V1], (instregex "^[SU]SHLv")>;
@@ -1357,16 +1560,22 @@ def : InstRW<[N2Write_3c_1V0], (instregex "^FCVTN(v2|v4)i32",
                                           "^FCVTXN(v2|v4)f32")>;
 
 // ASIMD FP convert, other, D-form F32 and Q-form F64
+// [a78_fp_cvt] docs/a78-sog.md C-19: the fixed-point vector forms (FCVTZS/FCVTZU/SCVTF/UCVTF
+// Vd.T, Vn.T, #fbits, "..._shift") are the same mnemonics and arrangements as these rows
+// (l.1791-1808); they used to fall to the default (2, V).
 def : InstRW<[N2Write_3c_1V0], (instregex "^[FSU]CVT[AMNPZ][SU]v2f(32|64)$",
-                                          "^[SU]CVTFv2f(32|64)$")>;
+                                          "^[SU]CVTFv2f(32|64)$",
+                                          "^(FCVTZ[SU]|[SU]CVTF)v2i(32|64)_shift$")>;
 
 // ASIMD FP convert, other, D-form F16 and Q-form F32
 def : InstRW<[N2Write_4c_2V0], (instregex "^[FSU]CVT[AMNPZ][SU]v4f(16|32)$",
-                                          "^[SU]CVTFv4f(16|32)$")>;
+                                          "^[SU]CVTFv4f(16|32)$",
+                                          "^(FCVTZ[SU]|[SU]CVTF)v4i(16|32)_shift$")>;
 
 // ASIMD FP convert, other, Q-form F16
 def : InstRW<[N2Write_6c_4V0], (instregex "^[FSU]CVT[AMNPZ][SU]v8f16$",
-                                          "^[SU]CVTFv8f16$")>;
+                                          "^[SU]CVTFv8f16$",
+                                          "^(FCVTZ[SU]|[SU]CVTF)v8i16_shift$")>;
 
 // ASIMD FP divide, D-form, F16
 def : InstRW<[N2WriteFDS_7c7_1], (instrs FDIVv4f16)>;
@@ -1384,10 +1593,13 @@ def : InstRW<[N2WriteFDS_7c7_2], (instrs FDIVv4f32)>;
 def : InstRW<[N2WriteFDS_7c7_2], (instrs FDIVv2f64)>;
 
 // ASIMD FP max/min, reduce, F32 and D-form F16
-def : InstRW<[N2Write_4c_1V], (instregex "^(FMAX|FMIN)(NM)?Vv4(i16|i32)v$")>;
+// [a78_v_throughput] docs/a78-sog.md C-19: "4 1 V" (l.1831-1833): V held 2 cycles in total (one µOP
+// of one cycle gave 2 per cycle).
+def : InstRW<[A78WriteV<4, 1, 2>], (instregex "^(FMAX|FMIN)(NM)?Vv4(i16|i32)v$")>;
 
 // ASIMD FP max/min, reduce, Q-form F16
-def : InstRW<[N2Write_6c_2V], (instregex "^(FMAX|FMIN)(NM)?Vv8i16v$")>;
+// [a78_v_throughput] "6 2/3 V" (l.1834-1836): V held 3 cycles in total (it was 2, throughput 1).
+def : InstRW<[A78WriteV<6, 2, 3>], (instregex "^(FMAX|FMIN)(NM)?Vv8i16v$")>;
 
 // ASIMD FP multiply
 def : InstRW<[N2Wr_VFM], (instregex "^FMULv", "^FMULXv")>;
@@ -1466,10 +1678,19 @@ def : InstRW<[N2Write_3c_1V0], (instrs BFCVT)>;
 // ASIMD unzip/zip
 // Handled by SchedAlias<WriteV[dq], ...>
 
-def : InstRW<[N2Write_0or2c_1V], (instrs MOVID, MOVIv2d_ns)>;
+// [a78_zero_mov] docs/a78-sog.md C-4: "MOVI Dd, #0" and "MOVI Vd.2D, #0" are not among the
+// zero-latency MOVs of the A78 (sec. 4.15, l.2829-2848); the stock NeoverseZeroMove variant made
+// them latency 0 with no pipeline.  "ASIMD move, integer immed MOVI 2 2 V" (l.1947).
+def : InstRW<[N2Write_2c_1V], (instrs MOVID, MOVIv2d_ns)>;
 
 // ASIMD duplicate, gen reg
-def : InstRW<[N2Write_3c_1M0], (instregex "^DUPv.+gpr")>;
+// [a78_m0_pipelined] docs/a78-sog.md C-20: "3 1 M0" (l.1937): M0 one cycle (it was three).
+def : InstRW<[A78Write_3c_1M0], (instregex "^DUPv.+gpr")>;
+
+// ASIMD transfer, element to gen reg
+// [a78_fp_cvt] docs/a78-sog.md C-20: "UMOV, SMOV 2 1 V1" (l.1988-1989); they were on V (the stock
+// WriteV class).
+def : InstRW<[N2Write_2c_1V1], (instregex "^[SU]MOVvi")>;
 
 // ASIMD extract narrow, saturating
 def : InstRW<[N2Write_4c_1V1], (instregex "^[SU]QXTNv", "^SQXTUNv")>;
@@ -1503,100 +1724,109 @@ def : InstRW<[N2Write_4c_1V], (instregex "^FRECPSv", "^FRSQRTSv")>;
 def : InstRW<[N2Write_4c_2V], (instrs TBLv8i8Three, TBLv16i8Three)>;
 
 // ASIMD table lookup, 4 table regs
-def : InstRW<[N2Write_4c_4V], (instrs TBLv8i8Four, TBLv16i8Four)>;
+// [a78_v_throughput] docs/a78-sog.md C-20: "4 2/3 V" (l.1968-1969): V held 3 cycles in total (four
+// µOPs of one cycle gave 1/2).
+def : InstRW<[A78WriteV<4, 4, 3>], (instrs TBLv8i8Four, TBLv16i8Four)>;
 
 // ASIMD table lookup extension, 2 table reg
 def : InstRW<[N2Write_4c_2V], (instrs TBXv8i8Two, TBXv16i8Two)>;
 
 // ASIMD table lookup extension, 3 table reg
-def : InstRW<[N2Write_6c_4V], (instrs TBXv8i8Three, TBXv16i8Three)>;
+// [a78_v_throughput] "6 2/3 V" (l.1984-1985): V held 3 cycles (it was 4, throughput 1/2).
+def : InstRW<[A78WriteV<6, 4, 3>], (instrs TBXv8i8Three, TBXv16i8Three)>;
 
 // ASIMD table lookup extension, 4 table reg
-def : InstRW<[N2Write_6c_8V], (instrs TBXv8i8Four, TBXv16i8Four)>;
+// [a78_v_throughput] "6 2/5 V" (l.1986-1987): V held 5 cycles (it was 8, throughput 1/4).
+def : InstRW<[A78WriteV<6, 8, 5>], (instrs TBXv8i8Four, TBXv16i8Four)>;
 
 // ASIMD transfer, gen reg to element
 def : InstRW<[N2Write_5c_1M0_1V], (instregex "^INSvi(8|16|32|64)gpr$")>;
 
 // ASIMD load instructions
 // -----------------------------------------------------------------------------
+// [a78_asimd_ld] docs/a78-sog.md C-21: Table 3-30 (l.2065-2172).  The N2 rows were one cycle
+// slower than the A78 rows for LD1 (5, four registers D 5 and Q 6), LD1 one lane / LD1R and LD2 (7),
+// and one cycle faster for LD4 multiple Q-form (10).  LD1 four registers D-form ("5 3/2") and LD4
+// multiple Q-form ("10 1/4") also have [a78_ls_throughput] (D-6).  LD3 and the other LD4 rows
+// match.  The writeback forms add WriteAdr ("(1) +I", l.2172).
 
 // ASIMD load, 1 element, multiple, 1 reg, D-form
-def : InstRW<[N2Write_6c_1L], (instregex "^LD1Onev(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_1L],
+def : InstRW<[A78Write_5c_1L], (instregex "^LD1Onev(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_1L],
              (instregex "^LD1Onev(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 1 reg, Q-form
-def : InstRW<[N2Write_6c_1L], (instregex "^LD1Onev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_1L],
+def : InstRW<[A78Write_5c_1L], (instregex "^LD1Onev(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_1L],
              (instregex "^LD1Onev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 2 reg, D-form
-def : InstRW<[N2Write_6c_2L], (instregex "^LD1Twov(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_2L],
+def : InstRW<[A78Write_5c_2L], (instregex "^LD1Twov(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_2L],
              (instregex "^LD1Twov(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 2 reg, Q-form
-def : InstRW<[N2Write_6c_2L], (instregex "^LD1Twov(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_2L],
+def : InstRW<[A78Write_5c_2L], (instregex "^LD1Twov(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_2L],
              (instregex "^LD1Twov(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 3 reg, D-form
-def : InstRW<[N2Write_6c_3L], (instregex "^LD1Threev(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_3L],
+def : InstRW<[A78Write_5c_3L], (instregex "^LD1Threev(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_3L],
              (instregex "^LD1Threev(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 3 reg, Q-form
-def : InstRW<[N2Write_6c_3L], (instregex "^LD1Threev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_3L],
+def : InstRW<[A78Write_5c_3L], (instregex "^LD1Threev(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_3L],
              (instregex "^LD1Threev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 4 reg, D-form
-def : InstRW<[N2Write_7c_4L], (instregex "^LD1Fourv(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_7c_4L],
+def : InstRW<[A78Write_5c_4L_2cyc], (instregex "^LD1Fourv(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, A78Write_5c_4L_2cyc],
              (instregex "^LD1Fourv(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD load, 1 element, multiple, 4 reg, Q-form
-def : InstRW<[N2Write_7c_4L], (instregex "^LD1Fourv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_7c_4L],
+def : InstRW<[A78Write_6c_4L], (instregex "^LD1Fourv(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_6c_4L],
              (instregex "^LD1Fourv(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 1 element, one lane, B/H/S
 // ASIMD load, 1 element, one lane, D
-def : InstRW<[N2Write_8c_1L_1V],           (instregex "LD1i(8|16|32|64)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_1V], (instregex "LD1i(8|16|32|64)_POST$")>;
+def : InstRW<[A78Write_7c_1L_1V],           (instregex "LD1i(8|16|32|64)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_1V], (instregex "LD1i(8|16|32|64)_POST$")>;
 
 // ASIMD load, 1 element, all lanes, D-form, B/H/S
 // ASIMD load, 1 element, all lanes, D-form, D
-def : InstRW<[N2Write_8c_1L_1V],           (instregex "LD1Rv(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_1V], (instregex "LD1Rv(8b|4h|2s|1d)_POST$")>;
+def : InstRW<[A78Write_7c_1L_1V],           (instregex "LD1Rv(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_1V], (instregex "LD1Rv(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD load, 1 element, all lanes, Q-form
-def : InstRW<[N2Write_8c_1L_1V],           (instregex "LD1Rv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_1V], (instregex "LD1Rv(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[A78Write_7c_1L_1V],           (instregex "LD1Rv(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_1V], (instregex "LD1Rv(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 2 element, multiple, D-form, B/H/S
-def : InstRW<[N2Write_8c_1L_2V],           (instregex "LD2Twov(8b|4h|2s)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_2V], (instregex "LD2Twov(8b|4h|2s)_POST$")>;
+def : InstRW<[A78Write_7c_1L_2V],           (instregex "LD2Twov(8b|4h|2s)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_2V], (instregex "LD2Twov(8b|4h|2s)_POST$")>;
 
 // ASIMD load, 2 element, multiple, Q-form, B/H/S
 // ASIMD load, 2 element, multiple, Q-form, D
-def : InstRW<[N2Write_8c_2L_2V],           (instregex "LD2Twov(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_2L_2V], (instregex "LD2Twov(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[A78Write_7c_2L_2V],           (instregex "LD2Twov(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_2L_2V], (instregex "LD2Twov(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 2 element, one lane, B/H
 // ASIMD load, 2 element, one lane, S
 // ASIMD load, 2 element, one lane, D
-def : InstRW<[N2Write_8c_1L_2V],           (instregex "LD2i(8|16|32|64)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_2V], (instregex "LD2i(8|16|32|64)_POST$")>;
+def : InstRW<[A78Write_7c_1L_2V],           (instregex "LD2i(8|16|32|64)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_2V], (instregex "LD2i(8|16|32|64)_POST$")>;
 
 // ASIMD load, 2 element, all lanes, D-form, B/H/S
 // ASIMD load, 2 element, all lanes, D-form, D
-def : InstRW<[N2Write_8c_1L_2V],            (instregex "LD2Rv(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_2V],  (instregex "LD2Rv(8b|4h|2s|1d)_POST$")>;
+def : InstRW<[A78Write_7c_1L_2V],            (instregex "LD2Rv(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_2V],  (instregex "LD2Rv(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD load, 2 element, all lanes, Q-form
-def : InstRW<[N2Write_8c_1L_2V],           (instregex "LD2Rv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_8c_1L_2V], (instregex "LD2Rv(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[A78Write_7c_1L_2V],           (instregex "LD2Rv(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78Write_7c_1L_2V], (instregex "LD2Rv(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 3 element, multiple, D-form, B/H/S
 def : InstRW<[N2Write_8c_2L_3V],           (instregex "LD3Threev(8b|4h|2s)$")>;
@@ -1632,8 +1862,8 @@ def : InstRW<[WriteAdr, N2Write_8c_3L_4V], (instregex "LD4Fourv(8b|4h|2s)_POST$"
 
 // ASIMD load, 4 element, multiple, Q-form, B/H/S
 // ASIMD load, 4 element, multiple, Q-form, D
-def : InstRW<[N2Write_9c_4L_4V],           (instregex "LD4Fourv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_9c_4L_4V], (instregex "LD4Fourv(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[A78WriteLDV<10, 8, 12, 4>],           (instregex "LD4Fourv(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78WriteLDV<10, 8, 12, 4>], (instregex "LD4Fourv(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD load, 4 element, one lane, B/H
 // ASIMD load, 4 element, one lane, S
@@ -1653,92 +1883,138 @@ def : InstRW<[WriteAdr, N2Write_8c_4L_4V],  (instregex "LD4Rv(16b|8h|4s|2d)_POST
 
 // ASIMD store instructions
 // -----------------------------------------------------------------------------
+// [a78_asimd_st] docs/a78-sog.md C-22: Table 3-32 (l.2248-2314).  [a78_ls_throughput] D-6: the rows
+// with A78WriteSTV reach the SOG throughput by holding the L01 pipes 2/T cycles; with one cycle per
+// µOP they were up to twice as fast as the SOG (e.g. ST2 multiple Q-form 1 per cycle, SOG 1/2).
+// ST2 multiple Q-form was latency 4 (SOG 5), ST3 one lane 6 (SOG 5).
+// [a78_from_a55_store_data] B-1: the data Vt reads ReadST, the base Rn ReadAdrBase; for the
+// one-lane forms the lane index takes the read in between (ReadDefault).
 
 // ASIMD store, 1 element, multiple, 1 reg, D-form
-def : InstRW<[N2Write_2c_1L01_1V],           (instregex "ST1Onev(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_1L01_1V], (instregex "ST1Onev(8b|4h|2s|1d)_POST$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "ST1Onev(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "ST1Onev(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 1 reg, Q-form
-def : InstRW<[N2Write_2c_1L01_1V],           (instregex "ST1Onev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_1L01_1V], (instregex "ST1Onev(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "ST1Onev(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "ST1Onev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 2 reg, D-form
-def : InstRW<[N2Write_2c_1L01_1V],           (instregex "ST1Twov(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_1L01_1V], (instregex "ST1Twov(8b|4h|2s|1d)_POST$")>;
+def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "ST1Twov(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
+             (instregex "ST1Twov(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 2 reg, Q-form
-def : InstRW<[N2Write_2c_2L01_2V],           (instregex "ST1Twov(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_2L01_2V], (instregex "ST1Twov(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[N2Write_2c_2L01_2V, ReadST, ReadAdrBase],
+             (instregex "ST1Twov(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_2L01_2V, ReadST, ReadAdrBase],
+             (instregex "ST1Twov(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 3 reg, D-form
-def : InstRW<[N2Write_2c_2L01_2V],           (instregex "ST1Threev(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_2L01_2V], (instregex "ST1Threev(8b|4h|2s|1d)_POST$")>;
+def : InstRW<[N2Write_2c_2L01_2V, ReadST, ReadAdrBase],
+             (instregex "ST1Threev(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_2L01_2V, ReadST, ReadAdrBase],
+             (instregex "ST1Threev(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 3 reg, Q-form
-def : InstRW<[N2Write_2c_3L01_3V],           (instregex "ST1Threev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_3L01_3V], (instregex "ST1Threev(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[N2Write_2c_3L01_3V, ReadST, ReadAdrBase],
+             (instregex "ST1Threev(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_3L01_3V, ReadST, ReadAdrBase],
+             (instregex "ST1Threev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 4 reg, D-form
-def : InstRW<[N2Write_2c_2L01_2V],           (instregex "ST1Fourv(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_2L01_2V], (instregex "ST1Fourv(8b|4h|2s|1d)_POST$")>;
+def : InstRW<[N2Write_2c_2L01_2V, ReadST, ReadAdrBase],
+             (instregex "ST1Fourv(8b|4h|2s|1d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_2L01_2V, ReadST, ReadAdrBase],
+             (instregex "ST1Fourv(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 4 reg, Q-form
-def : InstRW<[N2Write_2c_4L01_4V],           (instregex "ST1Fourv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_2c_4L01_4V], (instregex "ST1Fourv(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[N2Write_2c_4L01_4V, ReadST, ReadAdrBase],
+             (instregex "ST1Fourv(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, N2Write_2c_4L01_4V, ReadST, ReadAdrBase],
+             (instregex "ST1Fourv(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 1 element, one lane, B/H/S
 // ASIMD store, 1 element, one lane, D
-def : InstRW<[N2Write_4c_1L01_1V],           (instregex "ST1i(8|16|32|64)$")>;
-def : InstRW<[WriteAdr, N2Write_4c_1L01_1V], (instregex "ST1i(8|16|32|64)_POST$")>;
+def : InstRW<[A78WriteSTV<4, 2, 2, 1>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST1i(8|16|32|64)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<4, 2, 2, 1>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST1i(8|16|32|64)_POST$")>;
 
 // ASIMD store, 2 element, multiple, D-form, B/H/S
-def : InstRW<[N2Write_4c_1L01_1V],           (instregex "ST2Twov(8b|4h|2s)$")>;
-def : InstRW<[WriteAdr, N2Write_4c_1L01_1V], (instregex "ST2Twov(8b|4h|2s)_POST$")>;
+def : InstRW<[A78WriteSTV<4, 2, 2, 1>, ReadST, ReadAdrBase],
+             (instregex "ST2Twov(8b|4h|2s)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<4, 2, 2, 1>, ReadST, ReadAdrBase],
+             (instregex "ST2Twov(8b|4h|2s)_POST$")>;
 
 // ASIMD store, 2 element, multiple, Q-form, B/H/S
 // ASIMD store, 2 element, multiple, Q-form, D
-def : InstRW<[N2Write_4c_2L01_2V],           (instregex "ST2Twov(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_4c_2L01_2V], (instregex "ST2Twov(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[A78WriteSTV<5, 4, 4, 2>, ReadST, ReadAdrBase],
+             (instregex "ST2Twov(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<5, 4, 4, 2>, ReadST, ReadAdrBase],
+             (instregex "ST2Twov(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 2 element, one lane, B/H/S
 // ASIMD store, 2 element, one lane, D
-def : InstRW<[N2Write_4c_1L01_1V],           (instregex "ST2i(8|16|32|64)$")>;
-def : InstRW<[WriteAdr, N2Write_4c_1L01_1V], (instregex "ST2i(8|16|32|64)_POST$")>;
+def : InstRW<[A78WriteSTV<4, 2, 2, 1>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST2i(8|16|32|64)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<4, 2, 2, 1>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST2i(8|16|32|64)_POST$")>;
 
 // ASIMD store, 3 element, multiple, D-form, B/H/S
-def : InstRW<[N2Write_5c_2L01_2V],           (instregex "ST3Threev(8b|4h|2s)$")>;
-def : InstRW<[WriteAdr, N2Write_5c_2L01_2V], (instregex "ST3Threev(8b|4h|2s)_POST$")>;
+def : InstRW<[A78WriteSTV<5, 4, 4, 2>, ReadST, ReadAdrBase],
+             (instregex "ST3Threev(8b|4h|2s)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<5, 4, 4, 2>, ReadST, ReadAdrBase],
+             (instregex "ST3Threev(8b|4h|2s)_POST$")>;
 
 // ASIMD store, 3 element, multiple, Q-form, B/H/S
 // ASIMD store, 3 element, multiple, Q-form, D
-def : InstRW<[N2Write_6c_3L01_3V],           (instregex "ST3Threev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_3L01_3V], (instregex "ST3Threev(16b|8h|4s|2d)_POST$")>;
+def : InstRW<[A78WriteSTV<6, 6, 6, 3>, ReadST, ReadAdrBase],
+             (instregex "ST3Threev(16b|8h|4s|2d)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<6, 6, 6, 3>, ReadST, ReadAdrBase],
+             (instregex "ST3Threev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 3 element, one lane, B/H
 // ASIMD store, 3 element, one lane, S
 // ASIMD store, 3 element, one lane, D
-def : InstRW<[N2Write_6c_3L01_3V],           (instregex "ST3i(8|16|32|64)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_3L01_3V], (instregex "ST3i(8|16|32|64)_POST$")>;
+def : InstRW<[A78WriteSTV<5, 6, 4, 3>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST3i(8|16|32|64)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<5, 6, 4, 3>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST3i(8|16|32|64)_POST$")>;
 
 // ASIMD store, 4 element, multiple, D-form, B/H/S
-def : InstRW<[N2Write_6c_3L01_3V],           (instregex "ST4Fourv(8b|4h|2s)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_3L01_3V], (instregex "ST4Fourv(8b|4h|2s)_POST$")>;
+def : InstRW<[A78WriteSTV<6, 6, 6, 3>, ReadST, ReadAdrBase],
+             (instregex "ST4Fourv(8b|4h|2s)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<6, 6, 6, 3>, ReadST, ReadAdrBase],
+             (instregex "ST4Fourv(8b|4h|2s)_POST$")>;
 
 // ASIMD store, 4 element, multiple, Q-form, B/H/S
-def : InstRW<[N2Write_7c_6L01_6V],           (instregex "ST4Fourv(16b|8h|4s)$")>;
-def : InstRW<[WriteAdr, N2Write_7c_6L01_6V], (instregex "ST4Fourv(16b|8h|4s)_POST$")>;
+def : InstRW<[A78WriteSTV<7, 12, 12, 6>, ReadST, ReadAdrBase],
+             (instregex "ST4Fourv(16b|8h|4s)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<7, 12, 12, 6>, ReadST, ReadAdrBase],
+             (instregex "ST4Fourv(16b|8h|4s)_POST$")>;
 
 // ASIMD store, 4 element, multiple, Q-form, D
-def : InstRW<[N2Write_5c_4L01_4V],           (instregex "ST4Fourv(2d)$")>;
-def : InstRW<[WriteAdr, N2Write_5c_4L01_4V], (instregex "ST4Fourv(2d)_POST$")>;
+def : InstRW<[A78WriteSTV<5, 8, 8, 4>, ReadST, ReadAdrBase],
+             (instregex "ST4Fourv(2d)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<5, 8, 8, 4>, ReadST, ReadAdrBase],
+             (instregex "ST4Fourv(2d)_POST$")>;
 
 // ASIMD store, 4 element, one lane, B/H/S
-def : InstRW<[N2Write_6c_3L01_3V],           (instregex "ST4i(8|16|32)$")>;
-def : InstRW<[WriteAdr, N2Write_6c_3L01_3V], (instregex "ST4i(8|16|32)_POST$")>;
+def : InstRW<[N2Write_6c_3L01_3V, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST4i(8|16|32)$")>;
+def : InstRW<[WriteAdr, N2Write_6c_3L01_3V, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST4i(8|16|32)_POST$")>;
 
 // ASIMD store, 4 element, one lane, D
-def : InstRW<[N2Write_4c_3L01_3V],            (instregex "ST4i(64)$")>;
-def : InstRW<[WriteAdr, N2Write_4c_3L01_3V],  (instregex "ST4i(64)_POST$")>;
+def : InstRW<[A78WriteSTV<4, 6, 4, 3>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST4i(64)$")>;
+def : InstRW<[WriteAdr, A78WriteSTV<4, 6, 4, 3>, ReadST, ReadDefault, ReadAdrBase],
+             (instregex "ST4i(64)_POST$")>;
 
 // Cryptography extensions
 // -----------------------------------------------------------------------------
