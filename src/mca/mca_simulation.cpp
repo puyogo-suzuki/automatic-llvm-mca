@@ -1,6 +1,7 @@
 #include "mca/mca_simulation.h"
 #include "a55/a55_adaptations.h"
 #include "a55/a55_issue_stage.h"
+#include "a520/a520_issue_stage.h"
 #include "cpu/cpu_traits.h"
 #include "cpu/sched_model.h"
 #include "mca/steady_state_tracker.h"
@@ -139,10 +140,28 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     mca::CircularSourceMgr CSM(Sequence, WarmupIterations + SteadyIterations);
     mca::CustomBehaviour CB(STI, CSM, MCII);
     bool IsA55 = (getCpuTraits(STI.getCPU()).Model == CpuModel::A55);
+    bool IsA520 = (getCpuTraits(STI.getCPU()).Model == CpuModel::A520);
     std::unique_ptr<mca::Pipeline> P;
     mca::A55DecoupledIssueStage *A55Issue = nullptr;
+    mca::A520InOrderIssueStage *A520Issue = nullptr;
     if (STI.getSchedModel().isOutOfOrder()) {
         P = MCAContext.createDefaultPipeline(PO, CSM, CB);
+    } else if (IsA520) {
+        // Cortex-A520: the stock in-order pipeline with the project's copy of
+        // InOrderIssueStage (src/a520/a520_issue_stage.h): no general write-back
+        // ordering [a520_no_wb_order] and a hook before the register hazard check
+        // [a520_lc_hook] (docs/a520-sog.md D-9, section 2.2), and the flag bypass
+        // borrowed from the Cortex-A55 [a520_from_a55_flags] (docs/a520-sog.md B-4).
+        auto PRF_unique = std::make_unique<mca::RegisterFile>(STI.getSchedModel(), MRI, PO.RegisterFileSize);
+        auto LSU_unique = std::make_unique<mca::LSUnit>(STI.getSchedModel(), PO.LoadQueueSize,
+                                                        PO.StoreQueueSize, PO.AssumeNoAlias);
+        mca::RegisterFile *PRF_ptr = PRF_unique.get();
+        mca::LSUnit *LSU_ptr = LSU_unique.get();
+        MCAContext.addHardwareUnit(std::move(PRF_unique));
+        MCAContext.addHardwareUnit(std::move(LSU_unique));
+        P = mca::createA520InOrderPipeline(CSM, CB, STI, *PRF_ptr, *LSU_ptr, &A520Issue,
+                                           /*EnforceWriteBackOrder=*/false, &MCII,
+                                           CSM.getInstructions());
     } else if (IsA55) {
         auto PRF_unique = std::make_unique<mca::RegisterFile>(STI.getSchedModel(), MRI);
         mca::RegisterFile *PRF_ptr = PRF_unique.get();
@@ -172,11 +191,17 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         // Dispatched event, which the issue stages raise only after their
         // register hazard check, so the first instruction of every iteration
         // still waited for the previous iteration.  The A55 issue stage calls the
-        // tracker before that check.  The stock in-order (e.g. cortex-a520) and
-        // out-of-order pipelines have no such hook and are left as they were.
+        // tracker before that check, and so does the Cortex-A520 issue stage
+        // (src/a520/a520_issue_stage.h).  The stock out-of-order pipeline has no
+        // such hook and is left as it was.
         if (A55Issue) {
             LoopCarriedIgnoreSteadyStateTracker *T = LCI.get();
             A55Issue->setBeforeRegisterHazardCheckHook(
+                [T](const mca::InstRef &IR) { T->beforeRegisterHazardCheck(IR); });
+        }
+        if (A520Issue) {  // [a520_lc_hook] docs/a520-sog.md section 2.2
+            LoopCarriedIgnoreSteadyStateTracker *T = LCI.get();
+            A520Issue->setBeforeRegisterHazardCheckHook(
                 [T](const mca::InstRef &IR) { T->beforeRegisterHazardCheck(IR); });
         }
         Tracker = std::move(LCI);

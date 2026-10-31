@@ -149,10 +149,13 @@ struct AArch64TestContext {
         // not carry (e.g. it has no atomics at all and a 4-cycle LDR Q).  The
         // two older A55 tests that want the stock model (MLPTest.A55*) still
         // reset TC.STI to it explicitly.
+        // cortex-a520 joins for the same reason: tests/a520_sog_test.cpp pins values
+        // of ModifiedTarget/AArch64/AArch64SchedA520.td (docs/a520-sog.md); no older
+        // test uses a cortex-a520 context.
         if (cpu == "icestorm" || cpu == "firestorm" ||
             cpu == "cortex-a720" || cpu == "cortex-a720ae" ||
             cpu == "cortex-x1" || cpu == "cortex-x1c" ||
-            cpu == "cortex-a55") {
+            cpu == "cortex-a55" || cpu == "cortex-a520") {
             const std::string llvm_cpu =
                 (cpu == "icestorm" || cpu == "firestorm") ? "apple-m1" : cpu;
             STI.reset(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));

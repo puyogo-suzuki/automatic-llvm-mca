@@ -339,7 +339,7 @@ def CortexA55WriteFSqrtDP : SchedWriteRes<[CortexA55UnitFPDIV]> { let Latency = 
 //===----------------------------------------------------------------------===//
 // Subtarget-specific SchedRead types.
 
-// [a55_planB] Integer ReadAdvance limited per the SOG forwarding description (scratch/session_20261029/a55_alu_forwarding).
+// [a55_planB] Integer ReadAdvance limited per the SOG forwarding description.
 //   * advance 1 into a non-shifting ALU operand only from loads (load-use 2, SOG l.484).  The 1-cycle ALU
 //     writes used to be in the same list (ALU0 ex1 -> ALU1 ex1 dedicated path, SOG l.351-352 -> same-cycle
 //     dependent pair); that path is now an issue-stage rule [a55_alu_fwd].  Every other producer

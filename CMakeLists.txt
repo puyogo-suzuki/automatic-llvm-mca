@@ -83,6 +83,7 @@ set(MCA_SOURCES
     src/cpu/sched_model.cpp
     src/a55/a55_adaptations.cpp
     src/a55/a55_issue_stage.cpp
+    src/a520/a520_issue_stage.cpp
     src/mca/mca_simulation.cpp
     src/mca/steady_state_tracker.cpp
     src/mlp/mlp_aarch64.cpp
@@ -133,7 +134,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 add_executable(mca_unit_tests tests/mlp_test.cpp tests/splitter_test.cpp tests/facile_test.cpp tests/cpu_traits_test.cpp
-               tests/a55_sog_test.cpp)
+               tests/a55_sog_test.cpp tests/a520_sog_test.cpp)
 target_link_libraries(mca_unit_tests PRIVATE gtest_main mca_common_lib ${llvm_libs})
 
 include(GoogleTest)
