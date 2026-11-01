@@ -4,7 +4,8 @@
 // Facile Predictor Unit & Corner Case Tests
 // ============================================================================
 
-static facile::FacileResult runFacileAArch64(const AArch64TestContext &TC, const std::string &asm_code) {
+static facile::FacileResult runFacileAArch64(const AArch64TestContext &TC, const std::string &asm_code,
+                                             bool LoopCarried = true) {
     initLLVMAArch64();
     auto instrs = parseAsm(TC, asm_code);
     mca::InstrumentManager IM(*TC.STI, *TC.MCII);
@@ -18,13 +19,14 @@ static facile::FacileResult runFacileAArch64(const AArch64TestContext &TC, const
             MCInsts.push_back(&I.Inst);
         }
     }
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts);
+    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, 0, {}, 0, LoopCarried);
 }
 
 
 // Same as runFacileAArch64 but also supplies the per-instruction
 // MemAccessInfo array, enabling facile's store->load memory RAW edges.
-static facile::FacileResult runFacileAArch64Mem(const AArch64TestContext &TC, const std::string &asm_code) {
+static facile::FacileResult runFacileAArch64Mem(const AArch64TestContext &TC, const std::string &asm_code,
+                                                bool LoopCarried = true) {
     initLLVMAArch64();
     auto instrs = parseAsm(TC, asm_code);
     auto Analyzer = MLPAnalyzer::create(*TC.STI);
@@ -42,7 +44,7 @@ static facile::FacileResult runFacileAArch64Mem(const AArch64TestContext &TC, co
             MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, MCID, *TC.MRI, *TC.MCII));
         }
     }
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, 0, MemInfos);
+    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, 0, MemInfos, 0, LoopCarried);
 }
 
 
@@ -85,6 +87,34 @@ TEST(FacileTest, RegisterTupleDefinesAndUsesEveryRegister) {
     auto Store = runFacileAArch64(TC, "ld1 {v2.16b}, [x0]\nadd v1.16b, v2.16b, v2.16b\nst1 {v0.16b, v1.16b}, [x1]\nfmov x0, d2\n");
     auto StoreFirst = runFacileAArch64(TC, "ld1 {v2.16b}, [x0]\nadd v0.16b, v2.16b, v2.16b\nst1 {v0.16b, v1.16b}, [x1]\nfmov x0, d2\n");
     EXPECT_DOUBLE_EQ(Store.PrecedenceBound, StoreFirst.PrecedenceBound);
+}
+
+// A region that is not a loop (a function body) has no recurrence: the value written at its end
+// (a return value in w0) does not feed the read at its start (an argument in x0).  With
+// LoopCarried = false only the intra-iteration edges remain, in registers and in memory; with
+// true the same code closes a cycle through w0/x0 (W and X names share a register unit).
+TEST(FacileTest, NonLoopRegionHasNoLoopCarriedEdges) {
+    initLLVMAArch64();
+    for (const char *Cpu : {"cortex-a76", "cortex-a78", "cortex-a720"}) {
+        AArch64TestContext TC(Cpu);
+        const std::string Body = "mul x1, x0, x0\nmul x2, x1, x1\nadd w0, w2, #1\n";
+        auto Loop = runFacileAArch64(TC, Body, true);
+        auto Straight = runFacileAArch64(TC, Body, false);
+        EXPECT_GT(Loop.PrecedenceBound, 4.0) << Cpu;
+        EXPECT_DOUBLE_EQ(Straight.PrecedenceBound, 0.0) << Cpu;
+        EXPECT_LT(Straight.EstimatedCycles, Loop.EstimatedCycles) << Cpu;
+        // Only the destination of the last instruction differs: no register of the
+        // region is read first, so both are the same loop and the same non-loop.
+        auto LoopW9 = runFacileAArch64(TC, "mul x1, x0, x0\nmul x2, x1, x1\nadd w9, w2, #1\n", true);
+        EXPECT_DOUBLE_EQ(LoopW9.PrecedenceBound, Straight.PrecedenceBound) << Cpu;
+    }
+    // The store -> load edge through memory is dropped as well when the region is not a loop.
+    AArch64TestContext TC("cortex-a78");
+    const std::string Mem = "ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]\n";
+    auto MemLoop = runFacileAArch64Mem(TC, Mem);
+    auto MemStraight = runFacileAArch64Mem(TC, Mem, false);
+    EXPECT_GT(MemLoop.PrecedenceBound, 0.0);
+    EXPECT_DOUBLE_EQ(MemStraight.PrecedenceBound, 0.0);
 }
 
 // Dependence-distance test: identical subscript expressions with a
@@ -464,35 +494,34 @@ TEST(FacileTest, A720ZeroLatencyOrrRequiresNoShift) {
 
 // FMOV Dd, Dn / FMOV Sd, Sn - the forms stock LLVM's NeoverseZeroMove does NOT
 // cover (N2 and V1 give FMOVDr/FMOVSr an unconditional 2-cycle V write), and
-// the reason A720 needed its own predicate.  The recurrence is fadd(3c) -> fmov
-// -> fadd, so zero latency shows as 3.0 and the unmodelled case would be 5.0.
+// the reason A720 needed its own predicate.  The recurrence is fadd -> fmov ->
+// fadd.  "FP arithmetic FADD, FSUB 2 2 V" (A720 SOG Table 3-11, l.964), so zero
+// latency shows as 2.0 and the unmodelled case would be 2 + 2 = 4.0
+// (docs/a720-sog.md C-4, C-15; the expectation was 3.0 when the model's WriteF
+// was 3, which is not an A720 SOG value).
 TEST(FacileTest, A720ZeroLatencyFmovFpToFp) {
     initLLVMAArch64();
     AArch64TestContext A720("cortex-a720");
     EXPECT_NEAR(runFacileAArch64(A720, "fadd d0, d1, d2\nfmov d1, d0\n").PrecedenceBound,
-                3.0, 0.01);
+                2.0, 0.01);
     EXPECT_NEAR(runFacileAArch64(A720, "fadd s0, s1, s2\nfmov s1, s0\n").PrecedenceBound,
-                3.0, 0.01);
+                2.0, 0.01);
 }
 
 
 // FMOV Hd, Hn is deliberately absent from sec. 4.12 and so from A720ZeroMove;
-// it keeps the SOG's normal "FP move, register" latency.  This pins the
-// distinction, which is the easiest thing to get wrong by pattern-matching
-// FMOV[HSD]r as a family (NeoverseN3 draws the same line).
+// it keeps the SOG's normal "FP move, register FMOV 2 2 V" (Table 3-12,
+// l.1040).  This pins the distinction, which is the easiest thing to get wrong
+// by pattern-matching FMOV[HSD]r as a family (NeoverseN3 draws the same line).
+// Both values are absolute (docs/a720-sog.md C-4, C-16): H = fadd 2 + fmov 2,
+// D = fadd 2 + 0.
 TEST(FacileTest, A720FmovHalfPrecisionIsNotZeroLatency) {
     initLLVMAArch64();
     AArch64TestContext A720("cortex-a720");
     const double H = runFacileAArch64(A720, "fadd h0, h1, h2\nfmov h1, h0\n").PrecedenceBound;
     const double D = runFacileAArch64(A720, "fadd d0, d1, d2\nfmov d1, d0\n").PrecedenceBound;
-    EXPECT_NEAR(D, 3.0, 0.01); // fadd's 3c alone: the D-form copy is eliminated
-    EXPECT_GT(H, D);           // the H-form copy still carries a dependence
-    // Deliberately not an absolute for H.  FMOVHr is bound to this model's
-    // generic WriteFCopy, which is 1c, while the A720 SOG's Table 3-12
-    // "FP move, register" is 2c - a pre-existing discrepancy in the hand-written
-    // WriteRes block that is not this change's subject (WriteFCopy covers many
-    // more instructions than FMOVHr).  What matters here is only that the H form
-    // is NOT eliminated.
+    EXPECT_NEAR(D, 2.0, 0.01); // fadd's 2c alone: the D-form copy is eliminated
+    EXPECT_NEAR(H, 4.0, 0.01); // the H-form copy still costs its 2 cycles
 }
 
 

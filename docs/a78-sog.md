@@ -151,6 +151,8 @@ For `--facile`, every region gets `EstimatedCycles = max(IssueBound, PortBound, 
   zero-latency MOVs (`getEdgeLatency`, [C-4](#c-4), [C-6](#c-6)); a store with a base update has a
   second node for the update ([C-7](#c-7)); store -> load memory edges have the store's latency
   ([D-7](#d-7)).
+  Loop-carried edges (register and memory) are added only when the region is a loop, or with
+  `--ignore-loop-carried disable` ([docs.md](docs.md) 4.J); for a region that is not a loop the bound is 0.
 
 The MLP columns use a window of `MicroOpBufferSize` = 160 uops ([U-1](#u-1)); a change of an
 instruction's uop count therefore also changes the `mlp` / `mlp_r` columns of the regions around it.

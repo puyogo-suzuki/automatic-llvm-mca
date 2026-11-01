@@ -272,13 +272,32 @@ bool isA720FusiblePair(const A720ProducerInfo &P, A720Consumer C) {
     }
 }
 
+// [a720_fusion_simd] docs/a720-sog.md C-5: the sec. 4.11 rows "SHL + SRI (both
+// scalar or both vector)" and "FCMP + AXFLAG" (l.3165-3166).  SHL and SRI by
+// immediate are SHL<form> / SRI<form> with the same form suffix family: the
+// scalar forms SHLd / SRId, the vector forms SHLv*_shift / SRIv*_shift.  The pair
+// need not be dependent (the SOG states no such condition).  FCMP is every
+// FCMP / FCMPE form (register or #0.0, H/S/D).
+bool isA720ShlSriPair(llvm::StringRef First, llvm::StringRef Second) {
+    if (First == "SHLd")
+        return Second == "SRId";
+    if (First.starts_with("SHLv") && First.ends_with("_shift"))
+        return Second.starts_with("SRIv") && Second.ends_with("_shift");
+    return false;
+}
+
+bool isA720FcmpAxflagPair(llvm::StringRef First, llvm::StringRef Second) {
+    return First.starts_with("FCMP") && Second == "AXFLAG";
+}
+
 // Mask of instructions that disappear into an adjacent fused pair on A720.
-// Always the SECOND instruction: every row modelled here pairs a flag-setting
-// compare with a consumer of those flags, and the compare is what survives as
-// the fused operation's own work.  (A78's computeA78FusedMask() also has to
-// handle the opposite case because of its "NOP + Any instruction" row, where
-// the FIRST instruction is the one absorbed; A720 sec. 4.11 has no such row,
-// so there is no first-instruction path here.)
+// Always the SECOND instruction: the compare-and-branch/select rows pair a
+// flag-setting compare with a consumer of those flags, and the compare is what
+// survives as the fused operation's own work; SHL + SRI and FCMP + AXFLAG are
+// treated the same way (docs/a720-sog.md D-11).  (A78's computeA78FusedMask()
+// also has to handle the opposite case because of its "NOP + Any instruction"
+// row, where the FIRST instruction is the one absorbed; A720 sec. 4.11 has no
+// such row, so there is no first-instruction path here.)
 //
 // Pairing is greedy and non-overlapping, as on A78; since the producer and
 // consumer sets are disjoint for every row modelled here, that is a no-op in
@@ -293,6 +312,13 @@ std::vector<bool> computeA720FusedMask(const llvm::MCInstrInfo &MCII,
         return (i < MCInsts.size()) ? MCInsts[i] : nullptr;
     };
     for (size_t i = 0; i + 1 < SimInstrs.size(); ++i) {
+        llvm::StringRef First = MCII.getName(SimInstrs[i]->getOpcode());
+        llvm::StringRef Second = MCII.getName(SimInstrs[i + 1]->getOpcode());
+        if (isA720ShlSriPair(First, Second) || isA720FcmpAxflagPair(First, Second)) {
+            Fused[i + 1] = true;
+            ++i;
+            continue;
+        }
         A720ProducerInfo P = classifyA720Producer(MCII, *SimInstrs[i], McAt(i));
         if (P.Kind == A720Producer::None)
             continue;

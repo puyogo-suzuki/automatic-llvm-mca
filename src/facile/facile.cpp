@@ -238,7 +238,8 @@ bool isStoreWritebackDef(const llvm::mca::Instruction &Inst, const llvm::mca::Wr
 // instructions, so instruction indices are unchanged.
 std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     const llvm::MCSubtargetInfo &STI,
-    llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs) {
+    llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
+    bool LoopCarried) {
 
     size_t N = SimInstrs.size();
     std::vector<std::vector<DependencyEdge>> Adj(N);
@@ -307,7 +308,10 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
         }
     }
 
-    // Pass 2: Loop-carried dependencies (LastWriter -> FirstReader across iterations)
+    // Pass 2: Loop-carried dependencies (LastWriter -> FirstReader across iterations).
+    // Skipped when the caller says the region is not a recurrence (see
+    // computeFacilePrediction()): then only the intra-iteration edges above remain.
+    if (!LoopCarried) return Adj;
     for (const auto &entry : FirstReader) {
         unsigned Reg = entry.first;
         size_t ReaderIdx = entry.second.first;
@@ -504,7 +508,8 @@ void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
                            llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                            llvm::ArrayRef<const llvm::MCInst *> MCInsts,
                            llvm::ArrayRef<MemAccessInfo> MemInfos,
-                           std::vector<std::vector<DependencyEdge>> &Adj) {
+                           std::vector<std::vector<DependencyEdge>> &Adj,
+                           bool LoopCarried) {
     size_t N = SimInstrs.size();
     if (MemInfos.size() < N || MCInsts.size() < N) return;
 
@@ -591,7 +596,7 @@ void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
             FoundIntra = true;
             break;
         }
-        if (FoundIntra) continue;
+        if (FoundIntra || !LoopCarried) continue;
 
         // Pass 2: loop-carried.  A load with no preceding aliasing store in the
         // region reads a value that, in steady state, the region's LAST
@@ -731,7 +736,8 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts,
                                      unsigned DispatchWidth,
                                      llvm::ArrayRef<MemAccessInfo> MemInfos,
-                                     unsigned MopWidth) {
+                                     unsigned MopWidth,
+                                     bool LoopCarried) {
     FacileResult Res;
     if (SimInstrs.empty()) return Res;
 
@@ -755,9 +761,9 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
 
     // 3. Precedence Constraints Limit
     GFacileMRI = &MRI;
-    auto Adj = buildDependencyGraph(STI, SimInstrs);
+    auto Adj = buildDependencyGraph(STI, SimInstrs, LoopCarried);
     if (!MemInfos.empty())
-        addMemoryDependencies(MCII, MRI, SimInstrs, MCInsts, MemInfos, Adj);
+        addMemoryDependencies(MCII, MRI, SimInstrs, MCInsts, MemInfos, Adj, LoopCarried);
     Res.PrecedenceBound = calculatePrecedenceBound(Adj.size(), Adj);
 
     // 4. Overall Max Bottleneck Prediction

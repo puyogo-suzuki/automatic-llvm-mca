@@ -52,6 +52,16 @@ struct FacileResult {
 // facile.cpp for why this can't be derived from DispatchWidth or from
 // STI.getSchedModel() and must be passed in explicitly. 0 = not known for
 // this CPU, or not applicable (Apple's coalesced-ROB cores) - skips the bound.
+//
+// `LoopCarried` says whether the region repeats as a loop.  When false, the
+// dependence graph has only intra-iteration edges (registers and memory): a
+// register written at the end of the region is NOT taken to feed a read at the
+// start of the next "iteration", which for a function body or other straight-line
+// region is no recurrence at all (the return value of one call is not the
+// argument of the next).  The precedence bound is then 0 and the estimate is the
+// issue / port bound.  mca_tool passes `!ignore`, where `ignore` is the
+// --ignore-loop-carried decision the MCA path already uses (default: a region
+// that is not a loop ignores loop-carried dependences).
 FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      const llvm::MCInstrInfo &MCII,
                                      const llvm::MCRegisterInfo &MRI,
@@ -59,7 +69,8 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
                                      llvm::ArrayRef<const llvm::MCInst *> MCInsts = {},
                                      unsigned DispatchWidth = 0,
                                      llvm::ArrayRef<MemAccessInfo> MemInfos = {},
-                                     unsigned MopWidth = 0);
+                                     unsigned MopWidth = 0,
+                                     bool LoopCarried = true);
 
 void printFacileResult(const FacileResult &Res, llvm::StringRef CPUName, llvm::raw_ostream &OS);
 

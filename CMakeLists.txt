@@ -133,7 +133,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 add_executable(mca_unit_tests tests/mlp_test.cpp tests/splitter_test.cpp tests/facile_test.cpp tests/cpu_traits_test.cpp
-               tests/a55_sog_test.cpp tests/a520_sog_test.cpp tests/a76_sog_test.cpp tests/a78_sog_test.cpp)
+               tests/a55_sog_test.cpp tests/a520_sog_test.cpp tests/a76_sog_test.cpp tests/a78_sog_test.cpp
+               tests/a720_sog_test.cpp)
 target_link_libraries(mca_unit_tests PRIVATE gtest_main mca_common_lib ${llvm_libs})
 
 include(GoogleTest)
