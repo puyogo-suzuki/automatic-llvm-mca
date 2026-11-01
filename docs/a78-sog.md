@@ -442,7 +442,7 @@ the operand and the result in FP registers: [D-4](#d-4). Test: `FpScalar`.
 |---|---|---|
 | Load vector reg, literal; unscaled immed; unsigned immed | 5 / 3 / L | `A78Write_5c_1L` |
 | **Load vector reg, immed post-index / pre-index** | 5 / 3 / L, I | `WriteAdr` + `A78Write_5c_1L` (*fixed 2026-10-31*, `[a78_fp_ld]`; the load took a second I µOP) |
-| **Load vector reg, register offset, basic** | 5 / 3 / L, I | X index without the scale: `A78Write_5c_1I_1L` (*fixed*, `[a78_reg_offset_h]`, [I-4](#i-4); B/S/D had no I, H/Q were 6) |
+| Load vector reg, register offset, basic | 5 / 3 / L, **I** | X index without the scale: `A78Write_5c_1L`, the printed I is not modelled (`[a78_reg_offset_h]`, [I-4](#i-4); B/S/D had no I, H/Q were 6) |
 | Load vector reg, register offset, scale, S/D-form; extend; extend, scale, S/D-form | 5 / 3 / L | `A78Write_5c_1L` (**extend, H/Q** *fixed*: was 6, I, L) |
 | Load vector reg, register offset, scale, H/Q-form; extend, scale, H/Q-form | 6 / 3 / I, L | `A78Write_6c_1I_1L` |
 | Load vector pair, immed offset, S/D; Q: LDP, LDNP | 5 / 3; 5 / 3/2 / L | `A78Write_5c_1L`; `A78Write_5c_2L` + `A78Write_5c_0Z` (*fixed*, [D-10](#d-10): the second register was 4) |
@@ -453,9 +453,10 @@ session had set the A78 latencies, which this audit kept, and its rows for the p
 register-offset forms were corrected as above. The variants are `A78WriteLDRSDroX` (S/D, X index),
 `A78WriteLDRHQroX`, `A78WriteLDRHQroW`; B has no "scale" row, so LDR B with an X index is "basic"
 and with a W index "extend". The research binaries contain 71,860 B/S/D and 2,342 H/Q loads with an
-unscaled X index, 79,965 FP LDP/LDNP with an immediate offset and 677 pre/post-index FP LDP.
+unscaled X index (they take no I µOP, [I-4](#i-4)), 79,965 FP LDP/LDNP with an immediate offset and
+677 pre/post-index FP LDP.
 Measured: three `ldr q, [xN], #16` + branch 1.5 -> 1.0; `ldp d0, d1, [x0]; fadd d1, d1, d1; fmov x0,
-d1` + branch 8.0 -> 9.0; three `ldr d, [x0, xN]` and three `add` + branch 1.17 -> 1.5. Test:
+d1` + branch 8.0 -> 9.0. Test:
 `FpLoadsAndStores`.
 
 <a id="c-17"></a>
@@ -846,8 +847,12 @@ LDRH (l.992-993). Implementation: scale by 2 (the S bit).
 Sec. 3.13 (l.1384-1386, l.1402-1403, checked in the PDF p.30-31): "Load vector reg, register offset,
 basic LDR 5 3 L, I", but "..., extend LDR 5 3 L" and "..., scale, S/D-form 5 3 L"; the integer
 "Load register, register offset, basic" is "L" (l.980-982). An I µOP for the unscaled X index alone
-has no evident reason. Implementation: as printed (C-16), which adds an I µOP to 71,860 B/S/D loads
-in the research binaries. How to settle: hardware measurement.
+has no evident reason. Implementation (decision of 2026-11-01): the I of the "basic" row is taken as
+a misprint and not modelled: LDR B, H, S, D and Q with an unscaled X index are `A78Write_5c_1L` (the
+scaled H/Q rows, "6 I, L", keep their I). Reason: the printed row is not plausible against its
+neighbours (the extend row, the scaled S/D row and the integer basic row have no I), and an I µOP
+that nothing explains would fill the MLP window. How to settle: hardware measurement; if the I is real, `LDR[BSD]ro[WX]` and the unscaled `LDR[HQ]roX`
+take `A78Write_5c_1I_1L` for the X index.
 
 <a id="i-5"></a>
 **I-5. FP register-offset stores, Q-form: "extend, scale" with I, "scale" without.**

@@ -1325,20 +1325,17 @@ def : InstRW<[WriteAdr, A78Write_5c_1L], (instregex "^LDR[BHSDQ](post|pre)$")>;
 def : InstRW<[A78Write_5c_1L], (instregex "^LDR[BHSDQ]ui$")>;
 // [a78_reg_offset_h] docs/a78-sog.md C-16, I-4: register offset (l.1384-1407): "basic" 5 L, I;
 // "scale, S/D-form" 5 L; "scale, H/Q-form" 6 I, L; "extend" 5 L; "extend, scale, S/D-form" 5 L;
-// "extend, scale, H/Q-form" 6 I, L.  Basic = X index without the scale, extend = W index without
-// the scale.  B has no scaled row: B with an X index is "basic", with a W index "extend".
-def A78WriteLDRSDroX : SchedWriteVariant<[
-                         SchedVar<A78IsMemScaled, [A78Write_5c_1L]>,
-                         SchedVar<NoSchedPred,    [A78Write_5c_1I_1L]>]>;
+// "extend, scale, H/Q-form" 6 I, L.  The I of "basic" (the X index without the scale, which the
+// "extend" and "scale, S/D" rows, and the integer "basic" row, do not have) is taken as a misprint
+// and not modelled (I-4, decided 2026-11-01).  B has no scaled row: it is "basic" with an X index,
+// "extend" with a W index.
 def A78WriteLDRHQroX : SchedWriteVariant<[
                          SchedVar<A78IsMemScaled, [A78Write_6c_1I_1L]>,
-                         SchedVar<NoSchedPred,    [A78Write_5c_1I_1L]>]>;
+                         SchedVar<NoSchedPred,    [A78Write_5c_1L]>]>;
 def A78WriteLDRHQroW : SchedWriteVariant<[
                          SchedVar<A78IsMemScaled, [A78Write_6c_1I_1L]>,
                          SchedVar<NoSchedPred,    [A78Write_5c_1L]>]>;
-def : InstRW<[A78Write_5c_1I_1L, ReadAdrBase], (instrs LDRBroX)>;
-def : InstRW<[A78WriteLDRSDroX, ReadAdrBase], (instregex "^LDR[SD]roX$")>;
-def : InstRW<[A78Write_5c_1L, ReadAdrBase], (instregex "^LDR[BSD]roW$")>;
+def : InstRW<[A78Write_5c_1L, ReadAdrBase], (instregex "^LDR[BSD]ro[WX]$")>;
 def : InstRW<[A78WriteLDRHQroX, ReadAdrBase], (instregex "^LDR[HQ]roX$")>;
 def : InstRW<[A78WriteLDRHQroW, ReadAdrBase], (instregex "^LDR[HQ]roW$")>;
 // [a78_ldp_hi] docs/a78-sog.md D-10: the second register of every FP load pair has the row's

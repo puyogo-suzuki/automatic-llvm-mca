@@ -373,11 +373,12 @@ TEST(A78SogTest, FpLoadsAndStores) {
     A78InstInfo Post = a78Desc("ldr q0, [x0], #16");
     EXPECT_EQ(Post.WriteLatencies, (std::vector<unsigned>{1, 5}));
     EXPECT_EQ(Post.ResourceCycles["N2UnitI"], 1u);
-    // Register offset: basic (X, no scale) 5 L, I; scale S/D 5 L; scale H/Q 6 I, L; extend 5 L.
+    // Register offset: basic (X, no scale) 5 L (the printed I is taken as a misprint, I-4); scale S/D 5 L;
+    // scale H/Q 6 I, L; extend 5 L.
     struct Row { const char *Asm; unsigned Lat; unsigned I; };
-    for (const Row &R : {Row{"ldr d0, [x0, x1]", 5, 1}, Row{"ldr b0, [x0, x1]", 5, 1},
+    for (const Row &R : {Row{"ldr d0, [x0, x1]", 5, 0}, Row{"ldr b0, [x0, x1]", 5, 0},
                          Row{"ldr d0, [x0, x1, lsl #3]", 5, 0}, Row{"ldr s0, [x0, w1, uxtw]", 5, 0},
-                         Row{"ldr q0, [x0, x1]", 5, 1}, Row{"ldr q0, [x0, x1, lsl #4]", 6, 1},
+                         Row{"ldr q0, [x0, x1]", 5, 0}, Row{"ldr q0, [x0, x1, lsl #4]", 6, 1},
                          Row{"ldr q0, [x0, w1, sxtw]", 5, 0}, Row{"ldr h0, [x0, w1, sxtw #1]", 6, 1}}) {
         A78InstInfo I = a78Desc(R.Asm);
         EXPECT_EQ(I.MaxLatency, R.Lat) << R.Asm;
