@@ -1,6 +1,6 @@
 # automatic-llvm-mca Technical Documentation
 
-This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here. The Cortex-A55 model and its conformance to the Arm Cortex-A55 Software Optimization Guide are described separately in [a55-sog.md](a55-sog.md), the Cortex-A520, Cortex-A76 and Cortex-A78 ones in [a520-sog.md](a520-sog.md), [a76-sog.md](a76-sog.md) and [a78-sog.md](a78-sog.md); [README.md](README.md) lists the documents.
+This document provides an exhaustive technical overview of the processor scheduling model custom adaptations, the C++ simulation pipeline modifications, and the static Memory Level Parallelism (MLP) calculation methodology implemented here. The Cortex-A55 model and its conformance to the Arm Cortex-A55 Software Optimization Guide are described separately in [a55-sog.md](a55-sog.md), the Cortex-A520, Cortex-A76, Cortex-A78 and Cortex-X1 ones in [a520-sog.md](a520-sog.md), [a76-sog.md](a76-sog.md), [a78-sog.md](a78-sog.md) and [x1-sog.md](x1-sog.md); [README.md](README.md) lists the documents.
 
 ---
 
@@ -36,20 +36,7 @@ The Cortex-X1 runs on `AArch64SchedNeoverseV1.td`. That file is compiled into th
 
 The decode width and the scheduler size are not in the SOG; they were supplied by the project owner. They are not modelled for the same reasons as for the A78 (whose 4-wide decode and scheduler size are likewise absent from `AArch64SchedNeoverseN2.td`): neither `MCSchedModel` nor MCA has a decode stage, and the tool bounds hot-loop front-end throughput by the rename/dispatch width. MCA's only handle for scheduler entries is a per-`ProcResource` `BufferSize`, i.e. one queue per pipe or group, and nothing says how the 150 entries are split over the fifteen issue pipelines; inventing a split would add stalls the hardware need not have, so the queues stay unbounded and the ROB is the only window limit.
 
-**Differences from the stock V1 model that follow the X1 SOG** (Software Optimization Guide table numbers in parentheses):
-
-* AES (`AESD/AESE/AESMC/AESIMC`): V01, 2 per cycle (Table 3-34). Stock V1 uses the 4-wide V group.
-* `LDPSW`: one I uop and two L slots, 1.5 per cycle (Table 3-12). Expressed as occupancy so `NumMicroOps` stays 2.
-* `FCSEL`: V02 (Table 3-16). `FCVT[AMNPZ][SU]` FP to GPR: V02 but one per cycle (Table 3-18), expressed as a two-cycle occupancy of the V02 group.
-* `SDOT/UDOT`: latency 2 with accumulator forwarding 1 (Table 3-24).
-* `SQSHRUN`: the stock regular expression `^SQSHU?RNv` cannot match `SQSHRUN`; it now falls in the "shift by immed, complex" row (V13, latency 4).
-* `TBL` (1-2 table registers) and `TBX` (1 table register): a single V01 uop, 2 per cycle (Table 3-28).
-* `PMULL` (64x64): V01, latency 2, 2 per cycle. `SHA1SU0` / `SHA256SU1` three-register forms: V0 (the stock regular expressions only matched the two-register forms).
-* High half of `LDPW`/`LDPSW`/`LDP[SD]`: latency of the load itself, zero uops (`V1Write_{4,5,6}c_0Z`). Stock V1 uses `V1Write_0c_0Z` (latency 0), which cannot be told apart from a rename-time zero-latency MOV (see section 4.B) and would make the high half free.
-
-Facile-side X1 behaviour: the fusion table is the A78 table without the CMP + CSEL/CSET rows, and the zero-latency MOV list is the A78's (sections 4.B and 4.C). The Cortex-A78 changes of section 4.D are made in the A78's own model file and do not reach the X1.
-
-The model was compared against the X1 SOG tables with `tools/sog_compare.py` (see the README). Differences that were left as they are: `SMADDL`-family throughput (the SOG prints throughput 2 for the single M0 pipe), `LD4` Q-form throughput (SOG 1/2, model about 3/4 per cycle), `EXTR` with two distinct source registers (SOG: 3 cycles, I and M; model: 1 cycle, I), and the data-side pipes of ASIMD stores (the SOG table says V, its Table 2-1 says only V0/V1 take store data; the model follows Table 2-1).
+The model's rows were compared with the Cortex-X1 Software Optimization Guide item by item in [x1-sog.md](x1-sog.md), which lists every difference from the stock V1 model, the corrections made on top of it (tagged `[x1_...]` in the `.td`), the deviations and the open questions. The ROB size of 224 and the decode width and scheduler size above are discussed there as U-1 and D-12. Facile-side X1 behaviour: the fusion table is the A78 table without the CMP + CSEL/CSET rows, and the zero-latency MOV list is the A78's (sections 4.B and 4.C; x1-sog.md C-4, C-5). The Cortex-A78 changes of section 4.D are made in the A78's own model file and do not reach the X1.
 
 ## 2. LLVM MCA Simulation & Steady-State Estimation
 
@@ -230,7 +217,8 @@ The floor is right for every other write (a dependent operation cannot issue in 
         word for word A78's list (MOV Xd/Wd,#0; MOV Xd/Wd,XZR/WZR;
         MOV Wd,Wn; MOV Xd,Xn), and AArch64SchedNeoverseV1.td, the model
         installed for it, has V1Write_0c as the zero-move arm of two
-        SchedWriteVariants (MOVZ[WX]i, ORR[WX]rs) exactly as N2 does.
+        SchedWriteVariants (MOVZ[WX]i, ORR[WX]rs) exactly as N2 does
+        (x1-sog.md C-4).
         V1 ALSO has the N1-style trap above - V1Write_0c_0Z, the
         Latency-0 second write of LDPW/LDPSW/LDP[SD] - so the X1 model
         replaces it with V1Write_{4,5,6}c_0Z (same latency as the load,
@@ -294,7 +282,9 @@ CMP/CMN/TST are flag-setting SUBS/ADDS/ANDS with a discarded (WZR/XZR) destinati
 
 NOT MODELLED HERE, DELIBERATELY: sec. 4.14's SECOND list ("The following instruction pairs are fused in both Aarch32 and Aarch64 modes: 1. AESE + AESMC, 2. AESD + AESIMC (see Section 4.6 on AES Encryption/Decryption)"). That cross-reference resolves to sec. 4.7 "AES encryption/decryption", which states "Cortex-A78 can issue TWO AESE/AESMC/AESD/AESIMC instruction every cycle (fully pipelined) with an execution latency of two cycles" and "Pairs of dependent AESE/AESMC and AESD/AESIMC instructions exhibit higher performance when they are adjacent in the program code and both instructions use the same destination register".  So the AES "fusion" is a LATENCY / forwarding effect on a dependent pair, not the issue-slot and port elimination that FusedMask expresses: both halves still occupy V-pipe throughput (two AES instructions per cycle, per the quote), so masking the second one out of calculatePortUsageBound() would claim four AES instructions per cycle and contradict the SOG.  Wiring it through this mask would therefore be a modelling error, not a fix.
 
-#### Cortex-X1 (SOG "Instruction fusion")
+#### Cortex-X1 (SOG sec. 4.14)
+
+The row-by-row comparison with the SOG and the open questions are in [x1-sog.md](x1-sog.md) C-5, D-11, U-6 and U-11.
 
 Cortex-X1 SOG (PJDOC-466751330-12804 Issue 4.0) "Instruction fusion" prints a STRICT SUBSET of A78 sec. 4.14:
 
@@ -400,7 +390,7 @@ The A720 SOG lists FMADD/FMSUB/FNMADD/FNMSUB and ASIMD FMLA/FMLS/FMLAL/FMLSL as 
 
 The SOGs give FP divide and square root a latency and a throughput that depend on the operands for the Neoverse-derived cores (A76/A78/X1: ranges such as "7 to 15" and "1/7 to 2/7" per form) and a fixed value per form for the A720. The model has one latency and one occupancy per `SchedWriteRes`, so a range needs one chosen value. Every form has its own write (`N1WriteFDS_*`, `N2WriteFDS_*`, `V1WriteFDS_*`, `A720Write_*`), listed next to the `InstRW` rows with the SOG values they come from.
 
-* **A76 (N1), A78 (N2), X1 (V1)**: the BEST of each range. Latency: the shortest (7 for the scalar and 2S/4S/2D ASIMD forms; Q-form F16 FDIV 10 and FSQRT 11, where the SOG ranges "10 to 13" and "11 to 13" start). Occupancy: the unit is busy for ceil(1 / best throughput) cycles. For the X1, whose SOG throughput is for the V0/V2 pair, the occupancy of one unit is ceil(2 / best throughput), so the instruction time is the same as on the A76 up to the pair. Examples (A76/A78): scalar H and S 4/7 -> 2, scalar D 2/7 -> 4; ASIMD D-form F32 2/7 -> 4, Q-form F32 and F64 1/7 -> 7, Q-form F16 1/10 (FDIV) and 1/11 (FSQRT) -> 10 and 11. The uOP counts of the A78 writes are those of the N2 writes they replace. The X1 SVE classes `V1Write_*_1V0` are not touched. On the A76 and the A78 the occupancy is held on an FP divide unit of its own (`N1UnitFDiv`, `A78UnitFDiv`), V0 only one cycle ([a76-sog.md](a76-sog.md) D-3, [a78-sog.md](a78-sog.md) D-3).
+* **A76 (N1), A78 (N2), X1 (V1)**: the BEST of each range. Latency: the shortest (7 for the scalar and 2S/4S/2D ASIMD forms; Q-form F16 FDIV 10 and FSQRT 11, where the SOG ranges "10 to 13" and "11 to 13" start). Occupancy: the unit is busy for ceil(1 / best throughput) cycles. For the X1, whose SOG throughput is for the V0/V2 pair, the occupancy of one unit is ceil(2 / best throughput), so the instruction time is the same as on the A76 up to the pair. Examples (A76/A78): scalar H and S 4/7 -> 2, scalar D 2/7 -> 4; ASIMD D-form F32 2/7 -> 4, Q-form F32 and F64 1/7 -> 7, Q-form F16 1/10 (FDIV) and 1/11 (FSQRT) -> 10 and 11. The uOP counts of the A78 writes are those of the N2 writes they replace. On the A76, the A78 and the X1 the occupancy is held on an FP divide unit of its own (`N1UnitFDiv`, `A78UnitFDiv`; `X1UnitFDiv` with two units, one in V0 and one in V2), the pipeline only one cycle ([a76-sog.md](a76-sog.md) D-3, [a78-sog.md](a78-sog.md) D-3, [x1-sog.md](x1-sog.md) D-3).
 * **A720**: one latency per form, as in the SOG: scalar H 5, S 7, D 12 and ASIMD D-form F16 8, D-form F32 8, Q-form F16 12, Q-form F32 10, Q-form F64 13, for FDIV and FSQRT alike. The scalar throughput is 1 ("fully pipelined"), so the unit is busy one cycle. The ASIMD table's throughput column (1/4, 1/2, 1/8 -> occupancy 4, 2, 8) contradicts the note under it ("fully pipelined"); the table is used as printed ([a720-sog.md](a720-sog.md) C-15, C-20, I-2).
 * **Apple (firestorm, icestorm)**: one latency per form from Dougall Johnson's tables (scalar H/S/D and vector 4H/8H/2S/4S/2D), replacing the single worst-case value. Port and occupancy are as before (Apple is not in a SOG).
 

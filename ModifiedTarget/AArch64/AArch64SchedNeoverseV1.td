@@ -19,19 +19,24 @@
 //===----------------------------------------------------------------------===//
 
 // LOCAL USE: compiled into the tool's own tables and installed ONLY for
-// cortex-x1 / cortex-x1c (neoverse-v1 keeps libLLVM's stock model), so the machine
-// parameters below are the Cortex-X1's.  Issue width 16 uOPs/cycle, ROB 224; the
-// 8-Mop rename width lives in cpu_traits.cpp; decode width (5) and scheduler
-// entries (150) are not modelled.  See docs/docs.md section 1.B.
+// cortex-x1 / cortex-x1c (src/cpu/cpu_traits.cpp, CpuModel::X1); neoverse-v1 and
+// neoverse-512tvb, which LLVM also maps to NeoverseV1Model, keep libLLVM's stock model.
+// So the machine parameters and the rows below are the Cortex-X1's: they follow the
+// Cortex-X1 Core Software Optimization Guide (PJDOC-466751330-12804, Issue 4.0).
+// docs/x1-sog.md compares them item by item; the tags [x1_...] name the items
+// (docs/x1-sog.md section 2.4).  Issue width 16 uOPs/cycle; the 8-Mop rename width
+// lives in cpu_traits.cpp; decode width (5) and scheduler entries (150) are not
+// modelled (docs/x1-sog.md U-1, D-12).
 def NeoverseV1Model : SchedMachineModel {
   let IssueWidth            =  16; // uOPs dispatched per cycle (X1 SOG sec. 4.1).
-  let MicroOpBufferSize     = 224; // Cortex-X1 re-order buffer.
+  let MicroOpBufferSize     = 224; // Cortex-X1 re-order buffer (owner's value, docs/x1-sog.md U-1).
   let LoadLatency           =   4; // Optimistic load latency.
   let MispredictPenalty     =  11; // Cycles cost of branch mispredicted.
   let LoopMicroOpBufferSize =  16; // NOTE: Copied from Cortex-A57.
   let CompleteModel         =   1;
 
-  list<Predicate> UnsupportedFeatures = !listconcat(SVE2Unsupported.F,
+  // [x1_sve] docs/x1-sog.md D-8: no SVE on the Cortex-X1.
+  list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
                                                     SMEUnsupported.F,
                                                     [HasMTE, HasCPA,
                                                     HasCSSC, HasMOPS, HasMOPS_GO]);
@@ -72,6 +77,16 @@ def V1UnitV01 : ProcResGroup<[V1UnitV0, V1UnitV1]>;   // FP/ASIMD 0/1 units
 def V1UnitV02 : ProcResGroup<[V1UnitV0, V1UnitV2]>;   // FP/ASIMD 0/2 units
 def V1UnitV13 : ProcResGroup<[V1UnitV1, V1UnitV3]>;   // FP/ASIMD 1/3 units
 
+// [x1_dividers] docs/x1-sog.md D-3: the iterative dividers.  An integer divide "block[s] any
+// subsequent divide operations until complete" (sec. 3.6 note 1, l.791-792) and an FP divide /
+// square root blocks "subsequent similar operations to the same pipeline until complete"
+// (l.1295-1296, l.1931-1932); every issue pipeline "can accept one µOP per cycle" (l.388-389).  So
+// a divide takes its pipeline (M0; V0 or V2) for one cycle and holds a divider, not the pipeline,
+// for its occupancy (the decision of the Cortex-A78, docs/a78-sog.md D-3).  FP divide and square
+// root issue to V0 and V2 ("V02", l.1217-1245, Table 2-1 l.469-474): one divider in each.
+def X1UnitIDiv : ProcResource<1>;  // integer divider, in the M0 pipeline
+def X1UnitFDiv : ProcResource<2>;  // FP divide / square root units, in the V0 and V2 pipelines
+
 // Define commonly used read types.
 
 // No generic forwarding is provided for these types.
@@ -83,7 +98,14 @@ def : ReadAdvance<ReadIMA,     0>;
 def : ReadAdvance<ReadID,      0>;
 def : ReadAdvance<ReadExtrHi,  0>;
 def : ReadAdvance<ReadAdrBase, 0>;
-def : ReadAdvance<ReadST,      0>;
+// [x1_from_a55_store_data] docs/x1-sog.md B-1: the data operand of a store is read one cycle late
+// (advance 1 from every producer).  The X1 SOG says only that stores are split into address and
+// data µOPs (l.1106-1107, l.1460, l.2260); it gives no operand timing.  This is the project's
+// decision for the Cortex-A55 / A520, applied to the Cortex-A76, A78 and A720 for consistency
+// (docs/a78-sog.md B-1), and applied here likewise: ReadST is attached to the data operands of
+// every store form (STXR/STXP and the atomics excepted, as there).  NOT SOG-based.  It acts only
+// on Facile's store -> load memory edges.
+def : ReadAdvance<ReadST,      1>;
 def : ReadAdvance<ReadVLD,     0>;
 
 def : WriteRes<WriteAtomic,  []> { let Unsupported = 1; }
@@ -99,23 +121,24 @@ def V1Write_0c_0Z : SchedWriteRes<[]>;
 
 def V1Write_0c : SchedWriteRes<[]> { let Latency = 0; }
 
-// LDPSW: X1 SOG Table 3-12/3-13 "LDPSW  5, 1.5, I, L" - one I uOP and TWO L
-// issue slots per instruction (1.5 per cycle over the three L pipes).  Stock V1
-// models a single L slot (3 per cycle).  Expressed as occupancy, not as an extra
-// uOP, so NumMicroOps stays 2 (the same correction the A78 gets in facile.cpp).
+// [x1_ldpsw] docs/x1-sog.md C-12: "Load pair, signed immed offset, signed words LDPSW
+// 5 1.5 I, L" (l.1002-1003, l.1023-1024): one I uOP and the load pipes held two cycles
+// (1.5 per cycle over the three L pipes).  Stock V1 models a single L slot (3 per
+// cycle).  Expressed as occupancy, not as an extra uOP, so NumMicroOps stays 2.
 def V1Write_5c_1I_2L : SchedWriteRes<[V1UnitI, V1UnitL]> {
   let Latency = 5;
   let NumMicroOps = 2;
   let ReleaseAtCycles = [1, 2];
 }
 
-// Second (high) destination of a load pair that shares the first write's L
-// micro-op: no extra uOP and no resource, but the register is NOT available at
-// cycle 0 - it comes out of the same L1 access as the low half.  Stock V1 uses
-// V1Write_0c_0Z (Latency 0) here, which is indistinguishable from a
-// rename-time zero-latency MOV once facile trusts Latency == 0 for the X1
-// (facile.cpp: isZeroLatencyMovTarget()), and would make the high half of
-// LDPW/LDPSW/LDP[SD] free.  Give it the latency of the load instead.
+// [x1_ldp_hi] docs/x1-sog.md D-10: second (high) destination of a load pair that
+// shares the first write's L micro-op: no extra uOP and no resource, but the register
+// is NOT available at cycle 0 - it comes out of the same L1 access as the low half
+// ("the maximum latency to load all the registers written by the instruction",
+// l.961-962, l.1375-1376).  Stock V1 uses V1Write_0c_0Z (Latency 0) here, which is
+// indistinguishable from a rename-time zero-latency MOV once facile trusts
+// Latency == 0 for the X1 (facile.cpp: isZeroLatencyMovTarget()), and would make the
+// high half of LDPW/LDPSW/LDP[SDQ] free.  Give it the latency of the load instead.
 let Latency = 4, NumMicroOps = 0 in
 def V1Write_4c_0Z : SchedWriteRes<[]>;
 let Latency = 5, NumMicroOps = 0 in
@@ -142,14 +165,11 @@ def V1Write_1c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 1; }
 def V1Write_2c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 2; }
 def V1Write_3c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 3; }
 def V1Write_5c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; }
-def V1Write_12c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 12;
-                                                      let ReleaseAtCycles = [5]; }
-// def V1Write_12c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; // Best latency from SOG (5 to 12 cycles)
-//                                                       let ReleaseAtCycles = [5]; }
-def V1Write_20c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 20;
-                                                      let ReleaseAtCycles = [5]; }
-// def V1Write_20c5_1M0   : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; // Best latency from SOG (5 to 20 cycles)
-//                                                       let ReleaseAtCycles = [5]; }
+// [x1_div_best] docs/x1-sog.md C-10, D-1, D-3: integer divide, the best value of "5 to 12,
+// 1/12 to 1/5" (W) and "5 to 20, 1/20 to 1/5" (X) (l.703-704): latency 5, M0 one cycle, the
+// divider held 5 cycles.  (Stock V1: latency 12 / 20 with M0 held 5 cycles.)
+def X1Write_5c_1M0_IDiv : SchedWriteRes<[V1UnitM0, X1UnitIDiv]> { let Latency = 5;
+                                                                 let ReleaseAtCycles = [1, 5]; }
 def V1Write_2c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 2; }
 def V1Write_3c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 3; }
 def V1Write_4c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 4; }
@@ -158,26 +178,6 @@ def V1Write_2c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 2; }
 def V1Write_3c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 3; }
 def V1Write_4c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 4; }
 def V1Write_6c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 6; }
-def V1Write_10c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 10;
-                                                      let ReleaseAtCycles = [7]; }
-// def V1Write_10c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 7; // Best latency from SOG (7 to 10 cycles)
-//                                                       let ReleaseAtCycles = [7]; }
-def V1Write_12c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 12;
-                                                      let ReleaseAtCycles = [7]; }
-def V1Write_13c10_1V0  : SchedWriteRes<[V1UnitV0]>  { let Latency = 13;
-                                                      let ReleaseAtCycles = [10]; }
-// def V1Write_13c10_1V0  : SchedWriteRes<[V1UnitV0]>  { let Latency = 10; // Best latency from SOG (10 to 13/11 to 13 cycles)
-//                                                       let ReleaseAtCycles = [10]; }
-def V1Write_15c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 15;
-                                                      let ReleaseAtCycles = [7]; }
-// def V1Write_15c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 7; // Best latency from SOG (7 to 15 cycles)
-//                                                       let ReleaseAtCycles = [7]; }
-def V1Write_16c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 16;
-                                                      let ReleaseAtCycles = [7]; }
-// def V1Write_16c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 7; // Best latency from SOG (7 to 17 cycles)
-//                                                       let ReleaseAtCycles = [7]; }
-def V1Write_20c7_1V0   : SchedWriteRes<[V1UnitV0]>  { let Latency = 20;
-                                                      let ReleaseAtCycles = [7]; }
 def V1Write_2c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 2; }
 def V1Write_3c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 3; }
 def V1Write_4c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 4; }
@@ -185,14 +185,12 @@ def V1Write_5c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 5; }
 def V1Write_2c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 2; }
 def V1Write_3c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 3; }
 def V1Write_4c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
-def V1Write_7c7_1V02   : SchedWriteRes<[V1UnitV02]> { let Latency = 7;
-                                                      let ReleaseAtCycles = [7]; }
 // FP divide / square root (scalar and ASIMD): every form has its own write
 // ("V1WriteFDS_<lat>c<occ>", next to the InstRW rows).  V1Write_10c7_1V02 is only the
-// WriteFDiv fallback for a form with no row.  (The V1Write_*_1V0 classes above are used
-// by SVE only and are left alone.)
-def V1Write_10c7_1V02  : SchedWriteRes<[V1UnitV02]> { let Latency = 7;
-                                                      let ReleaseAtCycles = [7]; }
+// WriteFDiv fallback for a form with no row.  [x1_dividers] D-3: V02 one cycle, the
+// occupancy on an FP divide unit.
+def V1Write_10c7_1V02  : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;
+                                                                  let ReleaseAtCycles = [1, 7]; }
 def V1Write_2c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 2; }
 def V1Write_3c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 3; }
 def V1Write_4c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 4; }
@@ -516,9 +514,73 @@ def V1Write_0or1c_1I : SchedWriteVariant<[
                       SchedVar<NeoverseZeroMove, [V1Write_0c]>,
                       SchedVar<NoSchedPred,      [V1Write_1c_1I]>]>;
 
-def V1Write_0or3c_1M0 : SchedWriteVariant<[
-                      SchedVar<NeoverseZeroMove, [V1Write_0c]>,
-                      SchedVar<NoSchedPred,      [V1Write_3c_1M0]>]>;
+//===----------------------------------------------------------------------===//
+// Cortex-X1 writes and predicates (docs/x1-sog.md).  Each is used by the rows below that
+// name its tag.
+
+// [x1_extr] C-11: "Bitfield extract, one reg EXTR 1 4 I", note 1: "One reg form is when Rn==Rm
+// or imm==0, all other forms are considered two regs" (l.890-891, l.903).  The stock
+// IsRORImmIdiomPred checks only Rn == Rm.
+def X1IsExtrOneRegPred : MCSchedPredicate<
+                           CheckAll<[CheckOpcode<[EXTRWrri, EXTRXrri]>,
+                                     CheckAny<[CheckSameRegOperand<1, 2>,
+                                               CheckImmOperand<3, 0>]>]>>;
+// [x1_reg_offset_h] [x1_store_rows] "Scaled" = the S bit of the register-offset addressing mode
+// (AArch64_AM::getMemDoShift), as for the Cortex-A76, A78 and A720.
+def X1IsMemScaled : MCSchedPredicate<CheckMemScaled>;
+
+// [x1_logical_flagset] C-9: "ALU, basic, flagset ... ANDS, BICS 1 3 I" (l.565-567) for the
+// unshifted register form, "Logical, shift, flagset ANDS, BICS 2 2 M" (l.590) for a shift.
+def X1Write_LogicalS : SchedWriteVariant<[
+                         SchedVar<NeoverseNoLSL, [V1Write_1c_1I_1Flg]>,
+                         SchedVar<NoSchedPred,   [V1Write_2c_1M_1Flg]>]>;
+
+// [x1_store_rows] C-13, C-17: register-offset stores with an I µOP.
+def X1Write_2c_1I_1L01_1D : SchedWriteRes<[V1UnitI, V1UnitL01, V1UnitD]> { let Latency = 2;
+                                                                         let NumMicroOps = 3; }
+
+// [x1_v_throughput] C-19, C-20, D-2: a V-pipe row whose throughput T is below what its µOPs
+// give: the group held n/T cycles in total (n = 4 for V, 2 for V02; D-2); the µOP count is
+// that of the write it replaces.
+class X1WriteV<int lat, int uops, int vcyc> : SchedWriteRes<[V1UnitV]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [vcyc];
+}
+class X1WriteV02<int lat, int uops, int vcyc> : SchedWriteRes<[V1UnitV02]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [vcyc];
+}
+
+// [x1_ls_throughput] C-21, C-22, D-6: a load or store whose throughput T is below what its µOPs
+// give on the three load pipes L (two store pipes L01).  The µOP count and the V cycles are those
+// of the write it replaces; the L (L01) pipes are held 3/T (2/T, rounded up) cycles in total.
+// Which pipeline limits is not stated; L is taken, as for the Cortex-A76 and A78.
+class X1WriteLDV<int lat, int uops, int lcyc, int vcyc> : SchedWriteRes<[V1UnitL, V1UnitV]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [lcyc, vcyc];
+}
+class X1WriteSTV<int lat, int uops, int lcyc, int vcyc> : SchedWriteRes<[V1UnitL01, V1UnitV01]> {
+  let Latency = lat;
+  let NumMicroOps = uops;
+  let ReleaseAtCycles = [lcyc, vcyc];
+}
+
+// [x1_pac_hint] D-13: the pointer-authentication instructions of the HINT space are NOPs on a
+// core without FEAT_PAuth.  The X1 implements Armv8.2-A with RAS, LDAPR and the dot product
+// (sec. 2, l.373-376), no pointer authentication, and its SOG has no PAC row; LLVM gives cortex-x1
+// no PAuth feature, cortex-x1c has it.  Without the feature they take the NOP treatment (WriteHint:
+// no pipeline, C-3); with it (cortex-x1c, no X1C SOG consulted, U-12) the stock Neoverse V1 rows.
+def X1HasPAuth : FeatureSchedPredicate<FeaturePAuth>;
+def X1Write_Hint : SchedWriteRes<[]> { let Latency = 1; }
+def X1Write_PACHint : SchedWriteVariant<[
+                        SchedVar<X1HasPAuth,  [V1Write_5c_1M0]>,
+                        SchedVar<NoSchedPred, [X1Write_Hint]>]>;
+def X1Write_XPACHint : SchedWriteVariant<[
+                         SchedVar<X1HasPAuth,  [V1Write_2c_1M0]>,
+                         SchedVar<NoSchedPred, [X1Write_Hint]>]>;
 
 //===----------------------------------------------------------------------===//
 // Define forwarded types
@@ -530,7 +592,17 @@ def V1Wr_IMA  : SchedWriteRes<[V1UnitM0]> { let Latency = 2; }
 def V1WriteIM : SchedWriteVariant<
                   [SchedVar<NeoverseMULIdiomPred, [V1Wr_IM]>,
                    SchedVar<NoSchedPred,          [V1Wr_IMA]>]>;
-def V1Rd_IMA : SchedReadAdvance<1, [V1Wr_IMA]>;
+// [x1_maddl] docs/x1-sog.md C-10, I-5, U-5: "Multiply accumulate long SMADDL, SMSUBL, UMADDL,
+// UMSUBL 2(1) 2 M0" (l.708-709): a throughput of 2 on the single M0 pipe is not possible; the
+// row is taken as the Cortex-A78's sibling row "2(1) 2 M" (on both M pipes), the lower estimate.
+// The zero-accumulator forms (SMULL, UMULL, SMNEGL, UMNEGL: "Multiply long 2 2 M", l.711-712)
+// stay V1Wr_IM.  The accumulator forwarding (note 2, l.793-795) is taken to work from either kind
+// to either kind (as for the A78, U-5).
+def X1Wr_IMAL  : SchedWriteRes<[V1UnitM]> { let Latency = 2; }
+def X1WriteIML : SchedWriteVariant<
+                   [SchedVar<NeoverseMULIdiomPred, [V1Wr_IM]>,
+                    SchedVar<NoSchedPred,          [X1Wr_IMAL]>]>;
+def V1Rd_IMA : SchedReadAdvance<1, [V1Wr_IMA, X1Wr_IMAL]>;
 
 def V1Wr_FMA : SchedWriteRes<[V1UnitV]> { let Latency = 4; }
 def V1Rd_FMA : SchedReadAdvance<2, [WriteFMul, V1Wr_FMA]>;
@@ -575,35 +647,6 @@ def V1Rd_BFMLA : SchedReadAdvance<2, [V1Wr_BFMLA]>;
 
 def V1Wr_CRC : SchedWriteRes<[V1UnitM0]> { let Latency = 2; }
 def V1Rd_CRC : SchedReadAdvance<1, [V1Wr_CRC]>;
-
-def V1Wr_ZDOTB : SchedWriteRes<[V1UnitV01]> { let Latency = 3; }
-def V1Rd_ZDOTB : SchedReadAdvance<2, [V1Wr_ZDOTB]>;
-
-def V1Wr_ZUDOTB : SchedWriteRes<[V1UnitV]> { let Latency = 3; }
-def V1Rd_ZUDOTB : SchedReadAdvance<2, [V1Wr_ZUDOTB]>;
-
-def V1Wr_ZDOTH : SchedWriteRes<[V1UnitV0]> { let Latency = 4; }
-def V1Rd_ZDOTH : SchedReadAdvance<3, [V1Wr_ZDOTH]>;
-
-def V1Wr_ZMMA : SchedWriteRes<[V1UnitV01]> { let Latency = 3; }
-def V1Rd_ZMMA : SchedReadAdvance<2, [V1Wr_ZMMA]>;
-
-let Latency = 5, NumMicroOps = 2 in
-def V1Wr_ZMAD : SchedWriteRes<[V1UnitV0, V1UnitV0]>;
-def V1Rd_ZMAD : SchedReadAdvance<3, [V1Wr_ZMAD]>;
-
-def V1Wr_ZFCMA : SchedWriteRes<[V1UnitV01]> { let Latency = 5; }
-def V1Rd_ZFCMA : SchedReadAdvance<3, [V1Wr_ZFCMA]>;
-
-def V1Wr_ZFMA : SchedWriteRes<[V1UnitV01]> { let Latency = 4; }
-def V1Rd_ZFMA : SchedReadAdvance<2, [V1Wr_ZFMA]>;
-
-def V1Wr_ZBFDOT : SchedWriteRes<[V1UnitV01]> { let Latency = 4; }
-def V1Rd_ZBFDOT : SchedReadAdvance<2, [V1Wr_ZBFDOT]>;
-def V1Wr_ZBFMMA : SchedWriteRes<[V1UnitV01]> { let Latency = 5; }
-def V1Rd_ZBFMMA : SchedReadAdvance<2, [V1Wr_ZBFMMA]>;
-def V1Wr_ZBFMAL : SchedWriteRes<[V1UnitV01]> { let Latency = 5; }
-def V1Rd_ZBFMAL : SchedReadAdvance<3, [V1Wr_ZBFMAL]>;
 
 // Miscellaneous Instructions
 // -----------------------------------------------------------------------------
@@ -667,14 +710,23 @@ def V1WriteISRegS : SchedWriteVariant<
                       [SchedVar<IsCheapLSL,  [V1Write_1c_1I_1Flg]>,
                        SchedVar<NoSchedPred, [V1Write_2c_1M_1Flg]>]>;
 def               : InstRW<[V1WriteISRegS],
-                           (instregex "^(ADD|SUB)S(([WX]r[sx])|Xrx64)$")>;
+                           (instregex "^(ADD|SUB)S[WX]rs$")>;
+
+// [x1_ext_flagset] docs/x1-sog.md C-9, U-4: "ALU, extend and shift ADD{S}, SUB{S} 2 2 M"
+// (l.568) for every extended-register form, as the non-flag-setting forms (WriteIEReg).  The
+// IsCheapLSL variant used before read the extend operand as a shift, so UXTB (extend operand 0)
+// got the basic row (1, I).
+def               : InstRW<[V1Write_2c_1M_1Flg],
+                           (instregex "^(ADD|SUB)S[WX]rx(64)?$")>;
 
 // Logical, shift, no flagset
 def : InstRW<[V1Write_1c_1I], (instregex "^(AND|BIC|EON|EOR|ORN)[WX]rs$")>;
 def : InstRW<[V1Write_0or1c_1I], (instregex "^ORR[WX]rs$")>;
 
 // Logical, shift, flagset
-def : InstRW<[V1Write_2c_1M_1Flg], (instregex "^(AND|BIC)S[WX]rs$")>;
+// [x1_logical_flagset] docs/x1-sog.md C-9: the unshifted register form (TST, ANDS, BICS
+// Rd, Rn, Rm) is "ALU, basic, flagset" (1 3 I); it used to be 2 on M like the shifted forms.
+def : InstRW<[X1Write_LogicalS], (instregex "^(AND|BIC)S[WX]rs$")>;
 
 // Flag manipulation instructions
 def : InstRW<[V1Write_1c_1I_1Flg], (instrs SETF8, SETF16, RMIF, CFINV)>;
@@ -684,8 +736,10 @@ def : InstRW<[V1Write_1c_1I_1Flg], (instrs SETF8, SETF16, RMIF, CFINV)>;
 // -----------------------------------------------------------------------------
 
 // Divide
-def : SchedAlias<WriteID32, V1Write_12c5_1M0>;
-def : SchedAlias<WriteID64, V1Write_20c5_1M0>;
+// [x1_div_best] docs/x1-sog.md C-10, D-1, D-3: latency 5, M0 one cycle, the divider held 5 cycles
+// (the best value of each range).
+def : SchedAlias<WriteID32, X1Write_5c_1M0_IDiv>;
+def : SchedAlias<WriteID64, X1Write_5c_1M0_IDiv>;
 
 def : SchedAlias<WriteIM32, V1Write_2c_1M>;
 def : SchedAlias<WriteIM64, V1Write_2c_1M>;
@@ -698,7 +752,8 @@ def : InstRW<[V1WriteIM, ReadIM, ReadIM, V1Rd_IMA],
 
 // Multiply accumulate long
 // Multiply long
-def : InstRW<[V1WriteIM, ReadIM, ReadIM, V1Rd_IMA],
+// [x1_maddl] on M, 2 per cycle (I-5).
+def : InstRW<[X1WriteIML, ReadIM, ReadIM, V1Rd_IMA],
              (instregex "^(S|U)M(ADD|SUB)Lrrr$")>;
 // Multiply high
 def : InstRW<[V1Write_3c_1M, ReadIM, ReadIM], (instrs SMULHrr, UMULHrr)>;
@@ -712,8 +767,13 @@ def : InstRW<[V1Write_3c_1M, ReadIM, ReadIM], (instrs SMULHrr, UMULHrr)>;
 // Compute pointer authentication code for data address
 // Compute pointer authentication code, using generic key
 // Compute pointer authentication code for instruction address
-def : InstRW<[V1Write_5c_1M0], (instregex "^AUT",
-                                          "^PAC")>;
+def : InstRW<[V1Write_5c_1M0],
+             (instregex "^AUT(D[AB]|DZ[AB]|I[AB]|IZ[AB]|I[AB]171615|I[AB]SPPC[ir])$",
+                        "^PAC(D[AB]|DZ[AB]|GA|I[AB]|IZ[AB]|I[AB]171615|I[AB]SPPC|NBI[AB]SPPC|M)$",
+                        "^(PAC|AUTPAC|AUTx16x17|AUTxMxN)$")>;
+// [x1_pac_hint] docs/x1-sog.md D-13: the HINT-space forms are NOPs without FEAT_PAuth.
+def : InstRW<[X1Write_PACHint], (instrs PACIAZ, PACIBZ, PACIASP, PACIBSP, PACIA1716, PACIB1716,
+                                        AUTIAZ, AUTIBZ, AUTIASP, AUTIBSP, AUTIA1716, AUTIB1716)>;
 
 // Branch and link, register, with pointer authentication
 // Branch, register, with pointer authentication
@@ -725,7 +785,8 @@ def : InstRW<[V1Write_6c_1B_1M0], (instregex "^BL?RA[AB]Z?$",
 def : InstRW<[V1Write_9c_1M0_1L], (instregex "^LDRA[AB](indexed|writeback)")>;
 
 // Strip pointer authentication code
-def : InstRW<[V1Write_2c_1M0], (instrs XPACD, XPACI, XPACLRI)>;
+def : InstRW<[V1Write_2c_1M0], (instrs XPACD, XPACI)>;
+def : InstRW<[X1Write_XPACHint], (instrs XPACLRI)>;  // [x1_pac_hint]
 
 
 // Miscellaneous data-processing instructions
@@ -733,8 +794,9 @@ def : InstRW<[V1Write_2c_1M0], (instrs XPACD, XPACI, XPACLRI)>;
 
 // Bitfield extract, one reg
 // Bitfield extract, two regs
+// [x1_extr] docs/x1-sog.md C-11: one register when Rn == Rm or imm == 0.
 def V1WriteExtr : SchedWriteVariant<
-                    [SchedVar<IsRORImmIdiomPred, [V1Write_1c_1I]>,
+                    [SchedVar<X1IsExtrOneRegPred, [V1Write_1c_1I]>,
                      SchedVar<NoSchedPred,       [V1Write_3c_1I_1M]>]>;
 def : SchedAlias<WriteExtr, V1WriteExtr>;
 
@@ -756,10 +818,21 @@ def : SchedAlias<WriteImm, V1Write_1c_1I>;
 def : SchedAlias<WriteLD, V1Write_4c_1L>;
 
 // Load register, immed offset, index
+// Load register, register offset, basic / scale by 4/8 / extend / extend, scale by 4/8
+// ("4 3 L", l.984-995: no I uOP)
 def : SchedAlias<WriteLDIdx, V1Write_4c_1L>;
 def : SchedAlias<WriteAdr,   V1Write_1c_1I>;
 
+// [x1_reg_offset_h] docs/x1-sog.md C-12: "Load register, register offset, scale by 2" and
+// "..., extend, scale by 2" LDRH, LDRSH: "5 3 I, L" (l.989-990, l.996-997); without the scale
+// they are "basic" / "extend" (4 3 L).  They used to be 4 (L) whatever the scale.
+def X1WriteLDRH : SchedWriteVariant<[
+                    SchedVar<X1IsMemScaled, [V1Write_5c_1I_1L]>,
+                    SchedVar<NoSchedPred,   [V1Write_4c_1L]>]>;
+def : InstRW<[X1WriteLDRH, ReadAdrBase], (instregex "^LDRHHro[WX]$", "^LDRSH[WX]ro[WX]$")>;
+
 // Load pair, immed offset
+// (LDP X-form "4 1.5 L", l.1000-1001: WriteLD and WriteLDHi each take one L uOP.)
 def : SchedAlias<WriteLDHi, V1Write_4c_1L>;
 def : InstRW<[V1Write_4c_1L, V1Write_4c_0Z], (instrs LDPWi, LDNPWi)>;
 def : InstRW<[WriteAdr, V1Write_4c_1L, V1Write_4c_0Z],
@@ -780,10 +853,30 @@ def : InstRW<[WriteAdr, V1Write_5c_1I_2L, V1Write_5c_0Z],
 def : SchedAlias<WriteST, V1Write_1c_1L01_1D>;
 
 // Store register, immed offset, index
+// Store register, register offset, basic / scaled by 4/8 / extend / extend, scale by 4/8
+// ("1 2 L01, D", l.1131-1140: no I uOP)
 def : SchedAlias<WriteSTIdx, V1Write_1c_1L01_1D>;
 
 // Store pair, immed offset
 def : SchedAlias<WriteSTP, V1Write_1c_1L01_1D>;
+
+// [x1_store_rows] docs/x1-sog.md C-13, I-3: "Store register, register offset, scaled by 2" and
+// "..., extend, scale by 1" (sic) STRH: "2 2 I, L01, D" (l.1135-1136, l.1141-1142).  It used to
+// be latency 1 (L01, D).
+def X1WriteSTRH : SchedWriteVariant<[
+                    SchedVar<X1IsMemScaled, [X1Write_2c_1I_1L01_1D]>,
+                    SchedVar<NoSchedPred,   [V1Write_1c_1L01_1D]>]>;
+def : InstRW<[X1WriteSTRH, ReadST, ReadAdrBase], (instregex "^STRHHro[WX]$")>;
+
+// [x1_from_a55_store_data] docs/x1-sog.md B-1: the integer store forms whose stock Sched lists
+// name no reads: same writes, plus ReadST on the data.
+def : InstRW<[WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)ui$", "^STUR(BB|HH|W|X)i$",
+                                                        "^STTR(B|H|W|X)i$", "^STL?LR(B|H|W|X)$")>;
+def : InstRW<[WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P(W|X)i$")>;
+def : InstRW<[WriteSTX, ReadST, ReadAdrBase], (instregex "^STLXR(B|H|W|X)$")>;
+def : InstRW<[WriteSTX, ReadST, ReadST, ReadAdrBase], (instregex "^STLXP(W|X)$")>;
+def : InstRW<[WriteAdr, WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)(pre|post)$")>;
+def : InstRW<[WriteAdr, WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STP(W|X)(pre|post)$")>;
 
 
 // FP data processing instructions
@@ -802,18 +895,21 @@ def : SchedAlias<WriteFCmp, V1Write_2c_1V0>;
 // FP square root
 def : SchedAlias<WriteFDiv, V1Write_10c7_1V02>;
 
-// FP divide / square root, one write per (best latency, occupancy).  X1 SOG, FP and
-// ASIMD divide / square root tables.  The SOG throughput is for the V0/V2 pair, so the
-// occupancy of ONE unit is ceil(2 / best throughput):
+// [x1_fdiv_best] docs/x1-sog.md C-14, C-19, D-1: FP divide / square root, one write per (best
+// latency, occupancy).  X1 SOG, FP and ASIMD divide / square root tables (l.1217-1245,
+// l.1814-1818, l.1857-1866).  The SOG throughput is for the V0/V2 pair, so the occupancy of ONE
+// unit is ceil(2 / best throughput) (D-2):
 //   scalar H 8/7 -> 2, S 8/7 -> 2, D 4/7 -> 4 (FSQRT likewise);
 //   ASIMD D-form F16 2/7 -> 7, D-form F32 4/7 -> 4, Q-form F16 1/5 (FDIV) / 2/11 (FSQRT)
 //   -> 10 / 11, Q-form F32 2/7 -> 7, Q-form F64 2/7 -> 7.
-// Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).
-def V1WriteFDS_7c2   : SchedWriteRes<[V1UnitV02]> { let Latency = 7;  let ReleaseAtCycles = [2]; }
-def V1WriteFDS_7c4   : SchedWriteRes<[V1UnitV02]> { let Latency = 7;  let ReleaseAtCycles = [4]; }
-def V1WriteFDS_7c7   : SchedWriteRes<[V1UnitV02]> { let Latency = 7;  let ReleaseAtCycles = [7]; }
-def V1WriteFDS_10c10 : SchedWriteRes<[V1UnitV02]> { let Latency = 10; let ReleaseAtCycles = [10]; }
-def V1WriteFDS_11c11 : SchedWriteRes<[V1UnitV02]> { let Latency = 11; let ReleaseAtCycles = [11]; }
+// Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).  [x1_dividers] D-3: the occupancy is
+// on an FP divide unit (X1UnitFDiv); V02 is taken for one cycle (it used to be held for the
+// occupancy).
+def V1WriteFDS_7c2   : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 2]; }
+def V1WriteFDS_7c4   : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 4]; }
+def V1WriteFDS_7c7   : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 7]; }
+def V1WriteFDS_10c10 : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 10; let ReleaseAtCycles = [1, 10]; }
+def V1WriteFDS_11c11 : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 11; let ReleaseAtCycles = [1, 11]; }
 
 // FP divide, H-form
 // FP square root, H-form
@@ -853,10 +949,12 @@ def : InstRW<[V1Write_3c_1M0], (instregex "^[SU]CVTF[SU][WX][HSD]ri$")>;
 
 // FP convert, from vec to gen reg
 // X1 SOG Table 3-18: "3, 1, V02" - either of V0/V2 but only ONE per cycle
-// (stock V1: V0 only).  Expressed as a 2-cycle occupancy of the V02 group.
+// (stock V1: V0 only).  Expressed as a 2-cycle occupancy of the V02 group (D-2).
+// [x1_fp_cvt] docs/x1-sog.md C-15: also the fixed-point forms (#fbits, "ri"); they took
+// WriteFCvt (V02 one cycle, 2 per cycle).
 def V1Write_3c2_1V02 : SchedWriteRes<[V1UnitV02]> { let Latency = 3;
                                                     let ReleaseAtCycles = [2]; }
-def : InstRW<[V1Write_3c2_1V02], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
+def : InstRW<[V1Write_3c2_1V02], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]ri?$")>;
 
 // FP convert, Javascript from vec to gen reg
 def : InstRW<[V1Write_3c_1V0], (instrs FJCVTZS)>;
@@ -871,6 +969,7 @@ def : SchedAlias<WriteFImm, V1Write_2c_1V>;
 def : InstRW<[V1Write_2c_1V], (instrs FMOVHr, FMOVSr, FMOVDr)>;
 
 // FP transfer, from gen to low half of vec reg
+// (FMOV from WZR/XZR is not among the zero-latency MOVs of sec. 4.15: C-4.)
 def : InstRW<[V1Write_3c_1M0], (instrs FMOVWHr, FMOVXHr, FMOVWSr, FMOVXDr)>;
 
 // FP transfer, from gen to high half of vec reg
@@ -899,17 +998,26 @@ def : InstRW<[WriteAdr, V1Write_6c_1L],
 // Load vector reg, register offset, scale, S/D-form
 // Load vector reg, register offset, extend
 // Load vector reg, register offset, extend, scale, S/D-form
+// (The "L, I" of the "basic" row, l.1391-1392, is not modelled: docs/x1-sog.md I-4.)
 def : InstRW<[V1Write_6c_1L, ReadAdrBase], (instregex "^LDR[BSD]ro[WX]$")>;
 
 // Load vector reg, register offset, scale, H/Q-form
 // Load vector reg, register offset, extend, scale, H/Q-form
-def : InstRW<[V1Write_7c_1I_1L, ReadAdrBase], (instregex "^LDR[HQ]ro[WX]$")>;
+// [x1_reg_offset_h] docs/x1-sog.md C-16, I-4: "7 3 I, L" only with the scale (l.1407-1408,
+// l.1413-1414); without it LDR H/Q is "basic" (X index, I-4) or "extend" (W index), 6 3 L
+// (l.1409-1410).  They used to be 7 (I, L) whatever the scale.
+def X1WriteLDRHQro : SchedWriteVariant<[
+                       SchedVar<X1IsMemScaled, [V1Write_7c_1I_1L]>,
+                       SchedVar<NoSchedPred,   [V1Write_6c_1L]>]>;
+def : InstRW<[X1WriteLDRHQro, ReadAdrBase], (instregex "^LDR[HQ]ro[WX]$")>;
 
 // Load vector pair, immed offset, S/D-form
 def : InstRW<[V1Write_6c_1L, V1Write_6c_0Z], (instregex "^LDN?P[SD]i$")>;
 
 // Load vector pair, immed offset, Q-form
-def : InstRW<[V1Write_6c_1L, WriteLDHi], (instrs LDPQi, LDNPQi)>;
+// [x1_ldp_hi] docs/x1-sog.md C-16, D-10: "6 3/2 L" (l.1417-1418): both registers 6; the second
+// used to be WriteLDHi (latency 4).  Two L uOPs, as before.
+def : InstRW<[V1Write_6c_2L, V1Write_6c_0Z], (instrs LDPQi, LDNPQi)>;
 
 // Load vector pair, immed post-index, S/D-form
 // Load vector pair, immed pre-index, S/D-form
@@ -918,49 +1026,61 @@ def : InstRW<[WriteAdr, V1Write_6c_1L, V1Write_6c_0Z],
 
 // Load vector pair, immed post-index, Q-form
 // Load vector pair, immed pre-index, Q-form
-def : InstRW<[WriteAdr, V1Write_6c_1L, WriteLDHi],
+// [x1_ldp_hi] "6 3/2 L, I" (l.1421-1422, l.1425-1426).
+def : InstRW<[WriteAdr, V1Write_6c_2L, V1Write_6c_0Z],
              (instrs LDPQpost, LDPQpre)>;
 
 
 // FP store instructions
 // -----------------------------------------------------------------------------
+// [x1_from_a55_store_data] docs/x1-sog.md B-1: the data operands read ReadST, the base
+// ReadAdrBase.
 
 // Store vector reg, unscaled immed, B/H/S/D/Q-form
-def : InstRW<[V1Write_2c_1L01_1V01], (instregex "^STUR[BHSDQ]i$")>;
+def : InstRW<[V1Write_2c_1L01_1V01, ReadST, ReadAdrBase], (instregex "^STUR[BHSDQ]i$")>;
 
 // Store vector reg, immed post-index, B/H/S/D/Q-form
 // Store vector reg, immed pre-index, B/H/S/D/Q-form
-def : InstRW<[WriteAdr, V1Write_2c_1L01_1V01],
+def : InstRW<[WriteAdr, V1Write_2c_1L01_1V01, ReadST, ReadAdrBase],
              (instregex "^STR[BHSDQ](pre|post)$")>;
 
 // Store vector reg, unsigned immed, B/H/S/D/Q-form
-def : InstRW<[V1Write_2c_1L01_1V01], (instregex "^STR[BHSDQ]ui$")>;
+def : InstRW<[V1Write_2c_1L01_1V01, ReadST, ReadAdrBase], (instregex "^STR[BHSDQ]ui$")>;
 
 // Store vector reg, register offset, basic, B/S/D-form
-// Store vector reg, register offset, scale, B/S/D-form
+// Store vector reg, register offset, scale, S/D-form
 // Store vector reg, register offset, extend, B/S/D-form
-// Store vector reg, register offset, extend, scale, B/S/D-form
-def : InstRW<[V1Write_2c_1L01_1V01, ReadAdrBase],
+// Store vector reg, register offset, extend, scale, S/D-form
+def : InstRW<[V1Write_2c_1L01_1V01, ReadST, ReadAdrBase],
              (instregex "^STR[BSD]ro[WX]$")>;
 
 // Store vector reg, register offset, basic, H/Q-form
 // Store vector reg, register offset, scale, H/Q-form
 // Store vector reg, register offset, extend, H/Q-form
 // Store vector reg, register offset, extend, scale, H/Q-form
-def : InstRW<[V1Write_2c_1I_1L01_1V01, ReadAdrBase],
+// [x1_store_rows] docs/x1-sog.md C-17: "2 2 I, L01, V01" only with the scale ("scale, H-form",
+// "scale, Q-form", "extend, scale, H-form", "extend, scale, Q-form", l.1486-1501); "basic" and
+// "extend" H/Q are "2 2 L01, V01" (l.1482-1485, l.1493-1495).  They used to have the I whatever the
+// scale.
+def X1WriteSTRHQro : SchedWriteVariant<[
+                       SchedVar<X1IsMemScaled, [V1Write_2c_1I_1L01_1V01]>,
+                       SchedVar<NoSchedPred,   [V1Write_2c_1L01_1V01]>]>;
+def : InstRW<[X1WriteSTRHQro, ReadST, ReadAdrBase],
              (instregex "^STR[HQ]ro[WX]$")>;
 
 // Store vector pair, immed offset, S/D/Q-form
-def : InstRW<[V1Write_2c_1L01_1V01], (instregex "^STN?P[SDQ]i$")>;
+// (Q-form "2 2 L01, V01", l.1515-1516: one V01 uOP, as printed; docs/x1-sog.md I-7.)
+def : InstRW<[V1Write_2c_1L01_1V01, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P[SDQ]i$")>;
 
 // Store vector pair, immed post-index, S/D-form
 // Store vector pair, immed pre-index, S/D-form
-def : InstRW<[WriteAdr, V1Write_2c_1L01_1V01],
+def : InstRW<[WriteAdr, V1Write_2c_1L01_1V01, ReadST, ReadST, ReadAdrBase],
              (instregex "^STP[SD](pre|post)$")>;
 
 // Store vector pair, immed post-index, Q-form
 // Store vector pair, immed pre-index, Q-form
-def : InstRW<[WriteAdr, V1Write_2c_2L01_1V01], (instrs STPQpre, STPQpost)>;
+def : InstRW<[WriteAdr, V1Write_2c_2L01_1V01, ReadST, ReadST, ReadAdrBase],
+             (instrs STPQpre, STPQpost)>;
 
 
 // ASIMD integer instructions
@@ -1028,24 +1148,31 @@ def : InstRW<[V1Write_3c_1V01], (instregex "^PMULL?v(8|16)i8$")>;
 def : InstRW<[V1Write_2c_1V01], (instregex "^PMULLv(1i64|2i64)$")>;
 
 // ASIMD multiply long
-def : InstRW<[V1Write_3c_1V02], (instregex "^([SU]|SQD)MULLv")>;
+// [x1_asimd_scalar] docs/x1-sog.md D-5: the scalar SQDMULL (i16/i32) as well.
+def : InstRW<[V1Write_3c_1V02], (instregex "^([SU]|SQD)MULLv", "^SQDMULLi(16|32)$")>;
 
 // ASIMD shift accumulate
-def : InstRW<[V1Wr_VSA, V1Rd_VSA], (instregex "^[SU]SRAv", "^[SU]RSRAv")>;
+// [x1_asimd_scalar] D-5: the scalar forms (SSRA Dd, ... "d") as well.
+def : InstRW<[V1Wr_VSA, V1Rd_VSA], (instregex "^[SU]SRAv", "^[SU]RSRAv", "^[SU]R?SRAd$")>;
 
 // ASIMD shift by immed, complex
 // ASIMD shift by register, complex
+// [x1_asimd_scalar] D-5: the scalar SRSHR, URSHR (Dd) and the scalar saturating narrowing shifts
+// (SQSHRN, SQRSHRN, UQSHRN, UQRSHRN, SQSHRUN, SQRSHRUN; Bd/Hd/Sd) as well.
 def : InstRW<[V1Write_4c_1V13],
              (instregex "^RSHRNv", "^SQRSHRU?Nv", "^(SQSHLU?|UQSHL)[bhsd]$",
                         "^(SQSHLU?|UQSHL)(v8i8|v16i8|v4i16|v8i16|v2i32|v4i32|v2i64)_shift$",
                         "^SQSHU?RNv", "^SQSHRUNv", "^[SU]RSHRv", "^UQR?SHRNv", 
-                        "^[SU]Q?RSHLv", "^[SU]QSHLv")>;
+                        "^[SU]Q?RSHLv", "^[SU]QSHLv",
+                        "^[SU]RSHRd$", "^(SQ|UQ)R?SHRN[bhs]$", "^SQR?SHRUN[bhs]$")>;
 
 // ASIMD shift by immed, basic
 // ASIMD shift by immed and insert, basic
 // ASIMD shift by register, basic
+// [x1_asimd_scalar] D-5: the scalar SHL, SSHR, USHR, SLI, SRI (Dd) as well.
 def : InstRW<[V1Write_2c_1V13], (instregex "^SHLL?v", "^SHRNv", "^[SU]SHLLv",
-                                          "^[SU]SHRv", "^S[LR]Iv", "^[SU]SHLv")>;
+                                          "^[SU]SHRv", "^S[LR]Iv", "^[SU]SHLv",
+                                          "^SHLd$", "^[SU]SHRd$", "^S[LR]Id$")>;
 
 
 // ASIMD FP instructions
@@ -1066,7 +1193,8 @@ def : InstRW<[V1Write_4c_1V], (instregex "^FCADD(v[48]f16|v[24]f32|v2f64)$")>;
 def : InstRW<[V1Wr_FCMA, V1Rd_FCMA], (instregex "^FCMLAv")>;
 
 // ASIMD FP multiply
-def : InstRW<[V1Wr_FPM], (instregex "^FMULX?v")>;
+// [x1_asimd_scalar] docs/x1-sog.md D-5: the scalar FMULX (Hd/Sd/Dd) as well.
+def : InstRW<[V1Wr_FPM], (instregex "^FMULX?v", "^FMULX(16|32|64)$")>;
 
 // ASIMD FP multiply accumulate
 def : InstRW<[V1Wr_FPMA, V1Rd_FPMA], (instregex "^FML[AS]v")>;
@@ -1088,34 +1216,32 @@ def : InstRW<[V1Write_3c_1V02], (instregex "^FCVTNv[24]i32$",
                                            "^FCVTXN(v[24]f32|v1i64)$")>;
 
 // ASIMD FP convert, other, D-form F32 and Q-form F64
+// [x1_fp_cvt_scalar] docs/x1-sog.md D-4: every scalar form with the operand and the result in FP
+// registers (H, S, D; also with #fbits) takes this row, the lowest the SOG gives for these
+// mnemonics (as for the Cortex-A78, docs/a78-sog.md D-4).  The S forms took the D-form F16 /
+// Q-form F32 row (4, V02 two uOPs), the H forms the Q-form F16 row (6).
 def : InstRW<[V1Write_3c_1V02], (instregex "^FCVT[AMNPZ][SU]v2f(32|64)$",
                                            "^FCVT[AMNPZ][SU]v2i(32|64)_shift$",
-                                           "^FCVT[AMNPZ][SU]v1i64$",
-                                           "^FCVTZ[SU]d$",
+                                           "^FCVT[AMNPZ][SU]v1(i64|i32|f16)$",
+                                           "^FCVTZ[SU][dsh]$",
                                            "^[SU]CVTFv2f(32|64)$",
                                            "^[SU]CVTFv2i(32|64)_shift$",
-                                           "^[SU]CVTFv1i64$",
-                                           "^[SU]CVTFd$")>;
+                                           "^[SU]CVTFv1i(64|32|16)$",
+                                           "^[SU]CVTF[dsh]$")>;
 
 // ASIMD FP convert, other, D-form F16 and Q-form F32
 def : InstRW<[V1Write_4c_2V02], (instregex "^FCVT[AMNPZ][SU]v4f(16|32)$",
                                            "^FCVT[AMNPZ][SU]v4i(16|32)_shift$",
-                                           "^FCVT[AMNPZ][SU]v1i32$",
-                                           "^FCVTZ[SU]s$",
                                            "^[SU]CVTFv4f(16|32)$",
-                                           "^[SU]CVTFv4i(16|32)_shift$",
-                                           "^[SU]CVTFv1i32$",
-                                           "^[SU]CVTFs$")>;
+                                           "^[SU]CVTFv4i(16|32)_shift$")>;
 
 // ASIMD FP convert, other, Q-form F16
-def : InstRW<[V1Write_6c_4V02], (instregex "^FCVT[AMNPZ][SU]v8f16$",
-                                           "^FCVT[AMNPZ][SU]v8i16_shift$",
-                                           "^FCVT[AMNPZ][SU]v1f16$",
-                                           "^FCVTZ[SU]h$",
-                                           "^[SU]CVTFv8f16$",
-                                           "^[SU]CVTFv8i16_shift$",
-                                           "^[SU]CVTFv1i16$",
-                                           "^[SU]CVTFh$")>;
+// [x1_v_throughput] docs/x1-sog.md C-19: "6 1/2 V02" (l.1808-1813): V02 held 4 cycles in total
+// (2 / (1/2), D-2); it was 2 (1 per cycle).
+def : InstRW<[X1WriteV02<6, 4, 4>], (instregex "^FCVT[AMNPZ][SU]v8f16$",
+                                               "^FCVT[AMNPZ][SU]v8i16_shift$",
+                                               "^[SU]CVTFv8f16$",
+                                               "^[SU]CVTFv8i16_shift$")>;
 
 // ASIMD FP divide, D-form, F16
 // ASIMD FP square root, D-form, F16
@@ -1154,7 +1280,8 @@ def : InstRW<[V1Write_3c_1V02], (instregex "^FRINT[AIMNPXZ]v2f(32|64)$")>;
 def : InstRW<[V1Write_4c_2V02], (instregex "^FRINT[AIMNPXZ]v4f(16|32)$")>;
 
 // ASIMD FP round, Q-form F16
-def : InstRW<[V1Write_6c_4V02], (instregex "^FRINT[AIMNPXZ]v8f16$")>;
+// [x1_v_throughput] C-19: "6 1/2 V02" (l.1853-1856): V02 held 4 cycles (it was 2).
+def : InstRW<[X1WriteV02<6, 4, 4>], (instregex "^FRINT[AIMNPXZ]v8f16$")>;
 
 
 // ASIMD BF instructions
@@ -1204,24 +1331,28 @@ def : InstRW<[V1Write_3c_1M0],
 def : InstRW<[V1Write_4c_1V13], (instregex "^[SU]QXTNv", "^SQXTUNv")>;
 
 // ASIMD reciprocal and square root estimate, D-form U32
-// ASIMD reciprocal and square root estimate, D-form F32 and F64
+// ASIMD reciprocal and square root estimate, D-form F32 and scalar forms
+// [x1_v_throughput] docs/x1-sog.md C-20: "D-form F32 and scalar forms 3 2 V02" (l.1966-1968):
+// also the scalar H forms (they were 4, the D-form F16 row).
 def : InstRW<[V1Write_3c_1V02], (instrs URECPEv2i32,
                                         URSQRTEv2i32,
-                                        FRECPEv1i32, FRECPEv2f32, FRECPEv1i64,
-                                        FRSQRTEv1i32, FRSQRTEv2f32, FRSQRTEv1i64)>;
+                                        FRECPEv1i32, FRECPEv2f32, FRECPEv1i64, FRECPEv1f16,
+                                        FRSQRTEv1i32, FRSQRTEv2f32, FRSQRTEv1i64, FRSQRTEv1f16)>;
 
 // ASIMD reciprocal and square root estimate, Q-form U32
-// ASIMD reciprocal and square root estimate, D-form F16 and Q-form F32 and F64
-def : InstRW<[V1Write_4c_1V02], (instrs URECPEv4i32,
-                                        URSQRTEv4i32,
-                                        FRECPEv1f16, FRECPEv4f16,
-                                        FRECPEv4f32, FRECPEv2f64,
-                                        FRSQRTEv1f16, FRSQRTEv4f16,
-                                        FRSQRTEv4f32, FRSQRTEv2f64)>;
+// ASIMD reciprocal and square root estimate, D-form F16 and Q-form F32
+// [x1_v_throughput] C-20: "4 1 V02" (l.1964-1965, l.1969-1971): V02 held 2 cycles (it was 1).
+def : InstRW<[X1WriteV02<4, 1, 2>], (instrs URECPEv4i32,
+                                            URSQRTEv4i32,
+                                            FRECPEv4f16, FRECPEv4f32,
+                                            FRSQRTEv4f16, FRSQRTEv4f32)>;
+// Q-form F64: no SOG row (docs/x1-sog.md U-8); the model's row (4, V02 one cycle) is kept.
+def : InstRW<[V1Write_4c_1V02], (instrs FRECPEv2f64, FRSQRTEv2f64)>;
 
 // ASIMD reciprocal and square root estimate, Q-form F16
-def : InstRW<[V1Write_6c_2V02], (instrs FRECPEv8f16,
-                                        FRSQRTEv8f16)>;
+// [x1_v_throughput] C-20: "6 1/2 V02" (l.1972-1973): V02 held 4 cycles (it was 2).
+def : InstRW<[X1WriteV02<6, 2, 4>], (instrs FRECPEv8f16,
+                                            FRSQRTEv8f16)>;
 
 // ASIMD reciprocal exponent
 def : InstRW<[V1Write_3c_1V02], (instrs FRECPXv1f16, FRECPXv1i32, FRECPXv1i64)>;
@@ -1252,7 +1383,9 @@ def : InstRW<[V1Write_6c_3V01], (instrs TBXv8i8Three, TBXv16i8Three)>;
 def : InstRW<[V1Write_6c_5V01], (instrs TBXv8i8Four, TBXv16i8Four)>;
 
 // ASIMD transfer, element to gen reg
-def : InstRW<[V1Write_2c_1V], (instregex "^SMOVvi(((8|16)to(32|64))|32to64)$",
+// [x1_v_throughput] docs/x1-sog.md C-20: "UMOV, SMOV 2 1 V" (l.2002-2003): V held 4 cycles in
+// total (4 / 1, D-2); it was one cycle (4 per cycle).
+def : InstRW<[X1WriteV<2, 1, 4>], (instregex "^SMOVvi(((8|16)to(32|64))|32to64)$",
                                          "^UMOVvi(8|16|32|64)$")>;
 
 // ASIMD transfer, gen reg to element
@@ -1353,56 +1486,61 @@ def : InstRW<[WriteAdr, V1Write_8c_3L_4V],
                         "^LD4Rv(8b|16b|4h|8h|2s|4s|1d|2d)_POST$")>;
 
 // ASIMD load, 4 element, multiple, Q-form
-def : InstRW<[V1Write_9c_4L_4V],
+// [x1_ls_throughput] docs/x1-sog.md C-21, D-6: "9 1/2 L, V" (l.2169-2172): L held 6 cycles in
+// total (3 / (1/2)), the 8 uOPs and 4 V cycles kept; it was 3/4 per cycle.
+def : InstRW<[X1WriteLDV<9, 8, 6, 4>],
              (instregex "^LD4Fourv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, V1Write_9c_4L_4V],
+def : InstRW<[WriteAdr, X1WriteLDV<9, 8, 6, 4>],
              (instregex "^LD4Fourv(16b|8h|4s|2d)_POST$")>;
 
 
 // ASIMD store instructions
 // -----------------------------------------------------------------------------
+// [x1_from_a55_store_data] docs/x1-sog.md B-1: the data Vt reads ReadST, the base Rn ReadAdrBase; for
+// the one-lane forms the lane index takes the read in between (ReadDefault).  The data side is
+// V01 (Table 2-1), not the "V" of the table: docs/x1-sog.md I-6.
 
 // ASIMD store, 1 element, multiple, 1 reg
 // ASIMD store, 1 element, multiple, 2 reg, D-form
-def : InstRW<[V1Write_2c_1L01_1V01],
+def : InstRW<[V1Write_2c_1L01_1V01, ReadST, ReadAdrBase],
              (instregex "^ST1Onev(8b|16b|4h|8h|2s|4s|1d|2d)$",
                         "^ST1Twov(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, V1Write_2c_1L01_1V01],
+def : InstRW<[WriteAdr, V1Write_2c_1L01_1V01, ReadST, ReadAdrBase],
              (instregex "^ST1Onev(8b|16b|4h|8h|2s|4s|1d|2d)_POST$",
                         "^ST1Twov(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 2 reg, Q-form
 // ASIMD store, 1 element, multiple, 3 reg, D-form
 // ASIMD store, 1 element, multiple, 4 reg, D-form
-def : InstRW<[V1Write_2c_2L01_2V01],
+def : InstRW<[V1Write_2c_2L01_2V01, ReadST, ReadAdrBase],
              (instregex "^ST1Twov(16b|8h|4s|2d)$",
                         "^ST1Threev(8b|4h|2s|1d)$",
                         "^ST1Fourv(8b|4h|2s|1d)$")>;
-def : InstRW<[WriteAdr, V1Write_2c_2L01_2V01],
+def : InstRW<[WriteAdr, V1Write_2c_2L01_2V01, ReadST, ReadAdrBase],
              (instregex "^ST1Twov(16b|8h|4s|2d)_POST$",
                         "^ST1Threev(8b|4h|2s|1d)_POST$",
                         "^ST1Fourv(8b|4h|2s|1d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 3 reg, Q-form
-def : InstRW<[V1Write_2c_3L01_3V01],
+def : InstRW<[V1Write_2c_3L01_3V01, ReadST, ReadAdrBase],
              (instregex "^ST1Threev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, V1Write_2c_3L01_3V01],
+def : InstRW<[WriteAdr, V1Write_2c_3L01_3V01, ReadST, ReadAdrBase],
              (instregex "^ST1Threev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 1 element, multiple, 4 reg, Q-form
-def : InstRW<[V1Write_2c_4L01_4V01],
+def : InstRW<[V1Write_2c_4L01_4V01, ReadST, ReadAdrBase],
              (instregex "^ST1Fourv(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, V1Write_2c_4L01_4V01],
+def : InstRW<[WriteAdr, V1Write_2c_4L01_4V01, ReadST, ReadAdrBase],
              (instregex "^ST1Fourv(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 1 element, one lane
 // ASIMD store, 2 element, multiple, D-form
 // ASIMD store, 2 element, one lane
-def : InstRW<[V1Write_4c_1L01_1V01],
+def : InstRW<[V1Write_4c_1L01_1V01, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST1i(8|16|32|64)$",
                         "^ST2Twov(8b|4h|2s)$",
                         "^ST2i(8|16|32|64)$")>;
-def : InstRW<[WriteAdr, V1Write_4c_1L01_1V01],
+def : InstRW<[WriteAdr, V1Write_4c_1L01_1V01, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST1i(8|16|32|64)_POST$",
                         "^ST2Twov(8b|4h|2s)_POST$",
                         "^ST2i(8|16|32|64)_POST$")>;
@@ -1411,45 +1549,48 @@ def : InstRW<[WriteAdr, V1Write_4c_1L01_1V01],
 // ASIMD store, 3 element, multiple, D-form
 // ASIMD store, 3 element, one lane
 // ASIMD store, 4 element, one lane, D
-def : InstRW<[V1Write_4c_2L01_2V01],
+def : InstRW<[V1Write_4c_2L01_2V01, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST2Twov(16b|8h|4s|2d)$",
                         "^ST3Threev(8b|4h|2s)$",
                         "^ST3i(8|16|32|64)$",
                         "^ST4i64$")>;
-def : InstRW<[WriteAdr, V1Write_4c_2L01_2V01],
+def : InstRW<[WriteAdr, V1Write_4c_2L01_2V01, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST2Twov(16b|8h|4s|2d)_POST$",
                         "^ST3Threev(8b|4h|2s)_POST$",
                         "^ST3i(8|16|32|64)_POST$",
                         "^ST4i64_POST$")>;
 
 // ASIMD store, 3 element, multiple, Q-form
-def : InstRW<[V1Write_5c_3L01_3V01],
+def : InstRW<[V1Write_5c_3L01_3V01, ReadST, ReadAdrBase],
              (instregex "^ST3Threev(16b|8h|4s|2d)$")>;
-def : InstRW<[WriteAdr, V1Write_5c_3L01_3V01],
+def : InstRW<[WriteAdr, V1Write_5c_3L01_3V01, ReadST, ReadAdrBase],
              (instregex "^ST3Threev(16b|8h|4s|2d)_POST$")>;
 
 // ASIMD store, 4 element, multiple, D-form
-def : InstRW<[V1Write_6c_3L01_3V01],
+def : InstRW<[V1Write_6c_3L01_3V01, ReadST, ReadAdrBase],
              (instregex "^ST4Fourv(8b|4h|2s)$")>;
-def : InstRW<[WriteAdr, V1Write_6c_3L01_3V01],
+def : InstRW<[WriteAdr, V1Write_6c_3L01_3V01, ReadST, ReadAdrBase],
              (instregex "^ST4Fourv(8b|4h|2s)_POST$")>;
 
 // ASIMD store, 4 element, multiple, Q-form, B/H/S
-def : InstRW<[V1Write_7c_6L01_6V01],
+def : InstRW<[V1Write_7c_6L01_6V01, ReadST, ReadAdrBase],
              (instregex "^ST4Fourv(16b|8h|4s)$")>;
-def : InstRW<[WriteAdr, V1Write_7c_6L01_6V01],
+def : InstRW<[WriteAdr, V1Write_7c_6L01_6V01, ReadST, ReadAdrBase],
              (instregex "^ST4Fourv(16b|8h|4s)_POST$")>;
 
 // ASIMD store, 4 element, multiple, Q-form, D
-def : InstRW<[V1Write_4c_4L01_4V01],
+def : InstRW<[V1Write_4c_4L01_4V01, ReadST, ReadAdrBase],
              (instrs ST4Fourv2d)>;
-def : InstRW<[WriteAdr, V1Write_4c_4L01_4V01],
+def : InstRW<[WriteAdr, V1Write_4c_4L01_4V01, ReadST, ReadAdrBase],
              (instrs ST4Fourv2d_POST)>;
 
 // ASIMD store, 4 element, one lane, B/H/S
-def : InstRW<[V1Write_6c_3L_3V],
+// [x1_ls_throughput] docs/x1-sog.md C-22, D-6: "6 4/3 V, L01" (l.2323-2326): it took the load
+// pipes L and the four V pipes (1 per cycle on L); now L01 and V01 like every other store, L01
+// held 2 / (4/3) = 1.5, rounded up to 2 cycles (D-2), V01 2 cycles, 6 uOPs as before.
+def : InstRW<[X1WriteSTV<6, 6, 2, 2>, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST4i(8|16|32)$")>;
-def : InstRW<[WriteAdr, V1Write_6c_3L_3V],
+def : InstRW<[WriteAdr, X1WriteSTV<6, 6, 2, 2>, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST4i(8|16|32)_POST$")>;
 
 
@@ -1463,10 +1604,10 @@ def : InstRW<[WriteAdr, V1Write_6c_3L_3V],
 // Cortex-X1 SOG Table 3-34: AESD/AESE/AESIMC/AESMC are "2, 2, V01" (latency 2,
 // throughput 2, the V0/V1 pipes only).  Stock V1 uses the 4-wide V group
 // (4 per cycle), which the X1 does not have for AES.
-def V1WriteVC : WriteSequence<[V1Write_2c_1V01]>;
-def V1ReadVC  : SchedReadAdvance<2, [V1WriteVC]>;
-def           : InstRW<[V1WriteVC], (instrs AESDrr, AESErr)>;
-def           : InstRW<[V1Write_2c_1V01, V1ReadVC], (instrs AESMCrr, AESIMCrr)>;
+// [x1_aes] docs/x1-sog.md U-6: no forwarding from AESE/AESD to AESMC/AESIMC (the stock read
+// advance of 2 is removed); the SOG gives no number for an adjacent dependent pair (sec. 4.7,
+// l.2604-2605), the decision of the Cortex-A78 (docs/a78-sog.md U-6).
+def           : InstRW<[V1Write_2c_1V01], (instrs AESDrr, AESErr, AESMCrr, AESIMCrr)>;
 
 // Crypto SHA1 hash acceleration op
 // Crypto SHA1 schedule acceleration ops
@@ -1496,584 +1637,11 @@ def : InstRW<[V1Write_2c_1V0], (instrs BCAX, EOR3, RAX1, XAR)>;
 def : InstRW<[V1Wr_CRC, V1Rd_CRC], (instregex "^CRC32C?[BHWX]rr$")>;
 
 
-// SVE Predicate instructions
+// SVE instructions
 // -----------------------------------------------------------------------------
-
-// Loop control, based on predicate
-def : InstRW<[V1Write_2c_1M0], (instregex "^BRK[AB]_PP[mz]P$")>;
-def : InstRW<[V1Write_2c_1M0], (instrs BRKN_PPzP, BRKPA_PPzPP, BRKPB_PPzPP)>;
-
-// Loop control, based on predicate and flag setting
-def : InstRW<[V1Write_3c_2M0], (instrs BRKAS_PPzP, BRKBS_PPzP, BRKNS_PPzP,
-                                       BRKPAS_PPzPP, BRKPBS_PPzPP)>;
-
-// Loop control, based on GPR
-def : InstRW<[V1Write_3c_2M0], (instregex "^WHILE(LE|LO|LS|LT)_P(WW|XX)_[BHSD]$")>;
-
-// Loop terminate
-def : InstRW<[V1Write_1c_1M0], (instregex "^CTERM(EQ|NE)_(WW|XX)$")>;
-
-// Predicate counting scalar
-// Predicate counting scalar, active predicate
-def : InstRW<[V1Write_2c_1M0], (instrs ADDPL_XXI, ADDVL_XXI, RDVLI_XI)>;
-def : InstRW<[V1Write_2c_1M0], (instregex "^(CNT|([SU]Q)?(DEC|INC))[BHWD]_XPiI$",
-                                          "^SQ(DEC|INC)[BHWD]_XPiWdI$",
-                                          "^UQ(DEC|INC)[BHWD]_WPiI$",
-                                          "^CNTP_XPP_[BHSD]$",
-                                          "^([SU]Q)?(DEC|INC)P_XP_[BHSD]$",
-                                          "^UQ(DEC|INC)P_WP_[BHSD]$",
-                                          "^[SU]Q(DEC|INC)P_XPWd_[BHSD]$")>;
-
-// Predicate counting vector, active predicate
-def : InstRW<[V1Write_7c_2M0_1V01], (instregex "^([SU]Q)?(DEC|INC)P_ZP_[HSD]$")>;
-
-// Predicate logical
-def : InstRW<[V1Write_1c_1M0],
-             (instregex "^(AND|BIC|EOR|NAND|NOR|ORN|ORR)_PPzPP$")>;
-
-// Predicate logical, flag setting
-def : InstRW<[V1Write_2c_2M0],
-             (instregex "^(AND|BIC|EOR|NAND|NOR|ORN|ORR)S_PPzPP$")>;
-
-// Predicate reverse
-// Predicate set/initialize/find next
-// Predicate transpose
-// Predicate unpack and widen
-// Predicate zip/unzip
-def : InstRW<[V1Write_2c_1M0], (instregex "^REV_PP_[BHSD]$",
-                                          "^PFALSE$", "^PFIRST_B$",
-                                          "^PNEXT_[BHSD]$", "^PTRUE_[BHSD]$",
-                                          "^TRN[12]_PPP_[BHSDQ]$",
-                                          "^(ZIP|UZP)[12]_PPP_[BHSDQ]$")>;
-
-// Predicate set/initialize/find next
-// Predicate unpack and widen
-def : InstRW<[V1Write_2c_1M0], (instrs PTEST_PP, PTEST_PP_ANY, PTEST_PP_FIRST,
-                                       PUNPKHI_PP, PUNPKLO_PP)>;
-
-// Predicate select
-def : InstRW<[V1Write_1c_1M0], (instrs SEL_PPPP)>;
-
-// Predicate set/initialize, set flags
-def : InstRW<[V1Write_3c_2M0], (instregex "^PTRUES_[BHSD]$")>;
-
-
-
-// SVE integer instructions
-// -----------------------------------------------------------------------------
-
-// Arithmetic, basic
-// Logical
-def : InstRW<[V1Write_2c_1V01],
-             (instregex "^(ABS|CNOT|NEG)_ZPmZ_[BHSD]",
-                        "^(ADD|SUB)_Z(I|P[mZ]Z|ZZ)_[BHSD]",
-                        "^ADR_[SU]XTW_ZZZ_D_[0123]$",
-                        "^ADR_LSL_ZZZ_[SD]_[0123]$",
-                        "^[SU]ABD_ZP[mZ]Z_[BHSD]",
-                        "^[SU](MAX|MIN)_Z(I|P[mZ]Z)_[BHSD]",
-                        "^[SU]Q(ADD|SUB)_Z(I|ZZ)_[BHSD]",
-                        "^SUBR_Z(I|P[mZ]Z)_[BHSD]",
-                        "^(AND|EOR|ORR)_ZI",
-                        "^(AND|BIC|EOR|EOR(BT|TB)?|ORR)_ZP?ZZ",
-                        "^EOR(BT|TB)_ZZZ_[BHSD]$",
-                        "^(AND|BIC|EOR|NOT|ORR)_ZPmZ_[BHSD]")>;
-
-// Arithmetic, shift
-def : InstRW<[V1Write_2c_1V1],
-             (instregex "^(ASR|LSL|LSR)_WIDE_Z(Pm|Z)Z_[BHS]",
-                        "^(ASR|LSL|LSR)_ZPm[IZ]_[BHSD]",
-                        "^(ASR|LSL|LSR)_ZZI_[BHSD]",
-                        "^(ASR|LSL|LSR)_ZPZ[IZ]_[BHSD]",
-                        "^(ASRR|LSLR|LSRR)_ZPmZ_[BHSD]")>;
-
-// Arithmetic, shift right for divide
-def : InstRW<[V1Write_4c_1V1], (instregex "^ASRD_(ZPmI|ZPZI)_[BHSD]")>;
-
-// Count/reverse bits
-def : InstRW<[V1Write_2c_1V01], (instregex "^(CLS|CLZ|CNT|RBIT)_ZPmZ_[BHSD]")>;
-
-// Broadcast logical bitmask immediate to vector
-def : InstRW<[V1Write_2c_1V01], (instrs DUPM_ZI)>;
-
-// Compare and set flags
-def : InstRW<[V1Write_4c_1M0_1V0],
-             (instregex "^CMP(EQ|GE|GT|HI|HS|LE|LO|LS|LT|NE)_PPzZ[IZ]_[BHSD]$",
-                        "^CMP(EQ|GE|GT|HI|HS|LE|LO|LS|LT|NE)_WIDE_PPzZZ_[BHS]$")>;
-
-// Conditional extract operations, scalar form
-def : InstRW<[V1Write_9c_1M0_1V1], (instregex "^CLAST[AB]_RPZ_[BHSD]$")>;
-
-// Conditional extract operations, SIMD&FP scalar and vector forms
-def : InstRW<[V1Write_3c_1V1], (instregex "^CLAST[AB]_[VZ]PZ_[BHSD]$",
-                                          "^COMPACT_ZPZ_[SD]$",
-                                          "^SPLICE_ZPZZ?_[BHSD]$")>;
-
-// Convert to floating point, 64b to float or convert to double
-def : InstRW<[V1Write_3c_1V0], (instregex "^[SU]CVTF_ZPmZ_Dto[HSD]",
-                                          "^[SU]CVTF_ZPmZ_StoD")>;
-
-// Convert to floating point, 32b to single or half
-def : InstRW<[V1Write_4c_2V0], (instregex "^[SU]CVTF_ZPmZ_Sto[HS]")>;
-
-// Convert to floating point, 16b to half
-def : InstRW<[V1Write_6c_4V0], (instregex "^[SU]CVTF_ZPmZ_HtoH")>;
-
-// Copy, scalar
-def : InstRW<[V1Write_5c_1M0_1V01], (instregex "^CPY_ZPmR_[BHSD]$")>;
-
-// Copy, scalar SIMD&FP or imm
-def : InstRW<[V1Write_2c_1V01], (instregex "^CPY_ZP([mz]I|mV)_[BHSD]$")>;
-
-// Divides, 32 bit
-def : InstRW<[V1Write_12c7_1V0], (instregex "^[SU]DIVR?_ZPmZ_S",
-                                             "^[SU]DIV_ZPZZ_S")>;
-
-// Divides, 64 bit
-def : InstRW<[V1Write_20c7_1V0], (instregex "^[SU]DIVR?_ZPmZ_D",
-                                             "^[SU]DIV_ZPZZ_D")>;
-
-// Dot product, 8 bit
-def : InstRW<[V1Wr_ZDOTB, V1Rd_ZDOTB], (instregex "^[SU]DOT_ZZZI?_BtoS$")>;
-
-// Dot product, 8 bit, using signed and unsigned integers
-def : InstRW<[V1Wr_ZUDOTB, V1Rd_ZUDOTB],
-             (instrs SUDOT_ZZZI, USDOT_ZZZ, USDOT_ZZZI)>;
-
-// Dot product, 16 bit
-def : InstRW<[V1Wr_ZDOTH, V1Rd_ZDOTH], (instregex "^[SU]DOT_ZZZI?_HtoD$")>;
-
-// Duplicate, immediate and indexed form
-def : InstRW<[V1Write_2c_1V01], (instregex "^DUP_ZI_[BHSD]$",
-                                           "^DUP_ZZI_[BHSDQ]$")>;
-
-// Duplicate, scalar form
-def : InstRW<[V1Write_3c_1M0], (instregex "^DUP_ZR_[BHSD]$")>;
-
-// Extend, sign or zero
-def : InstRW<[V1Write_2c_1V1], (instregex "^[SU]XTB_ZPmZ_[HSD]",
-                                          "^[SU]XTH_ZPmZ_[SD]",
-                                          "^[SU]XTW_ZPmZ_[D]")>;
-
-// Extract
-def : InstRW<[V1Write_2c_1V01], (instrs EXT_ZZI, EXT_ZZI_CONSTRUCTIVE)>;
-
-// Extract/insert operation, SIMD and FP scalar form
-def : InstRW<[V1Write_3c_1V1], (instregex "^LAST[AB]_VPZ_[BHSD]$",
-                                          "^INSR_ZV_[BHSD]$")>;
-
-// Extract/insert operation, scalar
-def : InstRW<[V1Write_6c_1M0_1V1], (instregex "^LAST[AB]_RPZ_[BHSD]$",
-                                              "^INSR_ZR_[BHSD]$")>;
-
-// Horizontal operations, B, H, S form, imm, imm
-def : InstRW<[V1Write_4c_1V0], (instregex "^INDEX_II_[BHS]$")>;
-
-// Horizontal operations, B, H, S form, scalar, imm / scalar / imm, scalar
-def : InstRW<[V1Write_7c_1M0_1V0], (instregex "^INDEX_(IR|RI|RR)_[BHS]$")>;
-
-// Horizontal operations, D form, imm, imm
-def : InstRW<[V1Write_5c_2V0], (instrs INDEX_II_D)>;
-
-// Horizontal operations, D form, scalar, imm / scalar / imm, scalar
-def : InstRW<[V1Write_8c_2M0_2V0], (instregex "^INDEX_(IR|RI|RR)_D$")>;
-
-// Move prefix
-def : InstRW<[V1Write_2c_1V01], (instregex "^MOVPRFX_ZP[mz]Z_[BHSD]$",
-                                           "^MOVPRFX_ZZ$")>;
-
-// Matrix multiply-accumulate
-def : InstRW<[V1Wr_ZMMA, V1Rd_ZMMA], (instrs SMMLA_ZZZ, UMMLA_ZZZ, USMMLA_ZZZ)>;
-
-// Multiply, B, H, S element size
-def : InstRW<[V1Write_4c_1V0], (instregex "^MUL_(ZI|ZPmZ|ZZZI|ZZZ)_[BHS]",
-                                          "^MUL_ZPZZ_[BHS]",
-                                          "^[SU]MULH_(ZPmZ|ZZZ)_[BHS]",
-                                          "^[SU]MULH_ZPZZ_[BHS]")>;
-
-// Multiply, D element size
-def : InstRW<[V1Write_5c_2V0], (instregex "^MUL_(ZI|ZPmZ|ZZZI|ZZZ)_D",
-                                          "^MUL_ZPZZ_D",
-                                          "^[SU]MULH_(ZPmZ|ZZZ)_D",
-                                          "^[SU]MULH_ZPZZ_D")>;
-
-// Multiply accumulate, D element size
-def : InstRW<[V1Wr_ZMAD, V1Rd_ZMAD],
-             (instregex "^ML[AS]_ZPZZZ_D")>;
-def : InstRW<[V1Wr_ZMAD, ReadDefault, V1Rd_ZMAD],
-             (instregex "^(ML[AS]|MAD|MSB)_ZPmZZ_D")>;
-
-// Multiply accumulate, B, H, S element size
-// NOTE: This is not specified in the SOG.
-def : InstRW<[V1Write_4c_1V0], (instregex "^(ML[AS]|MAD|MSB)_(ZPmZZ|ZPZZZ)_[BHS]")>;
-
-// Predicate counting vector
-def : InstRW<[V1Write_2c_1V0], (instregex "^([SU]Q)?(DEC|INC)[HWD]_ZPiI$")>;
-
-// Reduction, arithmetic, B form
-def : InstRW<[V1Write_14c_1V_1V0_2V1_1V13],
-             (instregex "^[SU](ADD|MAX|MIN)V_VPZ_B")>;
-
-// Reduction, arithmetic, H form
-def : InstRW<[V1Write_12c_1V_1V01_2V1],
-             (instregex "^[SU](ADD|MAX|MIN)V_VPZ_H")>;
-
-// Reduction, arithmetic, S form
-def : InstRW<[V1Write_10c_1V_1V01_2V1],
-             (instregex "^[SU](ADD|MAX|MIN)V_VPZ_S")>;
-
-// Reduction, arithmetic, D form
-def : InstRW<[V1Write_8c_1V_1V01],
-             (instregex "^[SU](ADD|MAX|MIN)V_VPZ_D")>;
-
-// Reduction, logical
-def : InstRW<[V1Write_12c_4V01], (instregex "^(AND|EOR|OR)V_VPZ_[BHSD]$")>;
-
-// Reverse, vector
-def : InstRW<[V1Write_2c_1V01], (instregex "^REV_ZZ_[BHSD]$",
-                                           "^REVB_ZPmZ_[HSD]$",
-                                           "^REVH_ZPmZ_[SD]$",
-                                           "^REVW_ZPmZ_D$")>;
-
-// Select, vector form
-// Table lookup
-// Table lookup extension
-// Transpose, vector form
-// Unpack and extend
-// Zip/unzip
-def : InstRW<[V1Write_2c_1V01], (instregex "^SEL_ZPZZ_[BHSD]$",
-                                           "^TB[LX]_ZZZ_[BHSD]$",
-                                           "^TRN[12]_ZZZ_[BHSDQ]$",
-                                           "^[SU]UNPK(HI|LO)_ZZ_[HSD]$",
-                                           "^(UZP|ZIP)[12]_ZZZ_[BHSDQ]$")>;
-
-
-// SVE floating-point instructions
-// -----------------------------------------------------------------------------
-
-// Floating point absolute value/difference
-def : InstRW<[V1Write_2c_1V01], (instregex "^FAB[SD]_ZPmZ_[HSD]",
-                                           "^FABD_ZPZZ_[HSD]",
-                                           "^FABS_ZPmZ_[HSD]")>;
-
-// Floating point arithmetic
-def : InstRW<[V1Write_2c_1V01], (instregex "^F(ADD|SUB)_(ZPm[IZ]|ZZZ)_[HSD]",
-                                           "^F(ADD|SUB)_ZPZ[IZ]_[HSD]",
-                                           "^FADDP_ZPmZZ_[HSD]",
-                                           "^FNEG_ZPmZ_[HSD]",
-                                           "^FSUBR_ZPm[IZ]_[HSD]",
-                                           "^FSUBR_(ZPZI|ZPZZ)_[HSD]")>;
-
-// Floating point associative add, F16
-def : InstRW<[V1Write_19c_18V0], (instrs FADDA_VPZ_H)>;
-
-// Floating point associative add, F32
-def : InstRW<[V1Write_11c_10V0], (instrs FADDA_VPZ_S)>;
-
-// Floating point associative add, F64
-def : InstRW<[V1Write_8c_3V01], (instrs FADDA_VPZ_D)>;
-
-// Floating point compare
-def : InstRW<[V1Write_2c_1V0], (instregex "^FAC(GE|GT)_PPzZZ_[HSD]$",
-                                          "^FCM(EQ|GE|GT|NE|UO)_PPzZZ_[HSD]$",
-                                          "^FCM(EQ|GE|GT|LE|LT|NE)_PPzZ0_[HSD]$")>;
-
-// Floating point complex add
-def : InstRW<[V1Write_3c_1V01], (instregex "^FCADD_ZPmZ_[HSD]$")>;
-
-// Floating point complex multiply add
-def : InstRW<[V1Wr_ZFCMA, ReadDefault, V1Rd_ZFCMA], (instregex "^FCMLA_ZPmZZ_[HSD]")>;
-def : InstRW<[V1Wr_ZFCMA, V1Rd_ZFCMA],              (instregex "^FCMLA_ZZZI_[HS]")>;
-
-// Floating point convert, long or narrow (F16 to F32 or F32 to F16)
-// Floating point convert to integer, F32
-def : InstRW<[V1Write_4c_2V0], (instregex "^FCVT_ZPmZ_(HtoS|StoH)",
-                                          "^FCVTZ[SU]_ZPmZ_(HtoS|StoS)")>;
-
-// Floating point convert, long or narrow (F16 to F64, F32 to F64, F64 to F32 or F64 to F16)
-// Floating point convert to integer, F64
-def : InstRW<[V1Write_3c_1V0], (instregex "^FCVT_ZPmZ_(HtoD|StoD|DtoS|DtoH)",
-                                          "^FCVTZ[SU]_ZPmZ_(HtoD|StoD|DtoS|DtoD)")>;
-
-// Floating point convert to integer, F16
-def : InstRW<[V1Write_6c_4V0], (instregex "^FCVTZ[SU]_ZPmZ_HtoH")>;
-
-// Floating point copy
-def : InstRW<[V1Write_2c_1V01], (instregex "^FCPY_ZPmI_[HSD]$",
-                                           "^FDUP_ZI_[HSD]$")>;
-
-// Floating point divide, F16
-def : InstRW<[V1Write_13c10_1V0], (instregex "^FDIVR?_(ZPmZ|ZPZZ)_H")>;
-
-// Floating point divide, F32
-def : InstRW<[V1Write_10c7_1V0], (instregex "^FDIVR?_(ZPmZ|ZPZZ)_S")>;
-
-// Floating point divide, F64
-def : InstRW<[V1Write_15c7_1V0], (instregex "^FDIVR?_(ZPmZ|ZPZZ)_D")>;
-
-// Floating point min/max
-def : InstRW<[V1Write_2c_1V01], (instregex "^F(MAX|MIN)(NM)?_ZPm[IZ]_[HSD]",
-                                           "^F(MAX|MIN)(NM)?_ZPZ[IZ]_[HSD]")>;
-
-// Floating point multiply
-def : InstRW<[V1Write_3c_1V01], (instregex "^(FSCALE|FMULX)_ZPmZ_[HSD]",
-                                           "^FMULX_ZPZZ_[HSD]",
-                                           "^FMUL_(ZPm[IZ]|ZZZI?)_[HSD]",
-                                           "^FMUL_ZPZ[IZ]_[HSD]")>;
-
-// Floating point multiply accumulate
-def : InstRW<[V1Wr_ZFMA, ReadDefault, V1Rd_ZFMA],
-             (instregex "^FN?ML[AS]_ZPmZZ_[HSD]",
-                        "^FN?(MAD|MSB)_ZPmZZ_[HSD]")>;
-def : InstRW<[V1Wr_ZFMA, V1Rd_ZFMA],
-             (instregex "^FML[AS]_ZZZI_[HSD]",
-                        "^FN?ML[AS]_ZPZZZ_[HSD]")>;
-
-// Floating point reciprocal step
-def : InstRW<[V1Write_4c_1V01], (instregex "^F(RECPS|RSQRTS)_ZZZ_[HSD]")>;
-
-// Floating point reciprocal estimate, F16
-def : InstRW<[V1Write_6c_4V0], (instrs FRECPE_ZZ_H, FRSQRTE_ZZ_H)>;
-
-// Floating point reciprocal estimate, F32
-def : InstRW<[V1Write_4c_2V0], (instrs FRECPE_ZZ_S, FRSQRTE_ZZ_S)>;
-
-// Floating point reciprocal estimate, F64
-def : InstRW<[V1Write_3c_1V0], (instrs FRECPE_ZZ_D, FRSQRTE_ZZ_D)>;
-
-// Floating point reciprocal exponent
-def : InstRW<[V1Write_3c_1V0], (instregex "^FRECPX_ZPmZ_[HSD]")>;
-
-// Floating point reduction, F16
-def : InstRW<[V1Write_13c_6V01], (instregex "^F(ADD|((MAX|MIN)(NM)?))V_VPZ_H$")>;
-
-// Floating point reduction, F32
-def : InstRW<[V1Write_11c_1V_5V01], (instregex "^F(ADD|((MAX|MIN)(NM)?))V_VPZ_S$")>;
-
-// Floating point reduction, F64
-def : InstRW<[V1Write_9c_1V_4V01], (instregex "^F(ADD|((MAX|MIN)(NM)?))V_VPZ_D$")>;
-
-// Floating point round to integral, F16
-def : InstRW<[V1Write_6c_1V0], (instregex "^FRINT[AIMNPXZ]_ZPmZ_H")>;
-
-// Floating point round to integral, F32
-def : InstRW<[V1Write_4c_1V0], (instregex "^FRINT[AIMNPXZ]_ZPmZ_S")>;
-
-// Floating point round to integral, F64
-def : InstRW<[V1Write_3c_1V0], (instregex "^FRINT[AIMNPXZ]_ZPmZ_D")>;
-
-// Floating point square root, F16
-def : InstRW<[V1Write_13c10_1V0], (instregex "^FSQRT_ZPmZ_H")>;
-
-// Floating point square root, F32
-def : InstRW<[V1Write_10c7_1V0], (instregex "^FSQRT_ZPmZ_S")>;
-
-// Floating point square root, F64
-def : InstRW<[V1Write_16c7_1V0], (instregex "^FSQRT_ZPmZ_D")>;
-
-// Floating point trigonometric
-def : InstRW<[V1Write_3c_1V01], (instregex "^FEXPA_ZZ_[HSD]$",
-                                           "^FTMAD_ZZI_[HSD]$",
-                                           "^FTS(MUL|SEL)_ZZZ_[HSD]$")>;
-
-
-// SVE BFloat16 (BF16) instructions
-// -----------------------------------------------------------------------------
-
-// Convert, F32 to BF16
-def : InstRW<[V1Write_4c_1V0], (instrs BFCVT_ZPmZ, BFCVTNT_ZPmZ)>;
-
-// Dot product
-def : InstRW<[V1Wr_ZBFDOT, V1Rd_ZBFDOT], (instrs BFDOT_ZZI, BFDOT_ZZZ)>;
-
-// Matrix multiply accumulate
-def : InstRW<[V1Wr_ZBFMMA, V1Rd_ZBFMMA], (instrs BFMMLA_ZZZ_HtoS)>;
-
-// Multiply accumulate long
-def : InstRW<[V1Wr_ZBFMAL, V1Rd_ZBFMAL], (instregex "^BFMLAL[BT]_ZZZ(I)?$")>;
-
-
-// SVE Load instructions
-// -----------------------------------------------------------------------------
-
-// Load vector
-def : InstRW<[V1Write_6c_1L01], (instrs LDR_ZXI)>;
-
-// Load predicate
-def : InstRW<[V1Write_6c_1L_1M], (instrs LDR_PXI)>;
-
-// Contiguous load, scalar + imm
-// Contiguous load, scalar + scalar
-// Contiguous load broadcast, scalar + imm
-// Contiguous load broadcast, scalar + scalar
-def : InstRW<[V1Write_6c_1L01], (instregex "^LD1[BHWD]_IMM$",
-                                           "^LD1S?B_[HSD]_IMM$",
-                                           "^LD1S?H_[SD]_IMM$",
-                                           "^LD1S?W_D_IMM$",
-                                           "^LD1[BWD]$",
-                                           "^LD1S?B_[HSD]$",
-                                           "^LD1S?W_D$",
-                                           "^LD1R[BHWD]_IMM$",
-                                           "^LD1RSW_IMM$",
-                                           "^LD1RS?B_[HSD]_IMM$",
-                                           "^LD1RS?H_[SD]_IMM$",
-                                           "^LD1RS?W_D_IMM$",
-                                           "^LD1RQ_[BHWD]_IMM$",
-                                           "^LD1RQ_[BWD]$")>;
-def : InstRW<[V1Write_7c_1L01_1S], (instregex "^LD1H$",
-                                              "^LD1S?H_[SD]$",
-                                              "^LD1RQ_H$")>;
-
-// Non temporal load, scalar + imm
-def : InstRW<[V1Write_6c_1L01], (instregex "^LDNT1[BHWD]_ZRI$")>;
-
-// Non temporal load, scalar + scalar
-def : InstRW<[V1Write_7c_1L01_1S], (instrs LDNT1H_ZRR)>;
-def : InstRW<[V1Write_6c_1L01_1S], (instregex "^LDNT1[BWD]_ZRR$")>;
-
-// Contiguous first faulting load, scalar + scalar
-def : InstRW<[V1Write_7c_1L01_1S], (instregex "^LDFF1H$",
-                                              "^LDFF1S?H_[SD]$")>;
-def : InstRW<[V1Write_6c_1L01_1S], (instregex "^LDFF1[BWD]$",
-                                              "^LDFF1S?B_[HSD]$",
-                                              "^LDFF1S?W_D$")>;
-
-// Contiguous non faulting load, scalar + imm
-def : InstRW<[V1Write_6c_1L01], (instregex "^LDNF1[BHWD]_IMM$",
-                                           "^LDNF1S?B_[HSD]_IMM$",
-                                           "^LDNF1S?H_[SD]_IMM$",
-                                           "^LDNF1S?W_D_IMM$")>;
-
-// Contiguous Load two structures to two vectors, scalar + imm
-def : InstRW<[V1Write_8c_2L01_2V01], (instregex "^LD2[BHWD]_IMM$")>;
-
-// Contiguous Load two structures to two vectors, scalar + scalar
-def : InstRW<[V1Write_10c_2L01_2V01], (instrs LD2H)>;
-def : InstRW<[V1Write_9c_2L01_2V01],  (instregex "^LD2[BWD]$")>;
-
-// Contiguous Load three structures to three vectors, scalar + imm
-def : InstRW<[V1Write_11c_3L01_3V01], (instregex "^LD3[BHWD]_IMM$")>;
-
-// Contiguous Load three structures to three vectors, scalar + scalar
-def : InstRW<[V1Write_13c_3L01_1S_3V01], (instregex "^LD3[BHWD]$")>;
-
-// Contiguous Load four structures to four vectors, scalar + imm
-def : InstRW<[V1Write_12c_4L01_4V01], (instregex "^LD4[BHWD]_IMM$")>;
-
-// Contiguous Load four structures to four vectors, scalar + scalar
-def : InstRW<[V1Write_13c_4L01_2S_4V01], (instregex "^LD4[BHWD]$")>;
-
-// Gather load, vector + imm, 32-bit element size
-def : InstRW<[V1Write_11c_1L_1V], (instregex "^GLD(FF)?1S?[BH]_S_IMM$",
-                                             "^GLD(FF)?1W_IMM$")>;
-
-// Gather load, vector + imm, 64-bit element size
-def : InstRW<[V1Write_9c_2L_2V],
-             (instregex "^GLD(FF)?1S?[BHW]_D_IMM$",
-                        "^GLD(FF)?1S?[BHW]_D(_[SU]XTW)?(_SCALED)?$",
-                        "^GLD(FF)?1D_IMM$",
-                        "^GLD(FF)?1D(_[SU]XTW)?(_SCALED)?$")>;
-
-// Gather load, 32-bit scaled offset
-def : InstRW<[V1Write_11c_2L_2V],
-             (instregex "^GLD(FF)?1S?[HW]_S_[SU]XTW_SCALED$",
-                        "^GLD(FF)?1W_[SU]XTW_SCALED")>;
-
-// Gather load, 32-bit unpacked unscaled offset
-def : InstRW<[V1Write_9c_1L_1V],
-             (instregex "^GLD(FF)?1S?[BH]_S_[SU]XTW$",
-                        "^GLD(FF)?1W_[SU]XTW$")>;
-
-// Prefetch
-// NOTE: This is not specified in the SOG.
-def : InstRW<[V1Write_4c_1L01], (instregex "^PRF[BHWD]")>;
-
-
-// SVE Store instructions
-// -----------------------------------------------------------------------------
-
-// Store from predicate reg
-def : InstRW<[V1Write_1c_1L01], (instrs STR_PXI)>;
-
-// Store from vector reg
-def : InstRW<[V1Write_2c_1L01_1V], (instrs STR_ZXI)>;
-
-// Contiguous store, scalar + imm
-// Contiguous store, scalar + scalar
-def : InstRW<[V1Write_2c_1L01_1V], (instregex "^ST1[BHWD]_IMM$",
-                                              "^ST1B_[HSD]_IMM$",
-                                              "^ST1H_[SD]_IMM$",
-                                              "^ST1W_D_IMM$",
-                                              "^ST1[BWD]$",
-                                              "^ST1B_[HSD]$",
-                                              "^ST1W_D$")>;
-def : InstRW<[V1Write_2c_1L01_1S_1V], (instregex "^ST1H(_[SD])?$")>;
-
-// Contiguous store two structures from two vectors, scalar + imm
-// Contiguous store two structures from two vectors, scalar + scalar
-def : InstRW<[V1Write_4c_1L01_1V], (instregex "^ST2[BHWD]_IMM$",
-                                              "^ST2[BWD]$")>;
-def : InstRW<[V1Write_4c_1L01_1S_1V], (instrs ST2H)>;
-
-// Contiguous store three structures from three vectors, scalar + imm
-def : InstRW<[V1Write_7c_5L01_5V], (instregex "^ST3[BHWD]_IMM$")>;
-
-// Contiguous store three structures from three vectors, scalar + scalar
-def : InstRW<[V1Write_7c_5L01_5S_5V], (instregex "^ST3[BHWD]$")>;
-
-// Contiguous store four structures from four vectors, scalar + imm
-def : InstRW<[V1Write_11c_9L01_9V], (instregex "^ST4[BHWD]_IMM$")>;
-
-// Contiguous store four structures from four vectors, scalar + scalar
-def : InstRW<[V1Write_11c_9L01_9S_9V], (instregex "^ST4[BHWD]$")>;
-
-// Non temporal store, scalar + imm
-// Non temporal store, scalar + scalar
-def : InstRW<[V1Write_2c_1L01_1V], (instregex "^STNT1[BHWD]_ZRI$",
-                                              "^STNT1[BWD]_ZRR$")>;
-def : InstRW<[V1Write_2c_1L01_1S_1V], (instrs STNT1H_ZRR)>;
-
-// Scatter store vector + imm 32-bit element size
-// Scatter store, 32-bit scaled offset
-// Scatter store, 32-bit unscaled offset
-def : InstRW<[V1Write_10c_2L01_2V], (instregex "^SST1[BH]_S_IMM$",
-                                               "^SST1W_IMM$",
-                                               "^SST1(H_S|W)_[SU]XTW_SCALED$",
-                                               "^SST1[BH]_S_[SU]XTW$",
-                                               "^SST1W_[SU]XTW$")>;
-
-// Scatter store, 32-bit unpacked unscaled offset
-// Scatter store, 32-bit unpacked scaled offset
-def : InstRW<[V1Write_6c_1L01_1V], (instregex "^SST1[BHW]_D_[SU]XTW$",
-                                              "^SST1D_[SU]XTW$",
-                                              "^SST1[HW]_D_[SU]XTW_SCALED$",
-                                              "^SST1D_[SU]XTW_SCALED$")>;
-
-// Scatter store vector + imm 64-bit element size
-// Scatter store, 64-bit scaled offset
-// Scatter store, 64-bit unscaled offset
-def : InstRW<[V1Write_6c_1L01_1V], (instregex "^SST1[BHW]_D_IMM$",
-                                              "^SST1D_IMM$",
-                                              "^SST1[HW]_D_SCALED$",
-                                              "^SST1D_SCALED$",
-                                              "^SST1[BHW]_D$",
-                                              "^SST1D$")>;
-
-
-// SVE Miscellaneous instructions
-// -----------------------------------------------------------------------------
-
-// Read first fault register, unpredicated
-// Set first fault register
-// Write to first fault register
-def : InstRW<[V1Write_2c_1M0], (instrs RDFFR_P,
-                                       SETFFR,
-                                       WRFFR)>;
-
-// Read first fault register, predicated
-def : InstRW<[V1Write_3c_2M0], (instrs RDFFR_PPz)>;
-
-// Read first fault register and set flags
-def : InstRW<[V1Write_4c_1M], (instrs RDFFRS_PPz)>;
-
+// [x1_sve] docs/x1-sog.md D-8: the Cortex-X1 implements no SVE (Armv8.2-A with the extensions
+// listed in sec. 2, l.373-376; LLVM's cortex-x1 has no SVE feature, so the disassembler does not
+// decode SVE encodings for it).  SVE is in UnsupportedFeatures and the stock Neoverse V1 SVE rows
+// are not carried.
 
 }
