@@ -939,3 +939,21 @@ TEST(A55SogTest, AdrpPointerForwardingBaseOfUnsignedImmediateLoads) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("adrp x1, 0\n") + Ld + "\nb #-8"), 2.0, kTol) << Ld;
     }
 }
+
+// U-13 [a55_pac_hint]: the HINT-space pointer-authentication instructions are NOPs on the A55
+// (Armv8.2-A, no FEAT_PAuth): no resource, no group bits, they pair like a NOP.
+TEST(A55SogTest, PointerAuthenticationHints) {
+    for (const char *Asm : {"paciasp", "autiasp", "paciaz", "autiaz", "pacia1716", "autib1716",
+                            "hint #25", "hint #29", "xpaclri"}) {
+        A55InstInfo I = a55Desc(Asm);
+        ASSERT_TRUE(I.Valid) << Asm;
+        EXPECT_TRUE(I.ResourceCycles.empty()) << Asm;
+        EXPECT_FALSE(I.BeginGroup) << Asm;
+        EXPECT_FALSE(I.EndGroup) << Asm;
+    }
+    // They still read and write LR with latency 1 (LLVM's implicit operands): a chain of 1 each.
+    EXPECT_NEAR(a55CyclesPerIter("paciasp\nautiasp\npaciasp\nautiasp"), 4.0, kTol);
+    EXPECT_NEAR(a55CyclesPerIter("paciasp\nadd x1, x1, #1"), 1.0, kTol);
+    // The other hints are unchanged: BTI stays WriteHint on the branch unit.
+    EXPECT_FALSE(a55Desc("bti c").ResourceCycles.empty());
+}

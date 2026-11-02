@@ -247,6 +247,12 @@ def : WriteRes<WriteHint, [CortexA55UnitB]>;
 //   WriteHint (docs/a55-sog.md U-13).
 def CortexA55WriteNop : SchedWriteRes<[]> { let Latency = 1; }
 def : InstRW<[CortexA55WriteNop], (instrs NOP)>;
+// [a55_pac_hint] docs/a55-sog.md U-13: the pointer-authentication instructions of the HINT space
+//   (PACIASP, AUTIASP, PACIAZ, ..., XPACLRI) are NOPs on the Cortex-A55, which implements Armv8.2-A
+//   without FEAT_PAuth (the project owner's decision, 2026-11-02).  They take the NOP row: no resource.
+def : InstRW<[CortexA55WriteNop], (instrs PACIAZ, PACIBZ, PACIASP, PACIBSP, PACIA1716, PACIB1716,
+                                          AUTIAZ, AUTIBZ, AUTIASP, AUTIBSP, AUTIA1716, AUTIB1716,
+                                          XPACLRI)>;
 
 // FP ALU
 //   As WriteF result is produced in F5 and it can be mostly forwarded

@@ -1069,7 +1069,25 @@ def : InstRW<[N2Write_3c_1M], (instrs SMULHrr, UMULHrr)>;
 // Compute pointer authentication code for data address
 // Compute pointer authentication code, using generic key
 // Compute pointer authentication code for instruction address
-def : InstRW<[N2Write_5c_1M0], (instregex "^AUT", "^PAC")>;
+def : InstRW<[N2Write_5c_1M0],
+             (instregex "^AUT(D[AB]|DZ[AB]|I[AB]|IZ[AB]|I[AB]171615|I[AB]SPPC[ir])$",
+                        "^PAC(D[AB]|DZ[AB]|GA|I[AB]|IZ[AB]|I[AB]171615|I[AB]SPPC|NBI[AB]SPPC|M)$",
+                        "^(PAC|AUTPAC|AUTx16x17|AUTxMxN)$")>;
+// [a78_pac_hint] docs/a78-sog.md D-12: the pointer-authentication instructions of the HINT space
+// are NOPs on a core without FEAT_PAuth.  The Cortex-A78 implements Armv8.2-A without pointer
+// authentication, and its SOG has no PAC row; LLVM gives cortex-a78 and cortex-a78ae no PAuth
+// feature, cortex-a78c has it.  Without the feature they take the NOP treatment (WriteHint: no
+// pipeline, C-3); with it (cortex-a78c, no A78C SOG consulted, U-12) the stock Neoverse N2 rows.
+def A78HasPAuth : FeatureSchedPredicate<FeaturePAuth>;
+def A78Write_Hint : SchedWriteRes<[]> { let Latency = 1; }
+def A78Write_PACHint : SchedWriteVariant<[
+                         SchedVar<A78HasPAuth, [N2Write_5c_1M0]>,
+                         SchedVar<NoSchedPred, [A78Write_Hint]>]>;
+def A78Write_XPACHint : SchedWriteVariant<[
+                          SchedVar<A78HasPAuth, [N2Write_2c_1M0]>,
+                          SchedVar<NoSchedPred, [A78Write_Hint]>]>;
+def : InstRW<[A78Write_PACHint], (instrs PACIAZ, PACIBZ, PACIASP, PACIBSP, PACIA1716, PACIB1716,
+                                         AUTIAZ, AUTIBZ, AUTIASP, AUTIBSP, AUTIA1716, AUTIB1716)>;
 
 // Branch and link, register, with pointer authentication
 // Branch, register, with pointer authentication
@@ -1083,7 +1101,8 @@ def : InstRW<[N2Write_6c_1M0_1B], (instrs BLRAA, BLRAAZ, BLRAB, BLRABZ, BRAA,
 def : InstRW<[N2Write_9c_1M0_1L], (instregex "^LDRA[AB](indexed|writeback)")>;
 
 // Strip pointer authentication code
-def : InstRW<[N2Write_2c_1M0], (instrs XPACD, XPACI, XPACLRI)>;
+def : InstRW<[N2Write_2c_1M0], (instrs XPACD, XPACI)>;
+def : InstRW<[A78Write_XPACHint], (instrs XPACLRI)>;  // [a78_pac_hint]
 
 // Miscellaneous data-processing instructions
 // -----------------------------------------------------------------------------

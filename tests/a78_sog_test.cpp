@@ -510,3 +510,29 @@ TEST(A78SogTest, BorrowedStoreDataNeededLater) {
     EXPECT_NEAR(a78Cycles("ldr x1, [x0]\nstr x1, [x0]"), 4.0, kTol);
     EXPECT_NEAR(a78Cycles("ldr q1, [x0]\nstr q1, [x0]"), 6.0, kTol);
 }
+
+// D-12 [a78_pac_hint]: the HINT-space pointer-authentication instructions are NOPs on the A78
+// (Armv8.2-A, no FEAT_PAuth); cortex-a78c has PAuth and keeps the model's rows (U-12).
+TEST(A78SogTest, PointerAuthenticationHints) {
+    for (const char *Asm : {"paciasp", "autiasp", "paciaz", "autiaz", "pacia1716", "autib1716",
+                            "hint #25", "hint #29", "xpaclri"}) {
+        A78InstInfo I = a78Desc(Asm);
+        ASSERT_TRUE(I.Valid) << Asm;
+        EXPECT_TRUE(I.ResourceCycles.empty()) << Asm;
+        EXPECT_EQ(I.MaxLatency, 1u) << Asm;
+    }
+    // They still read and write LR with latency 1 (LLVM's implicit operands): a chain of 1 each.
+    EXPECT_NEAR(a78Cycles("paciasp\nautiasp"), 2.0, kTol);
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a78c");
+    llvm::remapSchedClassIndices(*TC.MCII, "cortex-a78c");
+    llvm::installLocalSchedModel(*TC.STI, "cortex-a78c");
+    TC.STI = llvm::wrapCustomSubtargetInfo(std::move(TC.STI), "cortex-a78c");
+    auto Instrs = parseAsm(TC, "paciasp");
+    ASSERT_EQ(Instrs.size(), 1u);
+    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
+    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+    auto E = IB.createInstruction(Instrs[0].Inst, {});
+    ASSERT_TRUE(static_cast<bool>(E));
+    EXPECT_EQ((*E)->getLatency(), 5u);
+}

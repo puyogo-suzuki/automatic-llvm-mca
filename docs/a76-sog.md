@@ -220,8 +220,13 @@ a steady state. Test: `Stores`, `DispatchAndPipelines`.
 The SOG has no row for NOP or the other hints. Implementation (upstream): `WriteHint` has no
 resource; a NOP still counts as one Mop and one uop. This is the decision made for the Cortex-A55
 and Cortex-A520 ([a55-sog.md](a55-sog.md), [a520-sog.md](a520-sog.md) D-14), and the model already
-followed it. The research binaries contain 348,224 NOPs (mostly padding; `mca_tool` skips all-NOP
-regions). Test: `DispatchAndPipelines`.
+followed it. The HINT-space pointer-authentication instructions (PACIASP, AUTIASP, PACIAZ, ...,
+XPACLRI) are NOPs as well: the A76 implements Armv8.2-A without FEAT_PAuth (`UnsupportedFeatures`
+has PAuth), they use `WriteHint`, and the project owner decided on 2026-11-02 that they take the NOP
+treatment (as [x1-sog.md](x1-sog.md) D-13; no model change was needed; they keep LLVM's implicit
+read and write of LR with latency 1, so `paciasp; autiasp` + branch is 2.0). The research binaries
+contain 348,224 NOPs (mostly padding; `mca_tool` skips all-NOP regions). Test:
+`DispatchAndPipelines`, `PointerAuthenticationHints`.
 
 <a id="c-4"></a>
 **C-4. No zero-latency moves, no instruction fusion.**

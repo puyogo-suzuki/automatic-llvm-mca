@@ -440,3 +440,17 @@ TEST(A76SogTest, BorrowedStoreDataNeededLater) {
     // A 1-cycle producer is not changed (Facile's 1-cycle floor): 4 + 1 + 1.
     EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]"), 6.0, kTol);
 }
+
+// C-3: the HINT-space pointer-authentication instructions are NOPs on the A76 (Armv8.2-A, no
+// FEAT_PAuth): no pipeline, latency 1.
+TEST(A76SogTest, PointerAuthenticationHints) {
+    for (const char *Asm : {"paciasp", "autiasp", "paciaz", "autiaz", "pacia1716", "autib1716",
+                            "hint #25", "hint #29", "xpaclri"}) {
+        A76InstInfo I = a76Desc(Asm);
+        ASSERT_TRUE(I.Valid) << Asm;
+        EXPECT_TRUE(I.ResourceCycles.empty()) << Asm;
+        EXPECT_EQ(I.MaxLatency, 1u) << Asm;
+    }
+    // They still read and write LR with latency 1 (LLVM's implicit operands): a chain of 1 each.
+    EXPECT_NEAR(a76Cycles("paciasp\nautiasp\npaciasp\nautiasp"), 4.0, kTol);
+}

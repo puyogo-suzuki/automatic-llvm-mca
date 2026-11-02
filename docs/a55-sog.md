@@ -178,6 +178,7 @@ A55 ([docs.md](docs.md) section 2.F).
 | `[a55_sog_n6]` ASIMD MOV | [C-25](#c-25), [I-8](#i-8) |
 | `[a55_sog_n7]` SQXTN / SQXTUN / UQXTN | [C-27](#c-27) |
 | `[a55_sog_n8]` NOP | [C-3](#c-3), [U-13](#u-13) |
+| `[a55_pac_hint]` pointer-authentication hints | [C-3](#c-3), [U-13](#u-13) |
 | `[a55_sog_n2]` pointer chasing from load pairs, LDPSW | [C-7](#c-7), [C-17](#c-17), [U-15](#u-15) |
 | `[a55_sog_n3]` pointer chasing into store and ASIMD load/store bases | [C-7](#c-7), [C-18](#c-18), [U-16](#u-16) |
 | `[a55_sog_u9]` store data read advance | [C-18](#c-18), [U-9](#u-9) |
@@ -226,8 +227,12 @@ SOG sec. 3.2 Table 1 (p.9-10, l.376-414) and Table 2 (p.10-11, l.417-460).
 AArch32-only rules (load/store multiple, LDRD, VMRS/VMSR, IT) cannot occur in A64 code.
 NOP: resolved 2026-10-31. The NOP opcode (`nop`) used to be `WriteHint` on
 `CortexA55UnitB`, so it could pair neither with a branch nor with another NOP; it now uses no
-resource, so a NOP pairs with anything the issue rules allow. The SOG names no pipe for a NOP, and
-which other hint instructions count as "Architectural NOP" is open: [U-13](#u-13). Measured
+resource, so a NOP pairs with anything the issue rules allow. The HINT-space pointer-authentication
+instructions (PACIASP, AUTIASP, PACIAZ, ..., XPACLRI) are NOPs as well (the project owner's decision
+of 2026-11-02, `[a55_pac_hint]`, [U-13](#u-13); they keep LLVM's implicit read and write of LR with
+latency 1; measured: `paciasp; autiasp` + branch 3.0 -> 2.0, `paciasp; add x1, x1, #1` + branch 2.0
+-> 1.5). The SOG names no pipe for a NOP, and which other
+hint instructions count as "Architectural NOP" is open: [U-13](#u-13). Measured
 (section 8): four `nop` + branch 2.5 cycles/iteration (was 5.0), `add; nop` + branch 1.5 (was
 2.0). Test: `NopDualIssues`. The compare-and-branch rule of Table 2 contradicts sec. 4.2:
 [U-14](#u-14).
@@ -1016,17 +1021,18 @@ SOG: the only mention of NOP is Table 2 (sec. 3.2, p.11, l.458), "Miscellaneous:
 NOP", read as "can be instruction-1"; Table 1 does not restrict it as instruction-0; sec. 4 has no
 row for NOP or any other hint. Unclear: (a) which pipe, if any, a NOP occupies, and its throughput
 (beyond the pairing rules, the SOG gives none); (b) whether "Architectural NOP" covers only `nop`
-or also the hint-space instructions that the Cortex-A55 (Armv8.2) executes as NOPs, such as
-PACIASP/AUTIASP and the other pointer-authentication hints (Armv8.3) and BTI (Armv8.5), or YIELD,
-SEV, SEVL, CSDB. Current handling (`[a55_sog_n8]`, [C-3](#c-3)): the `NOP` opcode has no resource
-and no group bits, so two NOPs, or a NOP and a branch, pair; every other hint keeps `WriteHint` on
-`CortexA55UnitB` (one per cycle, no pairing with a branch): `HINT` (YIELD, WFE, WFI, SEV, SEVL, BTI,
-CSDB, ...) and the opcodes PACIASP, AUTIASP, PACIAZ, XPACLRI, ... Side note found while checking: WFE
+or also the hint-space instructions that the Cortex-A55 (Armv8.2) executes as NOPs, such as BTI
+(Armv8.5), YIELD, SEV, SEVL, CSDB. *Status: the pointer-authentication hints (Armv8.3) are decided:
+NOPs, 2026-11-02.* Current handling (`[a55_sog_n8]`, `[a55_pac_hint]`, [C-3](#c-3)): the `NOP`
+opcode and the pointer-authentication hints PACIAZ, PACIBZ, PACIASP, PACIBSP,
+PACIA1716, PACIB1716, AUTIAZ, AUTIBZ, AUTIASP, AUTIBSP, AUTIA1716, AUTIB1716 and XPACLRI have no
+resource and no group bits (the Cortex-A55 has no FEAT_PAuth, so they execute as NOPs), so two of
+them, or one and a branch, pair; every other hint keeps `WriteHint` on `CortexA55UnitB` (one per
+cycle, no pairing with a branch): `HINT` (YIELD, WFE, WFI, SEV, SEVL, BTI, CSDB, ...). Side note found while checking: WFE
 and WFI are `HINT` in LLVM, not `WriteSys`, so they do not get the `SingleIssue` that [C-3](#c-3)
 attributes to the control instructions of Table 1 (recorded as [N-3](#n-3), not changed). Expected impact: small; NOPs
-are mostly alignment padding, and pointer-authentication hints appear once per function prologue
-and epilogue when built with `-mbranch-protection`. How to settle: on hardware, loops of `nop` /
-`paciasp` / `bti c` pairs with a branch and with each other.
+are mostly alignment padding. How to settle (the remaining hints): on hardware, loops of `nop` /
+`bti c` pairs with a branch and with each other.
 
 <a id="u-14"></a>
 **U-14. Compare-and-branch (CBZ, CBNZ, TBZ, TBNZ) as instruction-1: which row applies.**

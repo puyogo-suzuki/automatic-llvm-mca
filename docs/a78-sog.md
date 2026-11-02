@@ -27,7 +27,7 @@ Contents
 |---|---|
 | C, compatible | [C-1](#c-1) to [C-24](#c-24) |
 | N, not compatible | none open |
-| D, deliberate deviation or interpretation | [D-1](#d-1) to [D-11](#d-11) |
+| D, deliberate deviation or interpretation | [D-1](#d-1) to [D-12](#d-12) |
 | U, unclear in the SOG | [U-1](#u-1) to [U-12](#u-12) |
 | I, inconsistent within the SOG | [I-1](#i-1) to [I-7](#i-7) |
 | X, outside the A78 path | [X-1](#x-1) to [X-2](#x-2) |
@@ -181,6 +181,7 @@ changes are in the `.td` file and are listed in the items.
 | `[a78_extr]` | [C-11](#c-11) |
 | `[a78_reg_offset]` | [C-12](#c-12), [C-13](#c-13) |
 | `[a78_reg_offset_h]` | [C-12](#c-12), [C-16](#c-16), [I-4](#i-4) |
+| `[a78_pac_hint]` | [D-12](#d-12), [U-12](#u-12) |
 | `[a78_ldpsw]` | [C-12](#c-12) |
 | `[a78_ldp_hi]` | [D-10](#d-10) |
 | `[a78_store_rows]` | [C-13](#c-13), [C-17](#c-17), [I-3](#i-3), [I-5](#i-5) |
@@ -709,6 +710,22 @@ are also listed as fused (l.2821-2823), but sec. 4.7 (l.2569-2570) gives two AES
 cycle; masking the second would allow four per cycle, so the pair is left to [U-6](#u-6). Test:
 `Fusion`.
 
+<a id="d-12"></a>
+**D-12. Pointer-authentication instructions of the HINT space are NOPs on the A78.**
+*Introduced 2026-11-02* (`[a78_pac_hint]`; the project owner's decision, the same as the X1's,
+[x1-sog.md](x1-sog.md) D-13).
+SOG: the A78 implements Armv8.2-A with RAS, LDAPR (Armv8.3-A) and the dot product (Armv8.4-A) (sec.
+2, p.11, l.374-377); pointer authentication is not among them, and the SOG has no PAC row. LLVM
+gives `cortex-a78` and `cortex-a78ae` no PAuth feature (`cortex-a78c` has it). PACIASP, AUTIASP,
+PACIAZ, ..., PACIA1716, ..., XPACLRI are HINT encodings, so on the A78 they execute as NOPs.
+Implementation: a `SchedWriteVariant` on `FeatureSchedPredicate<FeaturePAuth>`: without the feature
+`A78Write_Hint` (latency 1, no pipeline, as `WriteHint`, [C-3](#c-3)); with it the stock rows
+(`N2Write_5c_1M0`, XPACLRI `N2Write_2c_1M0`; [U-12](#u-12)). The other PAC instructions keep the
+stock rows (LLVM rejects them for `cortex-a78`). Before: 5 cycles on M0 for every function prologue
+and epilogue. Not fused as a NOP ([C-5](#c-5) matches `NOP` and `HINT #0` only). They keep LLVM's
+implicit read and write of LR, now with latency 1, so a loop holding both is a chain of one cycle
+each. Measured: `paciasp; autiasp` + branch 10.0 -> 2.0. Test: `PointerAuthenticationHints`.
+
 ---
 
 ## 6. Unclear in the SOG (U)
@@ -814,8 +831,8 @@ measurement.
 The N2 model has rows for FMLAL/FMLSL, BF16, FCMLA, SHA512/SHA3/SM3/SM4, pointer authentication,
 MTE and SVE; the A78 SOG has no row for them, and LLVM 22 rejects them for `cortex-a78` (checked for
 FMLAL, BFDOT, FCMLA, AUTIA, SHA512H, EOR3 with `llvm-mc`). They cannot occur in A78 code and were
-not compared. PACIASP / AUTIASP in the research binaries decode as hints (`HINT #25`, `#29`), which
-take no pipeline ([C-3](#c-3)).
+not compared. The HINT-space forms (PACIASP, AUTIASP, ...) are NOPs ([D-12](#d-12)); the model's PAC
+rows apply only to `cortex-a78c`, which has PAuth.
 
 ---
 
