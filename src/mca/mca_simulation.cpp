@@ -5,6 +5,7 @@
 #include "cpu/cpu_traits.h"
 #include "cpu/sched_model.h"
 #include "mca/steady_state_tracker.h"
+#include "mca/zero_aware_instr_builder.h"
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -42,9 +43,44 @@ unsigned getWarmupWindowSize(const MCSubtargetInfo &STI) {
     return std::max(1u, SM.IssueWidth);
 }
 
-} // namespace
+// The register file among the hardware units of `Ctx`, or null.
+mca::RegisterFile *findRegisterFile(mca::Context &Ctx) {
+    auto &Hardware = Ctx.*get(Context_Hardware_Tag{});
+    for (auto &HU : Hardware) {
+        if (auto *RF = dynamic_cast<mca::RegisterFile *>(HU.get()))
+            return RF;
+    }
+    return nullptr;
+}
 
-namespace {
+// --override-load-latency: every write of a load with a latency above one
+// cycle gets `Latency` (writes of at most one cycle, e.g. a base-register
+// update, keep theirs), and MaxLatency is recomputed.  Writes the InstrDesc, which
+// InstrBuilder shares between instructions.
+void applyLoadLatencyOverride(mca::Instruction &Inst, int Latency) {
+    mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst.getDesc());
+    for (auto &W : MutableDesc.Writes) {
+        if (W.Latency > 1) {
+            W.Latency = Latency;
+        }
+    }
+    unsigned MaxLatency = 0;
+    for (const auto &W : MutableDesc.Writes) {
+        MaxLatency = std::max(MaxLatency, W.Latency);
+    }
+    MutableDesc.MaxLatency = MaxLatency;
+}
+
+// Lets `Tracker` drop the previous iteration's producers before the issue
+// stage's register hazard check (see the call site in analyzeMcaRegion()).
+template <typename IssueStageT>
+void installLoopCarriedHook(IssueStageT *Issue, LoopCarriedIgnoreSteadyStateTracker *Tracker) {
+    if (!Issue)
+        return;
+    Issue->setBeforeRegisterHazardCheckHook(
+        [Tracker](const mca::InstRef &IR) { Tracker->beforeRegisterHazardCheck(IR); });
+}
+
 struct DroppedInstructionTally {
     std::mutex Lock;
     std::map<std::string, uint64_t> ByOpcode;
@@ -78,6 +114,28 @@ void reportDroppedInstructions(raw_ostream &OS) {
     T.ByOpcode.clear();
 }
 
+void buildRegionInstructions(
+    ZeroAwareInstrBuilder &IB, const MCSubtargetInfo &STI, const MCInstrInfo &MCII,
+    ArrayRef<Instr> instrs,
+    function_ref<void(const Instr &, std::unique_ptr<mca::Instruction>)> Accept) {
+    const bool CoalescedROB = isCoalescedROBSubtarget(STI);
+    for (const auto &I : instrs) {
+        auto ExpectedInst = IB.createInstruction(I.Inst, {});
+        if (!ExpectedInst) {
+            // Not silently: see noteDroppedInstruction() in mca_simulation.h.
+            consumeError(ExpectedInst.takeError());
+            noteDroppedInstruction(MCII.getName(I.Inst.getOpcode()));
+            continue;
+        }
+        std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
+        if (CoalescedROB) {
+            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
+            MutableDesc.NumMicroOps = 1;
+        }
+        Accept(I, std::move(Inst));
+    }
+}
+
 unsigned computeSteadyIterations(const MCSubtargetInfo &STI, size_t regionInstrCount, unsigned iterations) {
     if (regionInstrCount == 0) return 1;
     const unsigned WindowSize = std::max(1u, getWarmupWindowSize(STI));
@@ -99,48 +157,24 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
 
     mca::Context MCAContext(MRI, STI);
     mca::InstrumentManager IM(STI, MCII);
-    mca::InstrBuilder IB(STI, MCII, MRI, MCIA, IM, 0);
+    ZeroAwareInstrBuilder IB(STI, MCII, MRI, MCIA, IM, 0);
+    const CpuModel Model = getCpuTraits(STI.getCPU()).Model;
+    const bool IsA55 = (Model == CpuModel::A55);
+    const bool IsA520 = (Model == CpuModel::A520);
     std::vector<mca::SourceMgr::UniqueInst> Sequence;
-    SmallVector<mca::Instrument *> IVec;
-    for (const auto &I : instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, IVec);
-        if (!ExpectedInst) {
-            // Not silently: see noteDroppedInstruction() in mca_simulation.h.
-            consumeError(ExpectedInst.takeError());
-            noteDroppedInstruction(MCII.getName(I.Inst.getOpcode()));
-            continue;
-        }
-        
-        std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
-        if (getCpuTraits(STI.getCPU()).Model == CpuModel::A55)
+    buildRegionInstructions(IB, STI, MCII, instrs,
+                            [&](const Instr &I, std::unique_ptr<mca::Instruction> Inst) {
+        if (IsA55)
             applyA55InstructionAdaptations(*Inst, I.Inst);
-        if (Inst->getMayLoad() && overrideLoadLatency > 0) {
-            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
-            for (auto &W : MutableDesc.Writes) {
-                if (W.Latency > 1) {
-                    W.Latency = overrideLoadLatency;
-                }
-            }
-            unsigned MaxLatency = 0;
-            for (const auto &W : MutableDesc.Writes) {
-                MaxLatency = std::max(MaxLatency, W.Latency);
-            }
-            MutableDesc.MaxLatency = MaxLatency;
-        }
-        if (isCoalescedROBSubtarget(STI)) {
-            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
-            MutableDesc.NumMicroOps = 1;
-        }
-        
+        if (Inst->getMayLoad() && overrideLoadLatency > 0)
+            applyLoadLatencyOverride(*Inst, overrideLoadLatency);
         Sequence.push_back(std::move(Inst));
-    }
+    });
 
     const unsigned WarmupIterations = computeWarmupIterations(STI, instrs.size());
     const unsigned SteadyIterations = computeSteadyIterations(STI, instrs.size(), iterations);
     mca::CircularSourceMgr CSM(Sequence, WarmupIterations + SteadyIterations);
     mca::CustomBehaviour CB(STI, CSM, MCII);
-    bool IsA55 = (getCpuTraits(STI.getCPU()).Model == CpuModel::A55);
-    bool IsA520 = (getCpuTraits(STI.getCPU()).Model == CpuModel::A520);
     std::unique_ptr<mca::Pipeline> P;
     mca::A55DecoupledIssueStage *A55Issue = nullptr;
     mca::A520InOrderIssueStage *A520Issue = nullptr;
@@ -149,8 +183,8 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     } else if (IsA520) {
         // Cortex-A520: the stock in-order pipeline with the project's copy of
         // InOrderIssueStage (src/a520/a520_issue_stage.h): no general write-back
-        // ordering [a520_no_wb_order] and a hook before the register hazard check
-        // [a520_lc_hook] (docs/a520-sog.md D-9, section 2.2), and the flag bypass
+        // ordering [a520_no_wb_order] (docs/a520-sog.md D-9), a hook before the
+        // register hazard check [a520_lc_hook] (docs/a520-sog.md section 2.2), and the flag bypass
         // borrowed from the Cortex-A55 [a520_from_a55_flags] (docs/a520-sog.md B-4).
         auto PRF_unique = std::make_unique<mca::RegisterFile>(STI.getSchedModel(), MRI, PO.RegisterFileSize);
         auto LSU_unique = std::make_unique<mca::LSUnit>(STI.getSchedModel(), PO.LoadQueueSize,
@@ -172,14 +206,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         P = MCAContext.createInOrderPipeline(PO, CSM, CB);
     }
 
-    mca::RegisterFile *PRF = nullptr;
-    auto &hardware = MCAContext.*get(Context_Hardware_Tag{});
-    for (auto &hu : hardware) {
-        if (auto *r = dynamic_cast<mca::RegisterFile *>(hu.get())) {
-            PRF = r;
-            break;
-        }
-    }
+    mca::RegisterFile *PRF = findRegisterFile(MCAContext);
 
     std::unique_ptr<BaseSteadyStateTracker> Tracker;
     unsigned WarmupLimit = instrs.size() * WarmupIterations;
@@ -193,17 +220,9 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
         // still waited for the previous iteration.  The A55 issue stage calls the
         // tracker before that check, and so does the Cortex-A520 issue stage
         // (src/a520/a520_issue_stage.h).  The stock out-of-order pipeline has no
-        // such hook and is left as it was.
-        if (A55Issue) {
-            LoopCarriedIgnoreSteadyStateTracker *T = LCI.get();
-            A55Issue->setBeforeRegisterHazardCheckHook(
-                [T](const mca::InstRef &IR) { T->beforeRegisterHazardCheck(IR); });
-        }
-        if (A520Issue) {  // [a520_lc_hook] docs/a520-sog.md section 2.2
-            LoopCarriedIgnoreSteadyStateTracker *T = LCI.get();
-            A520Issue->setBeforeRegisterHazardCheckHook(
-                [T](const mca::InstRef &IR) { T->beforeRegisterHazardCheck(IR); });
-        }
+        // such hook and does not need one (docs.md 2.C).
+        installLoopCarriedHook(A55Issue, LCI.get());
+        installLoopCarriedHook(A520Issue, LCI.get());  // [a520_lc_hook] docs/a520-sog.md section 2.2
         Tracker = std::move(LCI);
     } else {
         Tracker = std::make_unique<BaseSteadyStateTracker>(

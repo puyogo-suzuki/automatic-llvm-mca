@@ -5,12 +5,13 @@ Estimate throughput for ELF binaries using a direct C++ interface to LLVM MCA.
 ## Procedure
 
 1.  Load the ELF binary and identify executable sections.
-2.  Perform linear disassembly to discover basic blocks and loops.
-3.  Run the LLVM Machine Code Analyzer (MCA) on each region to obtain retired instructions and elapsed cycles.
-4.  Print a CSV with start address, end address, retired instructions, load
-    instructions, elapsed cycles, and Memory Level Parallelism (MLP) for every region.
+2.  Perform linear disassembly and split each function into loop and non-loop regions (see "Region Splitting & Merging Algorithm" below).
+3.  Run the LLVM Machine Code Analyzer (MCA) on each region to obtain retired instructions and elapsed cycles (or, with `--facile`, the Facile analytical estimate).
+4.  Print a CSV with one row per region: `start_address`, `end_address`, `analysis_start`,
+    `analysis_end`, `length`, `loop`, `retired_instructions`, `load_instructions`, `cycles`,
+    `mlp`, `mlp_r` (and `facile_reason` with `--facile-reason`).
 
-This tool is implemented in pure C++ using LLVM 23 APIs, providing extreme performance by avoiding all Python overhead and subprocess creation.
+This tool is implemented in C++ against the LLVM 22 libraries (LLVM's MCA, MC and disassembler APIs), without Python or subprocesses.
 
 ## Supported Architectures
 
@@ -18,6 +19,13 @@ This tool is implemented in pure C++ using LLVM 23 APIs, providing extreme perfo
 *   **AArch64** (64-bit ARM)
 *   **32-bit ARM**
 *   **RISC-V** (RV32IC, RV64IC)
+
+The region splitter (`src/core/region_splitter.cpp`) and the end addresses in the CSV assume
+fixed 4-byte instructions, as on AArch64; for x86 and compressed RISC-V code the loop detection
+and the end addresses are only right where that assumption holds. The MLP analysis has its own
+analyzer for x86 and RISC-V; every other architecture, 32-bit ARM included, uses the AArch64
+analyzer (`MLPAnalyzer::create`). The scheduling models and SOG comparisons in `docs/` are for
+AArch64 cores only.
 
 ## Build Instructions
 
@@ -44,7 +52,9 @@ cmake ..
 make
 ```
 
-This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp-objdump`, `build/mlp-check`, `build/mca-insts-info`, and the unit tests `build/mca_unit_tests`.
+`CMakeLists.txt` requires LLVM 22.1.8 (`find_package(LLVM 22.1.8 REQUIRED CONFIG)`; pass `-DLLVM_DIR=/usr/lib/llvm-22/cmake` if CMake does not find it) and runs `/usr/bin/llvm-tblgen-22` to generate the AArch64 tables from `llvm-source` and `ModifiedTarget/AArch64/*.td`. GoogleTest is fetched by CMake (`FetchContent`; `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<dir>` uses a local copy).
+
+This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp-objdump`, `build/mlp-check`, `build/mca-insts-info`, `build/analyze_distribution`, and the unit tests `build/mca_unit_tests`.
 
 ## Usage
 
@@ -52,10 +62,10 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 # Main tool to analyze all loops and basic blocks, outputting metrics to stdout as CSV
 # Use --facile to enable Facile analytical throughput prediction (AArch64) instead of full cycle-by-cycle MCA simulation
 # Use --update-mlp=<csv file> to reuse the simulation results (Cycles, RetiredInsts) from a previous CSV run
-./build/mca_tool [--facile] [--update-mlp <csv file>] [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
+./build/mca_tool [--facile] [--facile-reason] [--update-mlp <csv file>] [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--mlp-window-loop <mode>] [--iterations <N>] [--ignore-loop-carried <mode>] [--override-load-latency <N>] [--chain-threshold <K>] [--merge-same-header] [--count-only] <elf-binary>
 
 # Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address
-./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried] [--override-load-latency <N>] <elf-binary>
+./build/mlp-objdump [--mcpu <cpu>] [--mtriple <triple>] [--window-width <W>] [--dependency <mode>] [--mlp-window-assignment <mode>] [--iterations <N>] [--ignore-loop-carried <mode>] [--override-load-latency <N>] <elf-binary>
 
 # Disassembles and runs step-by-step debug logging for a specific target address to trace register dependencies and MLP window evaluation
 ./build/mlp-check --target-address <hex> [--window-width <W>] [--dependency <mode>] <elf-binary>
@@ -70,11 +80,16 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 *   `--no-facile-memory-deps` — Drop store→load memory RAW edges from the `--facile` precedence graph (register dependences only). See "Memory dependences in the precedence graph" below.
 *   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `cortex-x1`, `firestorm`, `icestorm`).
 *   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `aarch64-linux-gnu`).
-*   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4).
-*   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`, `dependency`).
-*   `--mlp-window-assignment <mode>` — (Optional) MLP assignment mode (`forward`, `max-containing`).
-*   `--iterations <N>` — (Optional) Steady-state repetition multiplier (default: 100).
+*   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4 without `--mcpu`; with `--mcpu`, a value taken from the CPU's scheduling model, see `initializeFrontend()` in `src/frontend/frontend.cpp`).
+*   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`, `dependency`; default `none`).
+*   `--mlp-window-assignment <mode>` — (Optional) MLP assignment mode (`forward`, `max-containing`; default `max-containing`).
+*   `--mlp-window-loop <mode>` — (Optional) Whether the MLP window wraps around to the start of the region (`default`: only for loops; `force`; `disable`).
+*   `--iterations <N>` — (Optional) Steady-state repetition multiplier (default: 3): the simulation runs enough iterations to fill the CPU's instruction window once for warm-up and N times for the measurement ([docs/docs.md](docs/docs.md) section 2.A).
 *   `--override-load-latency <N>` — (Optional) Override load instruction latency (default: -1, inactive).
+*   `--chain-threshold <K>` — (Optional) abab chain depth at which interlocking loops are merged (default: 5; see below).
+*   `--merge-same-header` — (Optional) Keep only the widest loop span per loop header (see below).
+*   `--facile-reason` — (Optional) With `--facile`, add a column naming the dominant bound (`inst`, `exec`, `prec`).
+*   `--count-only` — (Optional) Only print the number of regions per section, without analysing them.
 *   `--ignore-loop-carried <mode>` - (Optional) Mode for ignoring loop-carried register dependencies during cycle estimation.
     *   `default`: Ignores loop-carried dependencies in basic blocks, but considers them in loops (default behavior if option is omitted).
     *   `force`: Ignores loop-carried dependencies in both loops and basic blocks.
@@ -82,11 +97,12 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 
 ## Region Splitting & Merging Algorithm
 
-`automatic-llvm-mca` automatically partitions ELF binary text sections into basic blocks and loop regions using an adaptive region splitting and merging algorithm implemented in `splitter.cpp`:
+`automatic-llvm-mca` automatically partitions ELF binary text sections into basic blocks and loop regions using an adaptive region splitting and merging algorithm implemented in `src/core/region_splitter.cpp` (details: [docs/docs.md](docs/docs.md) sections 2.D and 2.E):
 
 1. **Loop Detection**:
-   - Scans disassembled instructions per function.
-   - Identifies backward branches (`BranchTarget <= Addr` and `BranchTarget >= FuncBase`) to construct basic loop regions `[header_idx, latch_idx]`.
+   - Scans disassembled instructions per function (functions are delimited by the ELF function symbols).
+   - Identifies backward branches that are not calls (`BranchTarget <= Addr` and `BranchTarget >= FuncBase`) to construct basic loop regions `[header_idx, latch_idx]`.
+   - Drops a candidate loop that contains a return reachable from its header without a forward branch.
 
 2. **$abab$ Interlocking Chain Detection**:
    - Identifies partially overlapping loop pairs $a$ and $b$ ($abab$ pattern) where `a.h_idx < b.h_idx < a.l_idx < b.l_idx` (loops intersect but neither is fully nested within the other).
@@ -101,8 +117,15 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
    - **When `max_chain < K`**:
      - Loop regions remain unmerged as standard individual loops.
 
-4. **Innermost-First Region Sorting**:
-   - Output regions are sorted by `EndAddr` ascending (and `StartAddr` ascending) to ensure downstream tools match the innermost nested loop span first.
+4. **Same-header merging (`--merge-same-header`, off by default)**:
+   - Of several loop spans with the same header only the widest is kept.
+
+5. **Non-loop code**:
+   - In a function with loops, each run of instructions outside the kept loops is output as its own region with the metrics of a nearby loop of the function (`analysis_start`/`analysis_end` name that loop, `loop` = 1).
+   - A function without loops is one non-loop region (`loop` = 0).
+
+6. **Output order**:
+   - Output regions are sorted by `EndAddr` ascending, then `StartAddr` ascending.
 
 ## Facile Analytical Throughput Predictor
 
@@ -151,12 +174,14 @@ src/
   core/      types, ELF loading + disassembly (object_loader), loop/basic-block splitting (region_splitter)
   cpu/       cpu_traits (per-CPU table), sched_model (installs the local ModifiedTarget/*.td models)
   a55/       Cortex-A55 specifics: in-order issue stage, register bypasses, instruction/cycle corrections
+  a520/      Cortex-A520 in-order issue stage
   mca/       LLVM MCA driver (mca_simulation) and the steady-state event listeners
   mlp/       memory-level-parallelism analysis: one analyzer per ISA, window/heuristic logic
-  facile/    Facile analytical predictor, macro-op fusion tables, A78 (N2) model corrections
+  facile/    Facile analytical predictor and the macro-op fusion tables
   frontend/  command-line options and target/CPU initialisation shared by the tools
-apps/        the executables (mca_tool, mlp-objdump, mlp-check, mca-insts-info, ...)
-tests/       GoogleTest suites (mlp, splitter, facile, cpu_traits) and shared fixtures
+apps/        the executables (mca_tool, mlp-objdump, mlp-check, mca-insts-info, analyze_distribution)
+tests/       GoogleTest suites (mlp, splitter, facile, cpu_traits, and one <core>_sog_test per
+             modelled Arm core: a55, a520, a76, a78, a720, x1) and shared fixtures
 tools/       helper scripts (sog_compare.py)
 ModifiedTarget/AArch64/   TableGen scheduling models
 ```
@@ -185,11 +210,12 @@ pdftotext -layout Arm_Cortex-X1_Core_Software_Optimization_Guide.pdf x1sog.txt
 tools/sog_compare.py --sog x1sog.txt --csv x1.csv
 ```
 
-The SOGs are Arm's documents and are not part of this repository (the `tmp/` directory is
-git-ignored for keeping local copies). The output is a triage list: it has false
+The SOGs are Arm's documents and are not part of this repository. The output is a triage list: it has false
 positives (rows the SOG itself prints inconsistently, forms that cannot be told apart by
-mnemonic). The Cortex-A78 model is compared with its SOG item by item in `docs/a78-sog.md`.
-See the script's docstring for details.
+mnemonic). The script knows the resource names of the Neoverse-derived models only (Cortex-A76,
+A78 and X1). Each modelled Arm core (Cortex-A55, A520, A76, A78, A720, X1) is compared with its SOG
+item by item in `docs/<core>-sog.md` (listed in [docs/README.md](docs/README.md)). See the
+script's docstring for details.
 
 ## Per-CPU parameters
 
@@ -203,6 +229,6 @@ single line there.
 ## Misc
 
 ### Cortex-A55 Scheduling Model Customization
- * Models the physical hardware of Cortex-A55 accurately based on the *Cortex-A55 Software Optimization Guide (SOG)*.
- * Includes a specialized **0-cycle same-cycle flag bypass** (`cmp` $\to$ `csel`/conditional branch) which prevents artificial 1-cycle flag latency stalls, bringing the simulated CPI of tight loop kernels down under 1.0 (matching actual hardware).
- * Customized TableGen files are located in `ModifiedTarget/AArch64/AArch64SchedA55.td` and integrated into the build pipeline using `llvm-tblgen-23`.
+ * The Cortex-A55 model follows the *Cortex-A55 Software Optimization Guide (SOG)*; its conformance, item by item, and its deviations are in [docs/a55-sog.md](docs/a55-sog.md).
+ * Includes a **flag bypass**: a conditional instruction (`csel`, a conditional branch, ...) can dual-issue with the flag-setting instruction before it (SOG Table 2), except in the cases listed in `docs/a55-sog.md` C-4.
+ * The customized TableGen file is `ModifiedTarget/AArch64/AArch64SchedA55.td`; it is compiled into the tool's own tables with `llvm-tblgen-22` (see `CMakeLists.txt`).

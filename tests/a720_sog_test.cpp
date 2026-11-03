@@ -1,5 +1,5 @@
 // Cortex-A720: values pinned to the Arm Cortex-A720 Core Software Optimization Guide
-// (document 109720, Issue 7.0, "SOG" below; text copy in tmp/a720sog.txt, "l.N" = line N).
+// (document 109720, Issue 7.0, "SOG" below; "l.N" = line N of a text extraction of the guide).
 // The items (C-n, D-n, ...) are those of docs/a720-sog.md.
 //
 // Two kinds of checks:
@@ -12,97 +12,19 @@
 //
 // AArch64TestContext("cortex-a720") already installs the local model (tests/test_support.h).
 
-#include "test_support.h"
-
-#include <cstdlib>
-#include <iostream>
-#include <map>
-#include <sstream>
-#include <string>
-#include <vector>
+#include "sog_test_support.h"
 
 namespace {
 
-struct A720InstInfo {
-    std::string Opcode;
-    unsigned MaxLatency = 0;
-    unsigned NumMicroOps = 0;
-    std::vector<unsigned> WriteLatencies;  // per def, in operand order (implicit defs last)
-    // Total resource cycles per resource name, as the scheduling tables list them (a use of a
-    // pipeline also appears under every group that contains it, e.g. M0 under M and I).
-    std::map<std::string, unsigned> ResourceCycles;
-    // ReadAdvance entries of the sched class: "use index:cycles".
-    std::vector<std::string> ReadAdvances;
-    bool Valid = false;
-};
+constexpr const char *kCpu = "cortex-a720";
 
-A720InstInfo a720Desc(const std::string &AsmLine) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-a720");
-    auto Instrs = parseAsm(TC, AsmLine);
-    A720InstInfo Info;
-    if (Instrs.size() != 1)
-        return Info;
-    Info.Opcode = TC.MCII->getName(Instrs[0].Inst.getOpcode()).str();
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    auto ExpectedInst = IB.createInstruction(Instrs[0].Inst, {});
-    if (!ExpectedInst) {
-        consumeError(ExpectedInst.takeError());
-        return Info;
-    }
-    const mca::Instruction &IS = **ExpectedInst;
-    Info.MaxLatency = IS.getLatency();
-    Info.NumMicroOps = IS.getNumMicroOps();
-    for (const mca::WriteState &WS : IS.getDefs())
-        Info.WriteLatencies.push_back(WS.getLatency());
-    const MCSchedModel &SM = TC.STI->getSchedModel();
-    const MCSchedClassDesc *SCD = SM.getSchedClassDesc(IS.getDesc().SchedClassID);
-    if (SCD) {
-        for (const MCWriteProcResEntry *E = TC.STI->getWriteProcResBegin(SCD),
-                                       *End = TC.STI->getWriteProcResEnd(SCD);
-             E != End; ++E)
-            Info.ResourceCycles[SM.getProcResource(E->ProcResourceIdx)->Name] +=
-                E->ReleaseAtCycle - E->AcquireAtCycle;
-        for (const MCReadAdvanceEntry &RA : TC.STI->getReadAdvanceEntries(*SCD))
-            Info.ReadAdvances.push_back(std::to_string(RA.UseIdx) + ":" + std::to_string(RA.Cycles) +
-                                        "(w" + std::to_string(RA.WriteResourceID) + ")");
-    }
-    Info.Valid = true;
-    return Info;
-}
+using A720InstInfo = SogInstInfo;
 
-// Facile prediction for the loop body `Body` (one instruction per line, no loop branch), with the
-// widths, fusion and memory edges of `mca_tool --mcpu cortex-a720 --dependency ooo --facile`.
-facile::FacileResult a720Facile(const std::string &Body) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-a720");
-    auto Instrs = parseAsm(TC, Body);
-    auto Analyzer = MLPAnalyzer::create(*TC.STI);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    std::vector<MemAccessInfo> MemInfos;
-    for (const auto &I : Instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (!ExpectedInst) {
-            consumeError(ExpectedInst.takeError());
-            continue;
-        }
-        SimInstrs.push_back(std::move(*ExpectedInst));
-        MCInsts.push_back(&I.Inst);
-        MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, TC.MCII->get(I.Inst.getOpcode()),
-                                                      *TC.MRI, *TC.MCII));
-    }
-    const CpuTraits &T = getCpuTraits("cortex-a720");
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts,
-                                           T.UopDispatchWidth, MemInfos, T.MopDispatchWidth);
-}
-
+A720InstInfo a720Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
+facile::FacileResult a720Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
 double a720Cycles(const std::string &Body) { return a720Facile(Body).EstimatedCycles; }
 
-constexpr double kTol = 0.01;
+constexpr double kTol = kSogFacileTol;
 
 } // namespace
 
@@ -111,26 +33,7 @@ constexpr double kTol = 0.01;
 // the reproduction of docs/a720-sog.md (section 10).  Passes when the variable is unset.
 // ---------------------------------------------------------------------------
 TEST(A720SogTest, Dump) {
-    const char *Env = std::getenv("A720_DUMP");
-    if (!Env)
-        return;
-    std::stringstream SS(Env);
-    std::string Line;
-    while (std::getline(SS, Line, ';')) {
-        if (Line.empty())
-            continue;
-        A720InstInfo I = a720Desc(Line);
-        std::cout << Line << " | " << I.Opcode << " | lat " << I.MaxLatency << " [";
-        for (unsigned L : I.WriteLatencies)
-            std::cout << " " << L;
-        std::cout << " ] uops " << I.NumMicroOps << " |";
-        for (const auto &[N, C] : I.ResourceCycles)
-            std::cout << " " << N << ":" << C;
-        std::cout << " | RA";
-        for (const auto &R : I.ReadAdvances)
-            std::cout << " " << R;
-        std::cout << (I.Valid ? "" : " INVALID") << "\n";
-    }
+    sogDump(kCpu, "A720_DUMP");
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +172,12 @@ TEST(A720SogTest, DivideAndMultiply) {
     EXPECT_EQ(Mul.ResourceCycles["A720UnitM"], 1u);
     EXPECT_EQ(Mul.ResourceCycles["A720UnitM0"], 0u);
     EXPECT_EQ(a720Desc("smulh x1, x2, x3").MaxLatency, 3u);
+    // U-5: forwarding between forms and from a multiply without an accumulator (MUL, SMULL) to
+    // the accumulator of a MADD / SMADDL: 1 + 2.  SMULH does not forward (note 2): 3 + 2.
+    EXPECT_NEAR(a720Cycles("mul x1, x1, x2\nmadd x1, x3, x4, x1"), 3.0, kTol);
+    EXPECT_NEAR(a720Cycles("smull x1, w1, w2\nsmaddl x1, w3, w4, x1"), 3.0, kTol);
+    EXPECT_NEAR(a720Cycles("madd x1, x2, x3, x1\numaddl x1, w4, w5, x1"), 2.0, kTol);
+    EXPECT_NEAR(a720Cycles("smulh x1, x1, x2\nmadd x1, x3, x4, x1"), 5.0, kTol);
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +340,18 @@ TEST(A720SogTest, Asimd) {
     EXPECT_NEAR(a720Cycles("ssra d0, d1, #3"), 1.0, kTol);                   // 4(1)
     EXPECT_EQ(a720Desc("sqdmlal s0, h1, h2").MaxLatency, 4u);
     EXPECT_EQ(a720Desc("fmulx d0, d1, d2").MaxLatency, 3u);
+    // Scalar FMULX "3 2 V" (l.1439), FRECPS / FRSQRTS "4 2 V" (l.1560): one V cycle.
+    for (const char *Asm : {"fmulx s0, s1, s2", "fmulx d0, d1, v2.d[1]", "frecps d0, d1, d2",
+                            "frsqrts s0, s1, s2", "frecps h0, h1, h2"}) {
+        A720InstInfo I = a720Desc(Asm);
+        EXPECT_EQ(I.MaxLatency, Asm[1] == 'm' ? 3u : 4u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["A720UnitV"], 1u) << Asm;
+    }
+    // U-5: ASIMD MUL / SMULL forward to the accumulator of MLA / MLAL (4 + 1), MLA and MLAL to
+    // each other (1 + 1).
+    EXPECT_NEAR(a720Cycles("mul v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 5.0, kTol);
+    EXPECT_NEAR(a720Cycles("smull v0.4s, v0.4h, v1.4h\nsmlal v0.4s, v2.4h, v3.4h"), 5.0, kTol);
+    EXPECT_NEAR(a720Cycles("mla v0.4s, v1.4s, v2.4s\nsmlal v0.4s, v3.4h, v4.4h"), 2.0, kTol);
     // ASIMD FP.
     EXPECT_EQ(a720Desc("fcvtl v0.4s, v1.4h").ResourceCycles["A720UnitV0"], 2u);   // 4 1/2
     EXPECT_EQ(a720Desc("fcvtzs v0.8h, v1.8h").ResourceCycles["A720UnitV0"], 4u);  // 6 1/4
@@ -522,5 +443,12 @@ TEST(A720SogTest, BorrowedStoreDataNeededLater) {
     EXPECT_NEAR(a720Cycles("ldr q1, [x0]\nstr q1, [x0]"), 7.0, kTol);
     // ST1-ST4 get no store -> load memory edge in Facile (shared code, docs/a720-sog.md X-3), so the
     // ReadST of their Vt shows only in the model data:
+    ASSERT_FALSE(a720Desc("st1 {v1.16b}, [x0]").ReadAdvances.empty());
     EXPECT_EQ(a720Desc("st1 {v1.16b}, [x0]").ReadAdvances.front(), "0:1(w0)");
+    // The release exclusive stores read ReadST on the data (STXR/STXP do not).
+    EXPECT_EQ(a720Desc("stlxr w2, x1, [x0]").ReadAdvances,
+              (std::vector<std::string>{"0:1(w0)", "1:0(w0)"}));
+    EXPECT_EQ(a720Desc("stlxp w2, x1, x3, [x0]").ReadAdvances,
+              (std::vector<std::string>{"0:1(w0)", "1:1(w0)", "2:0(w0)"}));
+    EXPECT_TRUE(a720Desc("stxr w2, x1, [x0]").ReadAdvances.empty());
 }

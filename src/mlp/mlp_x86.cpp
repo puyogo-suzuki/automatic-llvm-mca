@@ -13,7 +13,7 @@
 
 using namespace llvm;
 
-bool X86MLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &MRI) const {
+bool X86MLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo & /*MRI*/) const {
     return (reg == 0);
 }
 
@@ -64,7 +64,6 @@ MemAccessInfo X86MLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstr
             Inst.getOperand(i+4).isReg()) {
             
             info.base_reg = Inst.getOperand(i).getReg();
-            unsigned index_reg = Inst.getOperand(i+2).getReg();
             if (Inst.getOperand(i+3).isImm()) {
                 info.offset = Inst.getOperand(i+3).getImm();
                 info.set_is_constant_offset(true);

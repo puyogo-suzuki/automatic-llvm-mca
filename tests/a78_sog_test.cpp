@@ -1,5 +1,5 @@
 // Cortex-A78: values pinned to the Arm Cortex-A78 Core Software Optimization Guide
-// (PJDOC-466751330-9691, Issue 4.0, "SOG" below; text copy in tmp/a78sog.txt, "l.N" = line N).
+// (PJDOC-466751330-9691, Issue 4.0, "SOG" below; "l.N" = line N of a text extraction of the guide).
 // The items (C-n, D-n, ...) are those of docs/a78-sog.md.
 //
 // Two kinds of checks:
@@ -10,101 +10,23 @@
 //    fusion table and zero-latency MOVs from cpu_traits.cpp, store -> load memory edges on), with
 //    the expected value worked out by hand from the SOG in each comment.
 //
-// The context is built here rather than with AArch64TestContext("cortex-a78") alone: that
-// constructor leaves cortex-a78 on libLLVM's stock NeoverseN2Model (tests/test_support.h,
-// docs/a78-sog.md X-1), while mca_tool installs the local model.
+// The context is a LocalModelContext (tests/sog_test_support.h), not
+// AArch64TestContext("cortex-a78") alone: that constructor leaves cortex-a78 on libLLVM's stock
+// NeoverseN2Model (tests/test_support.h, docs/a78-sog.md X-1), while mca_tool installs the local model.
 
-#include "test_support.h"
-
-#include <map>
-#include <string>
-#include <vector>
+#include "sog_test_support.h"
 
 namespace {
 
-// AArch64TestContext with the scheduling model mca_tool installs for cortex-a78
-// (what frontend.cpp's initTarget() does: remap, install, wrap).
-struct A78Context : AArch64TestContext {
-    A78Context() : AArch64TestContext("cortex-a78") {
-        llvm::remapSchedClassIndices(*MCII, "cortex-a78");
-        llvm::installLocalSchedModel(*STI, "cortex-a78");
-        STI = llvm::wrapCustomSubtargetInfo(std::move(STI), "cortex-a78");
-    }
-};
+constexpr const char *kCpu = "cortex-a78";
 
-struct A78InstInfo {
-    unsigned MaxLatency = 0;
-    unsigned NumMicroOps = 0;
-    std::vector<unsigned> WriteLatencies;  // per def, in operand order (implicit defs last)
-    // Total resource cycles per resource name, as the scheduling tables list them (a use of a
-    // pipeline also appears under every group that contains it, e.g. M0 under M and I).
-    std::map<std::string, unsigned> ResourceCycles;
-    bool Valid = false;
-};
+using A78InstInfo = SogInstInfo;
 
-A78InstInfo a78Desc(const std::string &AsmLine) {
-    initLLVMAArch64();
-    A78Context TC;
-    auto Instrs = parseAsm(TC, AsmLine);
-    A78InstInfo Info;
-    if (Instrs.size() != 1)
-        return Info;
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    auto ExpectedInst = IB.createInstruction(Instrs[0].Inst, {});
-    if (!ExpectedInst) {
-        consumeError(ExpectedInst.takeError());
-        return Info;
-    }
-    const mca::Instruction &IS = **ExpectedInst;
-    Info.MaxLatency = IS.getLatency();
-    Info.NumMicroOps = IS.getNumMicroOps();
-    for (const mca::WriteState &WS : IS.getDefs())
-        Info.WriteLatencies.push_back(WS.getLatency());
-    const MCSchedModel &SM = TC.STI->getSchedModel();
-    const MCSchedClassDesc *SCD = SM.getSchedClassDesc(IS.getDesc().SchedClassID);
-    if (SCD) {
-        for (const MCWriteProcResEntry *E = TC.STI->getWriteProcResBegin(SCD),
-                                       *End = TC.STI->getWriteProcResEnd(SCD);
-             E != End; ++E)
-            Info.ResourceCycles[SM.getProcResource(E->ProcResourceIdx)->Name] +=
-                E->ReleaseAtCycle - E->AcquireAtCycle;
-    }
-    Info.Valid = true;
-    return Info;
-}
-
-// Facile prediction for the loop body `Body` (one instruction per line, no loop branch), with the
-// widths, fusion and memory edges of `mca_tool --mcpu cortex-a78 --dependency ooo --facile`.
-facile::FacileResult a78Facile(const std::string &Body) {
-    initLLVMAArch64();
-    A78Context TC;
-    auto Instrs = parseAsm(TC, Body);
-    auto Analyzer = MLPAnalyzer::create(*TC.STI);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    std::vector<MemAccessInfo> MemInfos;
-    for (const auto &I : Instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (!ExpectedInst) {
-            consumeError(ExpectedInst.takeError());
-            continue;
-        }
-        SimInstrs.push_back(std::move(*ExpectedInst));
-        MCInsts.push_back(&I.Inst);
-        MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, TC.MCII->get(I.Inst.getOpcode()),
-                                                      *TC.MRI, *TC.MCII));
-    }
-    const CpuTraits &T = getCpuTraits("cortex-a78");
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts,
-                                           T.UopDispatchWidth, MemInfos, T.MopDispatchWidth);
-}
-
+A78InstInfo a78Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
+facile::FacileResult a78Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
 double a78Cycles(const std::string &Body) { return a78Facile(Body).EstimatedCycles; }
 
-constexpr double kTol = 0.01;
+constexpr double kTol = kSogFacileTol;
 
 } // namespace
 
@@ -119,7 +41,7 @@ TEST(A78SogTest, DispatchAndPipelines) {
     EXPECT_TRUE(T.ZeroLatencyMov);           // sec. 4.15 (C-4)
     EXPECT_EQ(T.Fusion, FusionTable::A78);   // sec. 4.14 (C-5)
     initLLVMAArch64();
-    A78Context TC;
+    LocalModelContext TC(kCpu);
     EXPECT_EQ(TC.STI->getSchedModel().MicroOpBufferSize, 160u);  // U-1
     // Eight independent ADDs on four integer pipelines: 2 (the Mop bound is 8/6).
     auto R = a78Facile("add x1, x1, #1\nadd x2, x2, #1\nadd x3, x3, #1\nadd x4, x4, #1\n"
@@ -238,6 +160,11 @@ TEST(A78SogTest, DivideAndMultiply) {
     EXPECT_NEAR(a78Cycles("madd x1, x2, x3, x1"), 1.0, kTol);
     EXPECT_NEAR(a78Cycles("smaddl x1, w2, w3, x1"), 1.0, kTol);
     EXPECT_NEAR(a78Cycles("madd x1, x2, x3, x4\nsmaddl x4, w2, w3, x1"), 2.0, kTol);
+    // U-5 [a78_mul_acc_fwd]: a zero-accumulator multiply (MUL, SMULL) forwards to the accumulator:
+    // 2 - 1 + 2 = 3.
+    EXPECT_NEAR(a78Cycles("mul x1, x1, x2\nmadd x1, x3, x4, x1"), 3.0, kTol);
+    EXPECT_NEAR(a78Cycles("mul w1, w1, w2\nmadd w1, w3, w4, w1"), 3.0, kTol);
+    EXPECT_NEAR(a78Cycles("smull x1, w1, w2\nsmaddl x1, w3, w4, x1"), 3.0, kTol);
     // No forwarding from multiply high (note 2, l.791): 3 + 2.
     EXPECT_NEAR(a78Cycles("smulh x1, x2, x3\nmadd x3, x4, x5, x1"), 5.0, kTol);
 }
@@ -326,6 +253,19 @@ TEST(A78SogTest, FpScalar) {
     // FMADD 4(2) and the FMUL -> FMADD forwarding (notes 2, 3): 1 + 4 + 2 (FMOV).
     EXPECT_NEAR(a78Cycles("fmadd d0, d1, d2, d0"), 2.0, kTol);
     EXPECT_NEAR(a78Cycles("fmul d0, d1, d2\nfmadd d3, d4, d5, d0\nfmov d1, d3"), 7.0, kTol);
+    // C-19, C-20, D-5 [a78_asimd_scalar]: scalar FMULX "3 2 V" (l.1837, with the FMUL -> FMADD
+    // forwarding of the scalar FMUL); scalar FRECPS / FRSQRTS "4 2 V" (l.1961).
+    for (const char *Asm : {"fmulx d0, d1, d2", "fmulx s0, s1, s2", "fmulx h0, h1, h2"}) {
+        A78InstInfo I = a78Desc(Asm);
+        EXPECT_EQ(I.MaxLatency, 3u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["N2UnitV"], 1u) << Asm;
+    }
+    EXPECT_NEAR(a78Cycles("fmulx d0, d1, d2\nfmadd d3, d4, d5, d0\nfmov d1, d3"), 7.0, kTol);
+    for (const char *Asm : {"frecps d0, d1, d2", "frsqrts s0, s1, s2", "frecps h0, h1, h2"}) {
+        A78InstInfo I = a78Desc(Asm);
+        EXPECT_EQ(I.MaxLatency, 4u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["N2UnitV"], 1u) << Asm;
+    }
     A78InstInfo Frint = a78Desc("frinta d0, d1");
     EXPECT_EQ(Frint.MaxLatency, 2u);
     EXPECT_EQ(Frint.ResourceCycles["N2UnitV0"], 1u);
@@ -334,6 +274,11 @@ TEST(A78SogTest, FpScalar) {
     EXPECT_EQ(Fdiv.MaxLatency, 7u);
     EXPECT_EQ(Fdiv.ResourceCycles["A78UnitFDiv"], 4u);
     EXPECT_EQ(Fdiv.ResourceCycles["N2UnitV0"], 1u);
+    // One uOP each: the divide's duration is the occupancy of the divide unit, as on the A76 and the X1.
+    EXPECT_EQ(Fdiv.NumMicroOps, 1u);
+    EXPECT_EQ(a78Desc("fsqrt d0, d1").NumMicroOps, 1u);
+    EXPECT_EQ(a78Desc("fdiv s0, s1, s2").NumMicroOps, 1u);
+    EXPECT_EQ(a78Desc("fdiv v0.4s, v1.4s, v2.4s").NumMicroOps, 1u);
     EXPECT_EQ(a78Desc("fsqrt s0, s1").ResourceCycles["A78UnitFDiv"], 2u);
     EXPECT_NEAR(a78Cycles("fdiv d0, d2, d1\nfcvtzs w1, d3\nfrinta d4, d5"), 4.0, kTol);
     // Converts: vec to vec 2 1 V0; vec to gen 3 1 V0; gen to vec 3 1 M0 (one cycle).
@@ -406,8 +351,12 @@ TEST(A78SogTest, FpLoadsAndStores) {
         A78InstInfo I = a78Desc(Asm);
         EXPECT_EQ(I.WriteLatencies, (std::vector<unsigned>{1})) << Asm;
         EXPECT_EQ(I.ResourceCycles["N2UnitI"], 1u) << Asm;
-        EXPECT_EQ(I.ResourceCycles["N2UnitV"], 2u) << Asm;
+        // [a78_stpq_wb]: 1 per cycle is expressed on L01 (two slots), one V µOP; 4 µOPs in all.
+        EXPECT_EQ(I.ResourceCycles["N2UnitL01"], 2u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["N2UnitV"], 1u) << Asm;
+        EXPECT_EQ(I.NumMicroOps, 4u) << Asm;
     }
+    EXPECT_NEAR(a78Cycles("stp q0, q1, [x0], #32\nstp q2, q3, [x1], #32"), 2.0, kTol);
     EXPECT_EQ(a78Desc("stp d0, d1, [x0], #16").ResourceCycles["N2UnitI"], 1u);
 }
 
@@ -422,6 +371,14 @@ TEST(A78SogTest, Asimd) {
     EXPECT_EQ(a78Desc("sdot v0.4s, v1.16b, v2.16b").MaxLatency, 2u);
     EXPECT_NEAR(a78Cycles("sdot v0.4s, v1.16b, v2.16b\nsdot v0.4s, v3.16b, v4.16b"), 2.0, kTol);
     EXPECT_NEAR(a78Cycles("mla v0.4s, v1.4s, v2.4s\nmla v0.4s, v3.4s, v4.4s"), 2.0, kTol);
+    // U-5 [a78_mul_acc_fwd]: MUL -> MLA (4 - 3 = 1, + 4) and SMULL -> SMLAL (3 - 3, floor 1, + 4).
+    // SQDMULH does not forward (4 + 4).
+    EXPECT_NEAR(a78Cycles("mul v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 5.0, kTol);
+    EXPECT_NEAR(a78Cycles("smull v0.2d, v0.2s, v1.2s\nsmlal v0.2d, v2.2s, v3.2s"), 5.0, kTol);
+    EXPECT_NEAR(a78Cycles("sqdmulh v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 8.0, kTol);
+    EXPECT_EQ(a78Desc("mul v0.4s, v1.4s, v2.4s").MaxLatency, 4u);
+    // MLA and MLAL forward to each other (as MADD and SMADDL do): 1 + 1.
+    EXPECT_NEAR(a78Cycles("mla v0.4s, v1.4s, v2.4s\nsmlal v0.4s, v3.4h, v4.4h"), 2.0, kTol);
     // SQRDMLAH 4, no accumulator forwarding.
     EXPECT_NEAR(a78Cycles("sqrdmlah v0.4s, v1.4s, v2.4s"), 4.0, kTol);
     // ADDV 16B 4 1/2 V1; SMULL 3 1 V0.
@@ -495,6 +452,8 @@ TEST(A78SogTest, CryptoAndCrc) {
     A78InstInfo Aes = a78Desc("aese v0.16b, v1.16b");
     EXPECT_EQ(Aes.MaxLatency, 2u);
     EXPECT_EQ(Aes.ResourceCycles["N2UnitV"], 1u);
+    // U-6: no forwarding between an AES pair (the N2 model has no AES read advance): 2 + 2.
+    EXPECT_NEAR(a78Cycles("aese v0.16b, v1.16b\naesmc v0.16b, v0.16b"), 4.0, kTol);
     EXPECT_EQ(a78Desc("pmull v0.1q, v1.1d, v2.1d").ResourceCycles["N2UnitV0"], 1u);
     EXPECT_EQ(a78Desc("sha256h q0, q1, v2.4s").MaxLatency, 4u);
     EXPECT_EQ(a78Desc("crc32x w1, w2, x3").ResourceCycles["N2UnitM0"], 1u);
@@ -524,10 +483,7 @@ TEST(A78SogTest, PointerAuthenticationHints) {
     // They still read and write LR with latency 1 (LLVM's implicit operands): a chain of 1 each.
     EXPECT_NEAR(a78Cycles("paciasp\nautiasp"), 2.0, kTol);
     initLLVMAArch64();
-    AArch64TestContext TC("cortex-a78c");
-    llvm::remapSchedClassIndices(*TC.MCII, "cortex-a78c");
-    llvm::installLocalSchedModel(*TC.STI, "cortex-a78c");
-    TC.STI = llvm::wrapCustomSubtargetInfo(std::move(TC.STI), "cortex-a78c");
+    LocalModelContext TC("cortex-a78c");
     auto Instrs = parseAsm(TC, "paciasp");
     ASSERT_EQ(Instrs.size(), 1u);
     mca::InstrumentManager IM(*TC.STI, *TC.MCII);

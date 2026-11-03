@@ -1,26 +1,21 @@
 #include "core/object_loader.h"
-#include "cpu/cpu_traits.h"
 #include "core/region_splitter.h"
-#include "mca/mca_simulation.h"
-#include "mlp/mlp_types.h"
-#include "frontend/frontend.h"
-#include "cpu/sched_model.h"
 #include "facile/facile.h"
-#include "llvm/MCA/InstrBuilder.h"
-#include <cstdio>
+#include "frontend/frontend.h"
+#include "mca/mca_simulation.h"
+#include "mca/zero_aware_instr_builder.h"
+#include "mlp/mlp_types.h"
 #include <algorithm>
-#include <fcntl.h>
-#include <iostream>
-#include <memory>
-#include <unistd.h>
-
+#include <cmath>
+#include <cstdio>
 #include <fstream>
-#include <sstream>
 #include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCSchedule.h"
-#include "llvm/Object/Binary.h"
+#include "llvm/MCA/CustomBehaviour.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -50,18 +45,156 @@ static void printResultCsv(uint64_t StartAddr, uint64_t EndAddr, uint64_t Analys
                     static_cast<unsigned long>(M.RetiredInstructions),
                     static_cast<unsigned long>(M.LoadInstructions),
                     M.BaseCPI * static_cast<double>(M.RetiredInstructions), M.MLP, M.MLP_R);
-    } else
-    std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f",
-                StartAddr, EndAddr, AnalysisStartAddr, AnalysisEndAddr,
-                static_cast<unsigned long>(Length),
-                isLoop ? 1 : 0,
-                static_cast<unsigned long>(M.RetiredInstructions),
-                static_cast<unsigned long>(M.LoadInstructions),
-                static_cast<unsigned>(M.Cycles), M.MLP, M.MLP_R);
+    } else {
+        std::printf("0x%lx,0x%lx,0x%lx,0x%lx,%lu,%d,%lu,%lu,%u,%.2f,%.2f",
+                    StartAddr, EndAddr, AnalysisStartAddr, AnalysisEndAddr,
+                    static_cast<unsigned long>(Length),
+                    isLoop ? 1 : 0,
+                    static_cast<unsigned long>(M.RetiredInstructions),
+                    static_cast<unsigned long>(M.LoadInstructions),
+                    static_cast<unsigned>(M.Cycles), M.MLP, M.MLP_R);
+    }
     if (opts::FacileReason) {
         std::printf(",%s", M.FacileReason.c_str());
     }
     std::printf("\n");
+}
+
+static void printCsvHeader() {
+    std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r%s\n",
+                opts::FacileReason ? ",facile_reason" : "");
+}
+
+// --update-mlp: reads the retired-instruction and cycle columns of a previous
+// mca_tool CSV, keyed by start address.  Rows that do not parse are skipped.
+// Returns false if the file cannot be opened.
+static bool loadPreviousResults(const std::string &Path, std::map<uint64_t, McaMetrics> &Cache) {
+    std::ifstream infile(Path.c_str());
+    if (!infile.is_open()) {
+        WithColor::error() << "Failed to open --update-mlp CSV: " << Path << "\n";
+        return false;
+    }
+    std::string line;
+    std::getline(infile, line);  // header
+    while (std::getline(infile, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string cell;
+        std::vector<std::string> row;
+        while (std::getline(ss, cell, ',')) {
+            row.push_back(cell);
+        }
+        // start_address .. cycles (column 8) must be present.
+        if (row.size() < 9) continue;
+        try {
+            uint64_t start_addr = std::stoull(row[0], nullptr, 16);
+            McaMetrics M;
+            M.RetiredInstructions = std::stoull(row[6]);
+            M.Cycles = std::stoul(row[8]);
+            M.Valid = true;
+            Cache[start_addr] = M;
+        } catch (...) {
+            // ignore parse errors
+        }
+    }
+    return true;
+}
+
+// Text sections that hold no analysable code (PLT stubs, init/fini glue).
+static bool isSkippedTextSection(StringRef Name) {
+    return Name == ".plt" || Name == ".init" || Name == ".fini" ||
+           Name.starts_with(".plt.") || Name == ".plt.got" || Name == ".plt.sec";
+}
+
+static McaRegion makeRegion(const RegionSpan &Span, bool IsLoop, ArrayRef<Instr> SectionInstrs) {
+    // Every AArch64 instruction is 4 bytes: the end address is one past the last one.
+    constexpr uint64_t InstrBytes = 4;
+    McaRegion r;
+    r.Start = Span.Start;
+    r.Size = Span.Size;
+    r.AnalysisStart = Span.AnalysisStart;
+    r.AnalysisSize = Span.AnalysisSize;
+    r.SimulatedSize = Span.AnalysisSize;
+    r.IsLoop = IsLoop;
+    r.IsAbabMerged = Span.IsAbabMerged;
+    r.StartAddr = SectionInstrs[Span.Start].Addr;
+    r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + InstrBytes;
+    r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
+    r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + InstrBytes;
+    return r;
+}
+
+// --ignore-loop-carried: by default only regions that are not loops ignore
+// loop-carried register dependences.
+static bool shouldIgnoreLoopCarried(bool IsLoop) {
+    switch (opts::IgnoreLoopCarried) {
+    case IgnoreLoopCarriedMode::Force:   return true;
+    case IgnoreLoopCarriedMode::Default: return !IsLoop;
+    case IgnoreLoopCarriedMode::Disable: return false;
+    }
+    return false;
+}
+
+// --mlp-window-loop: by default only loops wrap the MLP window around.
+static bool shouldWrapMlpWindow(bool IsLoop) {
+    switch (opts::MlpWindowLoop) {
+    case MlpWindowLoopMode::Force:   return true;
+    case MlpWindowLoopMode::Default: return IsLoop;
+    case MlpWindowLoopMode::Disable: return false;
+    }
+    return false;
+}
+
+// --facile: the analytical estimate of computeFacilePrediction() plus the MLP
+// metrics, for one region.
+static McaMetrics analyzeFacileRegion(const TargetInfo &TI, ArrayRef<Instr> region_instrs,
+                                      bool ignoreLoopCarried, bool mlpLoop) {
+    mca::InstrumentManager IM(*TI.STI, *TI.MCII);
+    ZeroAwareInstrBuilder IB(*TI.STI, *TI.MCII, *TI.MRI, TI.MCIA.get(), IM, 0);
+    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
+    std::vector<const MCInst *> MCInsts;
+    // Index-aligned with SimInstrs/MCInsts: the memory-access
+    // descriptor facile uses for store->load precedence edges.
+    std::vector<MemAccessInfo> MemInfos;
+    buildRegionInstructions(IB, *TI.STI, *TI.MCII, region_instrs,
+                            [&](const Instr &I, std::unique_ptr<mca::Instruction> Inst) {
+        SimInstrs.push_back(std::move(Inst));
+        MCInsts.push_back(&I.Inst);
+        if (!opts::NoFacileMemoryDeps) {
+            const MCInstrDesc &MCID = TI.MCII->get(I.Inst.getOpcode());
+            MemInfos.push_back(TI.Analyzer->getMemAccessInfo(I.Inst, MCID, *TI.MRI, *TI.MCII));
+        }
+    });
+
+    facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts, TI.PO.DispatchWidth, MemInfos, TI.MopDispatchWidth, !ignoreLoopCarried);
+
+    McaMetrics M;
+    M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size());
+    M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind, mlpLoop);
+    M.Cycles = static_cast<uint64_t>(std::round(Res.EstimatedCycles));
+    M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, M.MLP_R, mlpLoop);
+    M.BaseCPI = Res.EstimatedCPI;
+    M.FacileReason = Res.FacileReason;
+    M.Valid = true;
+    return M;
+}
+
+// --update-mlp: the cycle count of a previous run, with the MLP metrics
+// recomputed.
+static McaMetrics reusePreviousResult(const TargetInfo &TI, ArrayRef<Instr> region_instrs,
+                                      const McaMetrics &Previous, bool mlpLoop) {
+    McaMetrics M;
+    M.RetiredInstructions = Previous.RetiredInstructions;
+    M.Cycles = Previous.Cycles;
+    M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind, mlpLoop);
+    float mlp_r = 0.0f;
+    M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, mlp_r, mlpLoop);
+    M.MLP_R = mlp_r;
+    if (M.RetiredInstructions > 0) {
+        M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);
+    }
+    M.Valid = true;
+    return M;
 }
 
 int main(int argc, char **argv) {
@@ -72,56 +205,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-
     std::map<uint64_t, McaMetrics> csv_cache;
-    if (!opts::UpdateMlp.empty()) {
-        std::ifstream infile(opts::UpdateMlp.c_str());
-        if (!infile.is_open()) {
-            WithColor::error() << "Failed to open --update-mlp CSV: " << opts::UpdateMlp << "\n";
-            return 1;
-        }
-        std::string line;
-        if (std::getline(infile, line)) {
-            // skip header
-        }
-        while (std::getline(infile, line)) {
-            if (line.empty()) continue;
-            std::stringstream ss(line);
-            std::string cell;
-            std::vector<std::string> row;
-            while (std::getline(ss, cell, ',')) {
-                row.push_back(cell);
-            }
-            if (row.size() < 9) continue;
-            try {
-                uint64_t start_addr = std::stoull(row[0], nullptr, 16);
-                McaMetrics M;
-                M.RetiredInstructions = std::stoull(row[6]);
-                M.Cycles = std::stoul(row[8]);
-                M.Valid = true;
-                csv_cache[start_addr] = M;
-            } catch (...) {
-                // ignore parse errors
-            }
-        }
+    if (!opts::UpdateMlp.empty() && !loadPreviousResults(opts::UpdateMlp, csv_cache)) {
+        return 1;
     }
 
-    if (opts::FacileReason) {
-        std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r,facile_reason\n");
-    } else {
-        std::printf("start_address,end_address,analysis_start,analysis_end,length,loop,retired_instructions,load_instructions,cycles,mlp,mlp_r\n");
-    }
+    printCsvHeader();
     FunctionBoundaries FunctionRanges = collectFunctionBoundaries(*Obj);
 
     for (const SectionRef &Section : Obj->sections()) {
         if (!Section.isText() || Section.getSize() == 0) continue;
 
         if (auto NameOrErr = Section.getName()) {
-            StringRef Name = *NameOrErr;
-            if (Name == ".plt" || Name == ".init" || Name == ".fini" || 
-                Name.starts_with(".plt.") || Name == ".plt.got" || Name == ".plt.sec") {
-                continue;
-            }
+            if (isSkippedTextSection(*NameOrErr)) continue;
         }
 
         auto SectionInstrs = disassembleTextSection(Section, *TI.DisAsm, *TI.MCII, TI.MCIA.get());
@@ -129,105 +225,22 @@ int main(int argc, char **argv) {
         if (SectionInstrs.empty()) continue;
 
         std::vector<McaRegion> regions;
-
-        auto onLoop = [&](const RegionSpan &Span) {
-            McaRegion r;
-            r.Start = Span.Start;
-            r.Size = Span.Size;
-            r.AnalysisStart = Span.AnalysisStart;
-            r.AnalysisSize = Span.AnalysisSize;
-            r.SimulatedSize = Span.AnalysisSize;
-            r.IsLoop = true;
-            r.IsAbabMerged = Span.IsAbabMerged;
-            r.StartAddr = SectionInstrs[Span.Start].Addr;
-            r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
-            r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
-            r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
-            regions.push_back(r);
-        };
-        auto onBasicBlock = [&](const RegionSpan &Span) {
-            McaRegion r;
-            r.Start = Span.Start;
-            r.Size = Span.Size;
-            r.AnalysisStart = Span.AnalysisStart;
-            r.AnalysisSize = Span.AnalysisSize;
-            r.SimulatedSize = Span.AnalysisSize;
-            r.IsLoop = false;
-            r.IsAbabMerged = Span.IsAbabMerged;
-            r.StartAddr = SectionInstrs[Span.Start].Addr;
-            r.EndAddr = SectionInstrs[Span.Start + Span.Size - 1].Addr + 4;
-            r.AnalysisStartAddr = SectionInstrs[Span.AnalysisStart].Addr;
-            r.AnalysisEndAddr = SectionInstrs[Span.AnalysisStart + Span.AnalysisSize - 1].Addr + 4;
-            regions.push_back(r);
-        };
-
-        walkRegions(SectionInstrs, FunctionRanges, onLoop, onBasicBlock);
-
+        walkRegions(SectionInstrs, FunctionRanges,
+                    [&](const RegionSpan &Span) { regions.push_back(makeRegion(Span, /*IsLoop=*/true, SectionInstrs)); },
+                    [&](const RegionSpan &Span) { regions.push_back(makeRegion(Span, /*IsLoop=*/false, SectionInstrs)); });
 
         auto runMca = [&](McaRegion &r) {
             uint64_t regionAddr = r.StartAddr;
             if (TI.TargetAddress != 0 && regionAddr != TI.TargetAddress) return;
-            
+
             auto region_instrs = ArrayRef<Instr>(SectionInstrs).slice(r.AnalysisStart, r.AnalysisSize);
             if (isAllNopRegion(region_instrs, *TI.MCII)) return;
 
-            bool ignore = false;
-            if (opts::IgnoreLoopCarried == IgnoreLoopCarriedMode::Force) {
-                ignore = true;
-            } else if (opts::IgnoreLoopCarried == IgnoreLoopCarriedMode::Default) {
-                ignore = !r.IsLoop;
-            } else if (opts::IgnoreLoopCarried == IgnoreLoopCarriedMode::Disable) {
-                ignore = false;
-            }
-            bool mlpLoop = false;
-            if (opts::MlpWindowLoop == MlpWindowLoopMode::Force) {
-                mlpLoop = true;
-            } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Default) {
-                mlpLoop = r.IsLoop;
-            } else if (opts::MlpWindowLoop == MlpWindowLoopMode::Disable) {
-                mlpLoop = false;
-            }
+            const bool ignore = shouldIgnoreLoopCarried(r.IsLoop);
+            const bool mlpLoop = shouldWrapMlpWindow(r.IsLoop);
 
             if (opts::Facile) {
-                mca::InstrumentManager IM(*TI.STI, *TI.MCII);
-                mca::InstrBuilder IB(*TI.STI, *TI.MCII, *TI.MRI, TI.MCIA.get(), IM, 0);
-                std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-                std::vector<const MCInst *> MCInsts;
-                // Index-aligned with SimInstrs/MCInsts: the memory-access
-                // descriptor facile uses for store->load precedence edges.
-                std::vector<MemAccessInfo> MemInfos;
-                for (const auto &I : region_instrs) {
-                    auto ExpectedInst = IB.createInstruction(I.Inst, {});
-                    if (!ExpectedInst) {
-                        consumeError(ExpectedInst.takeError());
-                        noteDroppedInstruction(TI.MCII->getName(I.Inst.getOpcode()));
-                    }
-                    if (ExpectedInst) {
-                        std::unique_ptr<mca::Instruction> Inst = std::move(*ExpectedInst);
-                        if (isCoalescedROBSubtarget(*TI.STI)) {
-                            mca::InstrDesc &MutableDesc = const_cast<mca::InstrDesc &>(Inst->getDesc());
-                            MutableDesc.NumMicroOps = 1;
-                        }
-                        SimInstrs.push_back(std::move(Inst));
-                        MCInsts.push_back(&I.Inst);
-                        if (!opts::NoFacileMemoryDeps) {
-                            const MCInstrDesc &MCID = TI.MCII->get(I.Inst.getOpcode());
-                            MemInfos.push_back(TI.Analyzer->getMemAccessInfo(I.Inst, MCID, *TI.MRI, *TI.MCII));
-                        }
-                    }
-                }
-
-                facile::FacileResult Res = facile::computeFacilePrediction(*TI.STI, *TI.MCII, *TI.MRI, SimInstrs, MCInsts, TI.PO.DispatchWidth, MemInfos, TI.MopDispatchWidth, !ignore);
-
-                McaMetrics M;
-                M.RetiredInstructions = static_cast<uint64_t>(region_instrs.size());
-                M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind, mlpLoop);
-                M.Cycles = static_cast<uint64_t>(std::round(Res.EstimatedCycles));
-                M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, M.MLP_R, mlpLoop);
-                M.BaseCPI = Res.EstimatedCPI;
-                M.FacileReason = Res.FacileReason;
-                M.Valid = true;
-                r.Metrics = M;
+                r.Metrics = analyzeFacileRegion(TI, region_instrs, ignore, mlpLoop);
                 r.Valid = true;
                 return;
             }
@@ -236,24 +249,13 @@ int main(int argc, char **argv) {
             if (!opts::UpdateMlp.empty()) {
                 auto it = csv_cache.find(regionAddr);
                 if (it != csv_cache.end()) {
-                    McaMetrics M;
-                    M.RetiredInstructions = it->second.RetiredInstructions;
-                    M.Cycles = it->second.Cycles;
-                    M.LoadInstructions = TI.Analyzer->countPotentialMissLoads(region_instrs, *TI.STI, *TI.MCII, *TI.MRI, opts::DepKind, mlpLoop);
-                    float mlp_r = 0.0f;
-                    M.MLP = TI.Analyzer->compute_mlp(region_instrs, TI.WindowWidthVal, opts::DepKind, opts::AssignKind, *TI.STI, *TI.MCII, *TI.MRI, mlp_r, mlpLoop);
-                    M.MLP_R = mlp_r;
-                    if (M.RetiredInstructions > 0) {
-                        M.BaseCPI = static_cast<double>(M.Cycles) / static_cast<double>(M.RetiredInstructions);
-                    }
-                    M.Valid = true;
-                    r.Metrics = M;
+                    r.Metrics = reusePreviousResult(TI, region_instrs, it->second, mlpLoop);
                     reused = true;
                 }
             }
 
             if (!reused) {
-                r.Metrics = analyzeMcaRegion(ArrayRef<Instr>(SectionInstrs).slice(r.AnalysisStart, r.AnalysisSize), *TI.STI, *TI.MCII,
+                r.Metrics = analyzeMcaRegion(region_instrs, *TI.STI, *TI.MCII,
                                              *TI.MRI, TI.MCIA.get(), TI.PO, opts::Iterations, TI.WindowWidthVal, opts::DepKind, opts::AssignKind,
                                              *TI.Analyzer, ignore, opts::OverrideLoadLatency, mlpLoop);
             }
@@ -267,12 +269,11 @@ int main(int argc, char **argv) {
 
         ScopedSilence silence;
 
-        // Run MCA for all regions
-        for (size_t i = 0; i < regions.size(); ++i) {
-            runMca(regions[i]);
+        for (McaRegion &r : regions) {
+            runMca(r);
         }
 
-        // Sort regions by StartAddr so the output is ordered by start_address
+        // Output the valid regions ordered by end address, then start address.
         std::vector<McaRegion> valid_regions;
         for (const auto &r : regions) {
             if (r.Valid) {
@@ -283,7 +284,6 @@ int main(int argc, char **argv) {
             return a.EndAddr != b.EndAddr ? a.EndAddr < b.EndAddr : a.StartAddr < b.StartAddr;
         });
 
-        // Output all valid results
         for (const auto &r : valid_regions) {
             printResultCsv(r.StartAddr, r.EndAddr, r.AnalysisStartAddr, r.AnalysisEndAddr, r.SimulatedSize, r.IsLoop, r.Metrics);
         }

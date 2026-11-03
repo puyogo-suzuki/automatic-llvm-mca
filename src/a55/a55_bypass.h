@@ -5,9 +5,9 @@
 // current producer mapping.  NOTE: the flag bypass (cmp -> csel/b.cc) and the
 // pointer forwarding (adrp -> ldr base) are applied inside
 // A55DecoupledIssueStage::checkRegisterHazard() (a55_issue_stage.cpp), before
-// the hazard is computed.  Applying them on the Dispatched event, as an earlier
-// version did, was too late: that event fires only after the instruction has
-// already cleared canExecute()/checkRegisterHazard() for the attempt.
+// the hazard is computed.  Applying them on the Dispatched event would be too
+// late: that event fires only after the instruction has already cleared
+// canExecute()/checkRegisterHazard() for the attempt.
 
 #include "mca/private_access.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -50,6 +50,7 @@ inline bool a55IsArithmeticWithCarry(unsigned Opcode) {
   }
 }
 
+// [a55_flag_bypass] docs/a55-sog.md C-4, D-8, U-2.
 // Cortex-A55's zero-latency condition-flag bypass network: cmp -> csel/b.cc
 // same-cycle forwarding.  SOG v3 sec. 3.2 Table 2 ("Conditional"): a
 // conditional (flag-dependent) instruction-1 can be dual issued with a flag
@@ -81,16 +82,17 @@ inline bool a55IsFlagBypassEligible(const llvm::mca::RegisterFile &PRF,
 
 // A64 low-latency pointer forwarding (SOG sec. 5.10, p.44): "adrp x0, <const>"
 // followed by a load from "[x0, #lo12 <const>]" executes without a dependency
-// stall.  Applied to the form the SOG shows, a load with an unsigned immediate
-// offset (LDR*ui: LDR/LDRB/LDRH/LDRSB/LDRSH/LDRSW and the FP/SIMD LDR B/H/S/D/Q),
-// and only to its base register.  Not applied to LDUR, pre/post-index and
-// register-offset loads, nor to the index register, which the SOG does not
-// show (docs/a55-sog.md C-5).  Whether the offset is the low 12 bits of the same
-// symbol as the ADRP cannot be known from the instructions and is not checked.
+// stall; the SOG calls the sequence common "to generate load-store addresses".
+// Applied to a load or a store with an unsigned immediate offset (LDR*ui and
+// STR*ui: the GPR and FP/SIMD forms of every size), and only to its base
+// register.  Not applied to LDUR/STUR, pre/post-index and register-offset forms,
+// nor to the index register or to the data of a store (docs/a55-sog.md C-5).
+// Whether the offset is the low 12 bits of the same symbol as the ADRP cannot be
+// known from the instructions and is not checked.
 inline bool a55IsAdrpForwardConsumer(llvm::StringRef ConsumerName, int BaseOperandIndex,
                                      int ReadOperandIndex) {
-  return ConsumerName.starts_with("LDR") && ConsumerName.ends_with("ui") &&
-         ReadOperandIndex == BaseOperandIndex;
+  return (ConsumerName.starts_with("LDR") || ConsumerName.starts_with("STR")) &&
+         ConsumerName.ends_with("ui") && ReadOperandIndex == BaseOperandIndex;
 }
 
 inline bool a55IsPointerForwardEligible(const llvm::mca::RegisterFile &PRF,

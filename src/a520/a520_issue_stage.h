@@ -6,13 +6,13 @@
 // This is llvm::mca::InOrderIssueStage of LLVM 22.1.8
 // (llvm/lib/MCA/Stages/InOrderIssueStage.cpp, Apache-2.0 WITH LLVM-exception)
 // with exactly three changes, all confined to the cortex-a520 path:
-//  1. [a520_no_wb_order] (docs/a520-sog.md D-9; docs/a55-sog.md X-1): the stock rule
+//  1. [a520_no_wb_order] (docs/a520-sog.md D-9): the stock rule
 //     "an instruction may not issue if it would write back before the last
 //     issued one" (LastWriteBackCycle) is not applied.  The Cortex-A520 SOG
 //     states no such rule; its co-issue limits (sec. 4.1) are the only issue
 //     constraints besides the hazards.  `EnforceWriteBackOrder = true` restores
 //     the stock behaviour (used to check that the copy is faithful).
-//  2. [a520_lc_hook] (docs/a520-sog.md section 2.2; docs/a55-sog.md X-2): an optional
+//  2. [a520_lc_hook] (docs/a520-sog.md section 2.2): an optional
 //     hook runs before the register hazard check, so that
 //     --ignore-loop-carried can drop the previous iteration's producers before
 //     the first instruction of an iteration is checked (issue #12).

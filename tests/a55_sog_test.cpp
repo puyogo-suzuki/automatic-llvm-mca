@@ -1,5 +1,5 @@
 // Cortex-A55: values pinned to the Arm Cortex-A55 Software Optimization Guide
-// (ARM-EPM-128372 v3.0, "SOG" below; text copy in tmp/a55sog.txt).
+// (ARM-EPM-128372 v3.0, "SOG" below; l.N = line N of a text extraction of the guide).
 //
 // Two kinds of checks:
 //  * a55Desc():  the per-instruction data InstrBuilder takes from
@@ -12,83 +12,31 @@
 // Project policy (docs/a55-sog.md, D-1): SOG ranges take the best (lowest-latency) value and
 // resource occupancy is 1 / best throughput, rounded up.
 
-#include "test_support.h"
-#include "a55/a55_issue_stage.h"
+#include "sog_test_support.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
-
-#include <cmath>
-#include <map>
-#include <string>
-#include <vector>
 
 namespace {
 
-struct A55InstInfo {
-    unsigned MaxLatency = 0;
-    std::vector<unsigned> WriteLatencies;  // per def, in operand order
-    bool BeginGroup = false;
-    bool EndGroup = false;
-    // Total resource cycles per resource name (e.g. "CortexA55UnitLd" -> 2).
-    std::map<std::string, unsigned> ResourceCycles;
-    bool Valid = false;
-};
+constexpr const char *kCpu = "cortex-a55";
 
-A55InstInfo a55Desc(const std::string &AsmLine) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-a55");
-    auto Instrs = parseAsm(TC, AsmLine);
-    A55InstInfo Info;
-    if (Instrs.size() != 1)
-        return Info;
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    auto ExpectedInst = IB.createInstruction(Instrs[0].Inst, {});
-    if (!ExpectedInst) {
-        consumeError(ExpectedInst.takeError());
-        return Info;
-    }
-    const mca::Instruction &IS = **ExpectedInst;
-    Info.MaxLatency = IS.getLatency();
-    for (const mca::WriteState &WS : IS.getDefs())
-        Info.WriteLatencies.push_back(WS.getLatency());
-    Info.BeginGroup = IS.getBeginGroup();
-    Info.EndGroup = IS.getEndGroup();
-    const MCSchedModel &SM = TC.STI->getSchedModel();
-    const MCSchedClassDesc *SCD = SM.getSchedClassDesc(IS.getDesc().SchedClassID);
-    if (SCD) {
-        for (const MCWriteProcResEntry *E = TC.STI->getWriteProcResBegin(SCD),
-                                       *End = TC.STI->getWriteProcResEnd(SCD);
-             E != End; ++E)
-            Info.ResourceCycles[SM.getProcResource(E->ProcResourceIdx)->Name] += E->ReleaseAtCycle;
-    }
-    Info.Valid = true;
-    return Info;
+using A55InstInfo = SogInstInfo;
+
+A55InstInfo a55Desc(const std::string &Asm) {
+    return sogDesc(kCpu, Asm, ResourceCycleCount::Release);
 }
 
-// Steady-state cycles per iteration of `Body` (one instruction per line),
-// simulated as a loop (loop-carried dependencies kept), --dependency dependency.
-// With `IgnoreLoopCarried`, as a basic block under --ignore-loop-carried=default
-// (dependencies on the previous iteration ignored).
+// Steady-state cycles per iteration of `Body` (one instruction per line) on the A55 issue stage;
+// with `IgnoreLoopCarried`, as a basic block under --ignore-loop-carried=default.  `NumInstrs` and
+// `Retired` receive the body size and the retired-instruction count of the simulation.
 double a55CyclesPerIter(const std::string &Body, size_t *NumInstrs = nullptr,
                         uint64_t *Retired = nullptr, bool IgnoreLoopCarried = false) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-a55");
-    auto Instrs = parseAsm(TC, Body);
-    if (NumInstrs) *NumInstrs = Instrs.size();
-    AArch64MLPAnalyzer Analyzer;
-    mca::PipelineOptions PO(0, 0, 0, 0, 0, 0, true);
-    McaMetrics M = analyzeMcaRegion(Instrs, *TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), PO,
-                                    200, 16, DependencyKind::Dependency,
-                                    MLPWindowAssignmentKind::Forward, Analyzer,
-                                    IgnoreLoopCarried, -1, /*mlpWindowLoop=*/false);
-    if (Retired) *Retired = M.RetiredInstructions;
-    if (!M.Valid || M.RetiredInstructions == 0 || Instrs.empty())
-        return -1.0;
-    return static_cast<double>(M.Cycles) /
-           (static_cast<double>(M.RetiredInstructions) / static_cast<double>(Instrs.size()));
+    InOrderRun R = inOrderRun(kCpu, Body, IgnoreLoopCarried);
+    if (NumInstrs) *NumInstrs = R.NumInstrs;
+    if (Retired) *Retired = R.Retired;
+    return R.CyclesPerIter;
 }
 
-constexpr double kTol = 0.1;
+constexpr double kTol = kSogInOrderTol;
 
 } // namespace
 
@@ -118,8 +66,7 @@ TEST(A55SogTest, IntegerDivideIsSerializing) {
 // reordering at issue", 3.5.1 "only issues instructions in-order").
 // fadd d2 waits for fadd d0 (4 cycles) and nothing younger may pass it:
 // c0 fadd d0; c4 fadd d2 + add; c5 add add; c6 add add; c7 add + next fadd d0
-// -> 7 cycles.  (The former cross-pipe "decoupled" issue let the adds run
-// underneath the stalled FP instruction.)
+// -> 7 cycles.
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, StrictlyInOrderIssue) {
     EXPECT_NEAR(a55CyclesPerIter("fadd d0, d0, d1\nfadd d2, d0, d1\nadd x1, x1, #1\nadd x2, x2, #1\n"
@@ -205,7 +152,7 @@ TEST(A55SogTest, DualIssueColumn) {
 
 // ---------------------------------------------------------------------------
 // #5 FSQRT per precision (SOG Table 4, 4.11) and the reciprocal estimate/step
-// instructions (SOG 4.17), which the old "^.*SQRT.*" regexes mixed up.
+// instructions (SOG 4.17), which have no FP divide/sqrt unit.
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, SquareRootAndReciprocalSqrt) {
     A55InstInfo S = a55Desc("fsqrt s0, s1");
@@ -444,8 +391,8 @@ TEST(A55SogTest, IntegerDivideBestCase) {
 // instruction-1 that reads its result in the ALU (not in the shifter) issue in
 // the same cycle.  Otherwise an ALU result is seen at its exec latency (ALU
 // basic 1, ALU extend and/or shift 2, SOG 4.3).  The rule lives in the issue
-// stage (A55DecoupledIssueStage::isSameCycleALUForward); the .td no longer has
-// an ALU -> ALU ReadAdvance.
+// stage (A55DecoupledIssueStage::isSameCycleALUForward); the .td has no
+// ALU -> ALU ReadAdvance.
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, SameCycleAluForwarding) {
     // Four dependent adds: c0 add+add (ALU0 -> ALU1 path), c1 add+add (the
@@ -477,10 +424,10 @@ namespace {
 // opcode; one context for the whole listing.
 std::vector<std::pair<unsigned, unsigned>> a55OpcodeLatencies(const std::string &Asm) {
     initLLVMAArch64();
-    AArch64TestContext TC("cortex-a55");
+    LocalModelContext TC(kCpu);
     auto Instrs = parseAsm(TC, Asm);
     mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+    ZeroAwareInstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
     std::vector<std::pair<unsigned, unsigned>> Out;
     for (const auto &I : Instrs) {
         auto ExpectedInst = IB.createInstruction(I.Inst, {});
@@ -522,11 +469,11 @@ TEST(A55SogTest, ShiftImmediateAliasesTakeOneCycle) {
     EXPECT_EQ(a55Desc("sbfx x1, x2, #3, #5").MaxLatency, 2u);
     EXPECT_EQ(a55Desc("sbfiz x1, x2, #60, #4").MaxLatency, 2u); // SBFM #4, #3: the LSL shape is UBFM only
     EXPECT_EQ(a55Desc("ubfx x1, x2, #1, #31").MaxLatency, 2u);  // UBFM X #1, #31: imms 31 is LSR only for W
-    // Sign/zero extend 1 (unchanged).
+    // Sign/zero extend 1.
     EXPECT_EQ(a55Desc("uxtb w1, w2").MaxLatency, 1u);
     EXPECT_EQ(a55Desc("sxth x1, w2").MaxLatency, 1u);
     EXPECT_EQ(a55Desc("sxtw x1, w2").MaxLatency, 1u);
-    // BFM (insert) 2 (unchanged).
+    // BFM (insert) 2.
     EXPECT_EQ(a55Desc("bfi x1, x2, #3, #5").MaxLatency, 2u);
 
     // Every (immr, imms) of UBFM/SBFM W and X: 1 exactly for the shift and
@@ -628,7 +575,7 @@ TEST(A55SogTest, VariableShiftThroughputOne) {
     // Not on other ALU instructions (ALU basic, shift by immediate).
     EXPECT_EQ(a55Desc("add x1, x2, x3").ResourceCycles.count("CortexA55UnitVarShift"), 0u);
     EXPECT_EQ(a55Desc("lsl x1, x2, #3").ResourceCycles.count("CortexA55UnitVarShift"), 0u);
-    // Four independent variable shifts: one per cycle -> 4 (was 2).
+    // Four independent variable shifts: one per cycle -> 4.
     EXPECT_NEAR(a55CyclesPerIter("lsl x1, x2, x9\nlsr x3, x4, x9\nasr x5, x6, x9\nror x7, x8, x9"), 4.0, kTol);
     // A variable shift dual-issues with an independent ALU instruction:
     // c0 lsl + add; c1 lsl + add -> 2.
@@ -648,7 +595,7 @@ TEST(A55SogTest, VariableShiftThroughputOne) {
 // cycle, so FCMP{E} and FCCMP{E} are not same-cycle flag producers either.
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, FlagBypassExceptCarryAndFpCompare) {
-    // cmp + csel pair (unchanged): c0 cmp + csel; c1 csel + cmp; c2 csel + csel
+    // cmp + csel pair: c0 cmp + csel; c1 csel + cmp; c2 csel + csel
     // -> 3 instructions per 1.5 cycles.
     EXPECT_NEAR(a55CyclesPerIter("cmp x1, x2\ncsel x3, x4, x5, eq\ncsel x6, x4, x5, ne"), 1.5, kTol);
     // Arithmetic with carry waits for the flags: c0 cmp; c1 adc + adc -> 2.
@@ -670,8 +617,7 @@ TEST(A55SogTest, FlagBypassExceptCarryAndFpCompare) {
 // ---------------------------------------------------------------------------
 // #12 --ignore-loop-carried=default: in a basic block the dependencies on the
 // previous iteration are ignored, also for the FIRST instruction of the block
-// (the tracker used to drop the previous iteration's producers only at that
-// instruction's Dispatched event, after the issue stage's hazard check).
+// (the producers of the previous iteration are dropped before the issue stage's hazard check).
 // fadd 4 (SOG 4.11); ALU basic 1, throughput 2.
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, IgnoreLoopCarriedAppliesToFirstInstruction) {
@@ -704,7 +650,7 @@ TEST(A55SogTest, FpCompareThroughputOne) {
     }
     // Not on the other FP ALU rows.
     EXPECT_EQ(a55Desc("fadd d0, d1, d2").ResourceCycles.count("CortexA55UnitFPCmp"), 0u);
-    // Four independent compares: one per cycle -> 4 (was 2).
+    // Four independent compares: one per cycle -> 4.
     EXPECT_NEAR(a55CyclesPerIter("fcmp s0, s1\nfcmp s2, s3\nfcmp d4, d5\nfcmpe d6, d7"), 4.0, kTol);
     // An FP compare still pairs with another FP ALU instruction (11):
     // c0 fcmp + fadd; c1 fcmp + fadd -> 2.
@@ -730,7 +676,7 @@ TEST(A55SogTest, AsimdMovRegisterLatencyTwo) {
         EXPECT_EQ(I.MaxLatency, R.Lat) << R.Asm;
         EXPECT_EQ(I.BeginGroup, R.BG) << R.Asm;
     }
-    // A chain of four MOVs: 2 per step -> 8 (was 4).
+    // A chain of four MOVs: 2 per step -> 8.
     EXPECT_NEAR(a55CyclesPerIter("mov v0.16b, v0.16b\nmov v0.16b, v0.16b\nmov v0.16b, v0.16b\nmov v0.16b, v0.16b"),
                 8.0, kTol);
     EXPECT_NEAR(a55CyclesPerIter("mov v0.8b, v0.8b\nmov v0.8b, v0.8b\nmov v0.8b, v0.8b\nmov v0.8b, v0.8b"), 8.0, kTol);
@@ -752,7 +698,7 @@ TEST(A55SogTest, SaturatingExtractNarrowDualIssues) {
         EXPECT_FALSE(I.BeginGroup) << Asm;
         EXPECT_FALSE(I.EndGroup) << Asm;
     }
-    // Four independent narrows, two per cycle -> 2 (was 4: slot 0 only, both units).
+    // Four independent narrows, two per cycle -> 2.
     EXPECT_NEAR(a55CyclesPerIter("sqxtn v0.8b, v1.8h\nuqxtn v2.8b, v3.8h\nsqxtun v4.8b, v5.8h\nsqxtn v6.8b, v7.8h"),
                 2.0, kTol);
 }
@@ -769,9 +715,9 @@ TEST(A55SogTest, NopDualIssues) {
     EXPECT_TRUE(Nop.ResourceCycles.empty());
     EXPECT_FALSE(Nop.BeginGroup);
     EXPECT_FALSE(Nop.EndGroup);
-    // Two NOPs per cycle -> 2 (was 4: one per cycle on the branch unit).
+    // Two NOPs per cycle -> 2.
     EXPECT_NEAR(a55CyclesPerIter("nop\nnop\nnop\nnop"), 2.0, kTol);
-    // NOP + branch in one cycle: c0 nop + br (br 10 ends the cycle) -> 1 (was 2).
+    // NOP + branch in one cycle: c0 nop + br (br 10 ends the cycle) -> 1.
     EXPECT_NEAR(a55CyclesPerIter("nop\nbr x9"), 1.0, kTol);
     // NOP + ALU: c0 add + nop -> 1.
     EXPECT_NEAR(a55CyclesPerIter("add x1, x1, #1\nnop"), 1.0, kTol);
@@ -787,7 +733,6 @@ TEST(A55SogTest, NopDualIssues) {
 // body), cycles per iteration = 2 x the latency seen by the next base:
 //   LDP X first register 4 (no fast path), second 4 - 1 = 3;
 //   LDP W first register 3 - 1 = 2, second 3; LDPSW 3 for both.
-// (Before: every register of every pair took the fast path: 6, 6, 4, 4, 4.)
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, LoadPairPointerChasingPerRegister) {
     EXPECT_NEAR(a55CyclesPerIter("ldp x1, x2, [x1]\nldp x1, x2, [x1]"), 8.0, kTol);
@@ -799,7 +744,7 @@ TEST(A55SogTest, LoadPairPointerChasingPerRegister) {
     EXPECT_NEAR(a55CyclesPerIter("ldpsw x1, x2, [x1]\nldpsw x1, x2, [x1]"), 6.0, kTol);
     EXPECT_NEAR(a55CyclesPerIter("ldpsw x1, x2, [x2]\nldpsw x1, x2, [x2]"), 6.0, kTol);
     // LDAXP "3(2)" (SOG 4.8 note 1) is not in Table 3: both registers keep the
-    // fast path, as before (docs U-15): 2 per step.
+    // fast path (docs U-15): 2 per step.
     EXPECT_NEAR(a55CyclesPerIter("ldaxp x1, x2, [x1]\nldaxp x1, x2, [x1]"), 4.0, kTol);
     EXPECT_NEAR(a55CyclesPerIter("ldaxp x1, x2, [x2]\nldaxp x1, x2, [x2]"), 4.0, kTol);
     // Single-register loads keep it (Table 3 "LDR & LDRT/LDTR (all variants)").
@@ -827,8 +772,8 @@ TEST(A55SogTest, LoadPairPointerChasingPerRegister) {
 // l.486-489): "The first stage (ex1) of both the load and store pipeline
 // contains an AGU ... load data ... can be forwarded from the beginning of the
 // wr pipeline stage to either the load or store AGU base operand."
-// "ldr x1, [x0]; <store> [x1]": c0 ldr; c2 store (3 - 1) + next ldr -> 2
-// (before: the store base waited 3 -> 3).  The store data registers are
+// "ldr x1, [x0]; <store> [x1]": c0 ldr; c2 store (3 - 1) + next ldr -> 2.
+// The store data registers are
 // independent here (store data: StoreDataNeededLater).
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, StoreAndAsimdBasePointerChasing) {
@@ -845,13 +790,12 @@ TEST(A55SogTest, StoreAndAsimdBasePointerChasing) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("ldr x1, [x0]\n") + St), 2.0, kTol) << St;
     }
     // ASIMD loads: c0 ldr x1; c2 ld1 (3 - 1); c3 next ldr (one load per cycle)
-    // -> 3 (before: c3 ld1, c4 ldr -> 4).
+    // -> 3.
     for (const char *Ld : {"ld1 {v0.8b}, [x1]", "ld1 {v0.s}[1], [x1]", "ld1r {v0.4s}, [x1]",
                            "ld2 {v0.s, v1.s}[1], [x1]"}) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("ldr x1, [x1]\n") + Ld), 3.0, kTol) << Ld;
     }
-    // LD4R B "4, 1/2": the load pipe is held 2 cycles: c2-c3 ld4r, c4 ldr -> 4
-    // (before: c3 ld4r, c5 ldr -> 5).
+    // LD4R B "4, 1/2": the load pipe is held 2 cycles: c2-c3 ld4r, c4 ldr -> 4.
     EXPECT_NEAR(a55CyclesPerIter("ldr x1, [x1]\nld4r {v0.8b, v1.8b, v2.8b, v3.8b}, [x1]"), 4.0, kTol);
     // Only from the loads of Table 3: an LDP X first register (4, no fast path)
     // feeds a store base at 4: c0 ldp (01); c4 str; the next ldp cannot be
@@ -870,32 +814,32 @@ TEST(A55SogTest, StoreAndAsimdBasePointerChasing) {
 // (l.2453-2456) the two kinds of store behave alike.
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, StoreDataNeededLater) {
-    // 64-bit MUL (4, MAC 2 cycles): c0 mul; c3 str (4 - 1) + next mul -> 3
-    // (before: c4 -> 4), the same as the register-offset store.
+    // 64-bit MUL (4, MAC 2 cycles): c0 mul; c3 str (4 - 1) + next mul -> 3,
+    // the same as the register-offset store.
     EXPECT_NEAR(a55CyclesPerIter("mul x1, x2, x3\nstr x1, [x0]"), 3.0, kTol);
     EXPECT_NEAR(a55CyclesPerIter("mul x1, x2, x3\nstr x1, [x0, x4]"), 3.0, kTol);
-    // Load -> store data: c0 ldr; c2 str (3 - 1) + ldr; c4 str + next ldr -> 4
-    // (before: 6), the same as the register-offset version.
+    // Load -> store data: c0 ldr; c2 str (3 - 1) + ldr; c4 str + next ldr -> 4,
+    // the same as the register-offset version.
     EXPECT_NEAR(a55CyclesPerIter("ldr x1, [x0]\nstr x1, [x5]\nldr x2, [x0, #8]\nstr x2, [x5, #8]"), 4.0, kTol);
     EXPECT_NEAR(a55CyclesPerIter("ldr x1, [x0]\nstr x1, [x5, x6]\nldr x2, [x0, #8]\nstr x2, [x5, x7]"), 4.0, kTol);
-    // c0 ldr; c2 store + next ldr -> 2 (before: 3) for each store family.
+    // c0 ldr; c2 store + next ldr -> 2 for each store family.
     for (const char *St : {"stur x1, [x5, #-8]", "str x1, [x5], #8", "str w1, [x5, #4]!", "sttr x1, [x5]",
                            "strb w1, [x5]", "stp x1, x2, [x5]", "stp x2, x1, [x5]", "stnp x1, x2, [x5]",
                            "stp x1, x2, [x5, #16]!", "stlr x1, [x5]", "stlxr w6, x1, [x5]",
                            "stlxp w6, x2, x1, [x5]"}) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("ldr x1, [x0]\n") + St), 2.0, kTol) << St;
     }
-    // FP: c0 fadd (4); c3 str + next fadd -> 3 (before: 4).
+    // FP: c0 fadd (4); c3 str + next fadd -> 3.
     for (const char *St : {"str d0, [x5]", "stur d0, [x5, #-8]", "str d0, [x5], #8", "stp d0, d1, [x5]",
                            "stp d1, d0, [x5, #16]!"}) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("fadd d0, d2, d2\n") + St), 3.0, kTol) << St;
     }
-    // ASIMD: ADD D-form (2): c0 add; c1 st1 + next add -> 1 (before: 2).
+    // ASIMD: ADD D-form (2): c0 add; c1 st1 + next add -> 1.
     for (const char *St : {"st1 {v0.8b}, [x5]", "st1 {v0.8b}, [x5], #8", "st1 {v0.b}[3], [x5]",
                            "st1 {v0.b}[3], [x5], #1", "st2 {v0.8b, v1.8b}, [x5]", "st2 {v31.8b, v0.8b}, [x5]"}) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("add v0.8b, v2.8b, v2.8b\n") + St), 1.0, kTol) << St;
     }
-    // ASIMD load -> ASIMD store: c0 ld1 (3); c2 st1 + next ld1 -> 2 (before: 3).
+    // ASIMD load -> ASIMD store: c0 ld1 (3); c2 st1 + next ld1 -> 2.
     EXPECT_NEAR(a55CyclesPerIter("ld1 {v0.8b}, [x0]\nst1 {v0.8b}, [x5]"), 2.0, kTol);
     // ALU -> store data in the same cycle (ALU0 ex2 -> store ex2, SOG 3.1.1):
     // c0 add + str; c1 add + str ... -> the adds' chain, 1 per pair.
@@ -921,7 +865,7 @@ TEST(A55SogTest, AluToAguIsOneCycle) {
 // ---------------------------------------------------------------------------
 // C-5: ADRP -> LDR pointer forwarding (SOG 5.10, p.44): "adrp x0, <const>" followed by
 // a load from "[x0, #lo12 <const>]" has no dependency stall.  Applied to the base of
-// unsigned-immediate-offset loads only (docs/a55-sog.md C-5).
+// unsigned-immediate-offset loads and stores (docs/a55-sog.md C-5).
 // ---------------------------------------------------------------------------
 TEST(A55SogTest, AdrpPointerForwardingBaseOfUnsignedImmediateLoads) {
     // With the loop branch as third instruction (as in the analyzer's loops) the pair adrp +
@@ -932,10 +876,16 @@ TEST(A55SogTest, AdrpPointerForwardingBaseOfUnsignedImmediateLoads) {
                            "ldrh w2, [x1, #8]", "ldrsb x2, [x1, #8]", "ldr d0, [x1, #8]", "ldr s0, [x1, #4]"}) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("adrp x1, 0\n") + Ld + "\nb #-8"), 1.5, kTol) << Ld;
     }
-    // Not shown in the SOG: LDUR, pre/post-index, register offset (as base and as index
+    // "load-store addresses": the unsigned-immediate stores likewise, for their base register.
+    for (const char *St : {"str x2, [x1, #8]", "strb w2, [x1, #8]", "strh w2, [x1, #8]",
+                           "str d0, [x1, #8]", "str q0, [x1, #16]"}) {
+        EXPECT_NEAR(a55CyclesPerIter(std::string("adrp x1, 0\n") + St + "\nb #-8"), 1.5, kTol) << St;
+    }
+    // Not shown in the SOG: LDUR/STUR, pre/post-index, register offset (as base and as index
     // register).  The ADRP result is waited for (latency 1).
     for (const char *Ld : {"ldur x2, [x1, #1]", "ldr x2, [x1, #8]!", "ldr x2, [x1], #8",
-                           "ldr x2, [x3, x1]", "ldr x2, [x1, x3, lsl #3]"}) {
+                           "ldr x2, [x3, x1]", "ldr x2, [x1, x3, lsl #3]", "stur x2, [x1, #1]",
+                           "str x2, [x1, #8]!", "str x2, [x1, x3]"}) {
         EXPECT_NEAR(a55CyclesPerIter(std::string("adrp x1, 0\n") + Ld + "\nb #-8"), 2.0, kTol) << Ld;
     }
 }
@@ -956,4 +906,35 @@ TEST(A55SogTest, PointerAuthenticationHints) {
     EXPECT_NEAR(a55CyclesPerIter("paciasp\nadd x1, x1, #1"), 1.0, kTol);
     // The other hints are unchanged: BTI stays WriteHint on the branch unit.
     EXPECT_FALSE(a55Desc("bti c").ResourceCycles.empty());
+}
+
+// ---------------------------------------------------------------------------
+// C-25 [a55_addp] Scalar ADDP (ADDP Dd, Vn.2D) takes the "ASIMD arith" row "ABS, ADDP, ... 3, 2*, 11*"
+// (SOG 4.15, p.31, l.1681): latency 3, one FP ALU unit, both slots (a scalar form).
+// ---------------------------------------------------------------------------
+TEST(A55SogTest, ScalarAddpTakesTheAsimdArithRow) {
+    A55InstInfo S = a55Desc("addp d0, v1.2d");
+    EXPECT_EQ(S.MaxLatency, 3u);
+    EXPECT_EQ(S.ResourceCycles["CortexA55UnitFPALU"], 1u);
+    EXPECT_FALSE(S.BeginGroup);
+    A55InstInfo Q = a55Desc("addp v0.2d, v1.2d, v2.2d");
+    EXPECT_EQ(Q.MaxLatency, 3u);
+    EXPECT_TRUE(Q.BeginGroup);
+}
+
+// ---------------------------------------------------------------------------
+// D-10, U-17 [a55_ext] The Rm of every extended-register form passes through the shifter and takes no
+// load-use advance, UXTB included; the identity extend (`add x2, sp, x1`, UXTX #0) counts as an extend.
+// ---------------------------------------------------------------------------
+TEST(A55SogTest, ExtendedRmIncludingUxtbGetsNoLoadUseAdvance) {
+    // LDR (3) -> extended Rm: 3; -> plain Rm: 2.  Chain through the load base x1 is not involved.
+    double Uxtb = a55CyclesPerIter("ldr x1, [x0]\nadd x0, x3, w1, uxtb");
+    double Uxth = a55CyclesPerIter("ldr x1, [x0]\nadd x0, x3, w1, uxth");
+    double Ident = a55CyclesPerIter("ldr x1, [x0]\nadd x0, sp, x1");
+    double Plain = a55CyclesPerIter("ldr x1, [x0]\nadd x0, x3, x1");
+    EXPECT_NEAR(Uxtb, Uxth, kTol);
+    EXPECT_NEAR(Ident, Uxth, kTol);
+    EXPECT_GT(Uxtb, Plain + 0.5);
+    EXPECT_EQ(a55Desc("add x1, x2, w3, uxtb").MaxLatency, 2u);
+    EXPECT_EQ(a55Desc("add x1, sp, x3").MaxLatency, 2u);
 }

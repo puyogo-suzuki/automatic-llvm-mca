@@ -10,18 +10,13 @@
 // Reference & Source Attribution:
 //   Arm Cortex-A520 Core Software Optimization Guide (PJDOC-1505342170-671342,
 //   Issue 1.2), https://developer.arm.com/documentation/102553/latest/
-//   Text version used for the line references below: automatic-llvm-mca/tmp/a520sog.txt
-//   ("SOG l.N" = line N of that file).
+//   "SOG l.N" below = line N of a text extraction of the guide (not part of the
+//   repository).
 //
-// 2026-10-30 rewrite (user instruction: every value from the SOG, nothing tuned to
-// accuracy).  The previous version mapped only the generic
-// SchedWrites and had several values that differ from the SOG: FADD 3 (SOG 4), FP/ASIMD
-// loads 2 (SOG 3), ASIMD multiply / FP multiply 2 (SOG 4), ASIMD basic 2 (SOG 3), FSQRT D
-// 13 (SOG 25), FCVT 3 (SOG 4), one VMAC (SOG scalar throughput 2), two store pipes (SOG
-// one store per cycle), branches on the ALUs (SOG: own Branch pipeline), MADD X 3 (SOG 4).
+// Every value is taken from the SOG; nothing is tuned to accuracy.
 //
 // What is NOT modelled (the SOG says nothing usable for a static model, or the effect
-// cannot be expressed in a scheduling model) - left as it was and recorded in the README:
+// cannot be expressed in a scheduling model; recorded in the README):
 //   * Decoupling of the VPU from the integer pipeline (Figure 1 draws V0..V5 after ISS but
 //     the text gives no queue depth or rule).  The tool's A55-only decoupled issue stage is
 //     NOT applied to the A520; the A520 uses src/a520/a520_issue_stage.h, the stock in-order
@@ -34,9 +29,6 @@
 //   * The 2x64-bit vector datapath option: values are the SOG's "A" column (2x128-bit
 //     configuration, or scalar / non-Q forms of the 2x64-bit configuration, SOG l.541-544).
 //     The board's configuration is not known (docs/a520-sog.md D-1).
-//   * (Superseded: the ASIMD structure loads/stores LD1..LD4 / ST1..ST4 now have one InstRW
-//     per SOG row at the end of this file, docs/a520-sog.md C-25/C-26; the generic
-//     WriteVLD/WriteVST keep the one-register LD1/ST1 row.)
 //   * Integer divide (SOG l.660-661 note 2, l.683-689): latency and DIV occupancy are the best
 //     case of the formula [N + bits/4], i.e. bits = 0: UDIV 3, SDIV 4 (docs/a520-sog.md D-13).
 // docs/a520-sog.md compares this file with the SOG item by item.
@@ -45,14 +37,13 @@
 // Cortex-A520 SOG sec. 4.1 "Issue constraints", p.72 (SOG l.3585-3591): "A maximum of three
 // issue queue entries can be co-issued per cycle (ignoring hazards) consisting of at most:
 // Two ALU instructions / Two load instructions / One store instruction / Two VPU data
-// processing instructions."  IssueWidth = 3 (this was fixed from 2 earlier; the old
-// comment explaining that fix is in orig/AArch64SchedA520.td).  The per-class limits are
+// processing instructions."  IssueWidth = 3.  The per-class limits are
 // modelled by the resources below (ALU x2, Load group x2, LdSt x1 for stores, VPU x2).
 def CortexA520Model : SchedMachineModel {
   let IssueWidth = 3;           // SOG l.3585: max three entries co-issued per cycle
   let MicroOpBufferSize = 0;    // In-order core
   let LoadLatency = 2;          // SOG l.846-941: integer load latency 2 (L1 hit)
-  let MispredictPenalty = 10;   // unchanged (not given in the SOG)
+  let MispredictPenalty = 10;   // not given in the SOG
   let CompleteModel = 0;
 
   list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
@@ -110,7 +101,6 @@ def A520Wr_UDIV        : SchedWriteRes<[A520UnitDIV]> { let Latency = 3; let Rel
 def A520Wr_SDIV        : SchedWriteRes<[A520UnitDIV]> { let Latency = 4; let ReleaseAtCycles = [4]; }
 // Loads / stores
 def A520Wr_LD          : SchedWriteRes<[A520UnitLoad]> { let Latency = 2; }                             // l.846-941
-def A520Wr_LD_t1       : SchedWriteRes<[A520UnitLoad]> { let Latency = 2; let ReleaseAtCycles = [2]; } // LDP pre/post, l.937-945
 def A520Wr_LDHi        : SchedWriteRes<[]> { let Latency = 2; let NumMicroOps = 0; }                    // 2nd reg of a pair (no extra issue entry)
 def A520Wr_FLD         : SchedWriteRes<[A520UnitLoad]> { let Latency = 3; }                             // l.1224-1256
 def A520Wr_FLD_t1      : SchedWriteRes<[A520UnitLoad]> { let Latency = 3; let ReleaseAtCycles = [2]; } // l.1257-1280 (pairs: 1)
@@ -128,7 +118,6 @@ class A520Wr_WBn<int lat> : SchedWriteRes<[]> { let Latency = lat; let NumMicroO
 // VPU
 def A520Wr_VALU_3      : SchedWriteRes<[A520UnitVALU, A520UnitVPU]> { let Latency = 3; }
 def A520Wr_VALU_4      : SchedWriteRes<[A520UnitVALU, A520UnitVPU]> { let Latency = 4; }
-def A520Wr_VALU0_1     : SchedWriteRes<[A520UnitVALU0, A520UnitVPU]> { let Latency = 1; }
 def A520Wr_VALU0_3     : SchedWriteRes<[A520UnitVALU0, A520UnitVPU]> { let Latency = 3; }
 def A520Wr_VALU0_4     : SchedWriteRes<[A520UnitVALU0, A520UnitVPU]> { let Latency = 4; }
 def A520Wr_VALU0_5r5   : SchedWriteRes<[A520UnitVALU0, A520UnitVPU]> { let Latency = 5; let ReleaseAtCycles = [5, 1]; }
@@ -156,13 +145,15 @@ def : WriteRes<WriteLDHi,  []>             { let Latency = 2; let NumMicroOps = 
 def : WriteRes<WriteST,    [A520UnitLdSt]> { let Latency = 1; }
 def : WriteRes<WriteSTP,   [A520UnitLdSt]> { let Latency = 1; }
 def : WriteRes<WriteSTIdx, [A520UnitLdSt]> { let Latency = 1; }
-def : WriteRes<WriteSTX,   [A520UnitLdSt]> { let Latency = 1; }
+// (WriteSTX is a WriteSequence<[WriteST, WriteLD]> in AArch64Schedule.td, which a WriteRes cannot override; the
+//  exclusive stores have InstRW rows below, [a520_stx].)
 def : WriteRes<WriteAdr,   []>             { let Latency = 1; let NumMicroOps = 0; }   // writeback in parallel, l.840
-def : WriteRes<WriteSys,   [A520UnitALU]>  { let Latency = 10; }  // unchanged (not in the SOG)
-def : WriteRes<WriteBarrier, [A520UnitLdSt]> { let Latency = 10; } // unchanged (not in the SOG)
-def : WriteRes<WriteHint,  [A520UnitALU]>  { let Latency = 1; }   // unchanged (NOP/hints are not in the SOG tables)
+// [a520_sys] docs/a520-sog.md D-16: system instructions (MRS, MSR), barriers and the hints have no SOG row:
+//   latency 1, no pipeline (the lower estimate, as the Cortex-A720 [a720_sys] and the Cortex-A78).
+def : WriteRes<WriteSys,   []>             { let Latency = 1; }
+def : WriteRes<WriteBarrier, []>           { let Latency = 1; }
+def : WriteRes<WriteHint,  []>             { let Latency = 1; }
 // [a520_nop] The NOP opcode takes no execution resource: the SOG has no row for it (docs/a520-sog.md D-14).
-//   The other hints (HINT: YIELD, BTI, ...) keep WriteHint.
 def A520Wr_Nop : SchedWriteRes<[]> { let Latency = 1; }
 def : InstRW<[A520Wr_Nop], (instrs NOP)>;
 // FP
@@ -225,11 +216,13 @@ def : InstRW<[A520Wr_ST, ReadST, A520Rd_PtrFwd],
 def A520Rd_RmLate      : SchedReadAdvance<-1>;
 def A520Rd_ShiftedRm   : SchedReadVariant<[SchedVar<RegShiftedPred, [A520Rd_RmLate]>,
                                            SchedVar<NoSchedPred,    [ReadDefault]>]>;
-def A520Rd_ExtendedRm  : SchedReadVariant<[SchedVar<RegExtendedPred, [A520Rd_RmLate]>,
-                                           SchedVar<NoSchedPred,     [ReadDefault]>]>;
 def : InstRW<[A520Wr_1c_ALU, ReadDefault, A520Rd_ShiftedRm],
              (instregex "^(ADD|SUB)S?[WX]rs$")>;
-def : InstRW<[A520Wr_1c_ALU, ReadDefault, A520Rd_ExtendedRm],
+// [a520_ext] docs/a520-sog.md D-6, U-10: every extended-register form takes the Rm note.  A variant on
+//   RegExtendedPred ("extend operand != 0") is not used: it is false for UXTB #0, a real extend
+//   (`add x1, x2, w3, uxtb`).  The identity extend (UXTX/LSL #0, the
+//   `add x1, sp, x3` spelling) counts as an extend (U-10).
+def : InstRW<[A520Wr_1c_ALU, ReadDefault, A520Rd_RmLate],
              (instregex "^(ADD|SUB)S?[WX]rx(64)?$")>;
 
 // ADCS/SBCS throughput 1 (l.601); CCMN/CCMP throughput 1 (l.622).
@@ -262,10 +255,9 @@ def : InstRW<[A520Wr_EXTR], (instrs EXTRWrri, EXTRXrri)>;
 // RBIT 2 (l.821)
 def : InstRW<[A520Wr_2c_ALU], (instrs RBITWr, RBITXr)>;
 // [a520_sog_fix] docs/a520-sog.md C-14: "Variable shift ASRV, LSLV, LSRV, RORV 1 2 ALU"
-// (l.822-823).  These used to take the stock WriteIS (Bitfield move, 2).
+// (l.822-823).
 def : InstRW<[A520Wr_1c_ALU], (instrs ASRVWr, ASRVXr, LSLVWr, LSLVXr, LSRVWr, LSRVXr, RORVWr, RORVXr)>;
 // [a520_sog_fix] docs/a520-sog.md C-28: "CRC checksum ops CRC32, CRC32C 2 1 MAC" (l.2283-2284).
-// These used to take the stock class (latency 1 on an ALU).
 def A520Wr_CRC : SchedWriteRes<[A520UnitMAC]> { let Latency = 2; }
 def : InstRW<[A520Wr_CRC], (instregex "^CRC32C?[BHWX]rr$")>;
 
@@ -273,8 +265,12 @@ def : InstRW<[A520Wr_CRC], (instregex "^CRC32C?[BHWX]rr$")>;
 // portion ... a typical sequence of multiply-accumulate instructions can issue one every 2
 // cycles": accumulate operand read early so that MAC->MAC accumulate latency is 2
 // (W: 3-1, X: 4-2; long: 2-0).  Not for consumers of multiply high.
-def A520Rd_MAccW : SchedReadAdvance<1, [A520Wr_IMW, A520Wr_IMW1]>;
-def A520Rd_MAccX : SchedReadAdvance<2, [A520Wr_IMX, A520Wr_IMX1]>;
+// [a520_mac_fwd] docs/a520-sog.md C-5, U-7: note 1 says "the result of one MAC operation" to "a following MAC
+//   operation", whatever its form, so every MAC write (W, X, long; also with the zero register as the
+//   accumulator, i.e. MUL / SMULL ...) is a producer for the accumulator of every MADD / MSUB form.  The advance
+//   is the consumer's (W 1, X 2; the long forms 0: their own chain is already 2).
+def A520Rd_MAccW : SchedReadAdvance<1, [A520Wr_IMW, A520Wr_IMW1, A520Wr_IMX, A520Wr_IMX1, A520Wr_IML, A520Wr_IML1]>;
+def A520Rd_MAccX : SchedReadAdvance<2, [A520Wr_IMW, A520Wr_IMW1, A520Wr_IMX, A520Wr_IMX1, A520Wr_IML, A520Wr_IML1]>;
 // MC operands of MADD/MSUB/SMADDL...: 0 = Rd, 1 = Rn, 2 = Rm, 3 = Ra.
 def A520AccIsZR : MCSchedPredicate<CheckAny<[CheckRegOperand<3, WZR>, CheckRegOperand<3, XZR>]>>;
 def A520Wr_MADDW : SchedWriteVariant<[SchedVar<A520AccIsZR, [A520Wr_IMW1]>, SchedVar<NoSchedPred, [A520Wr_IMW]>]>;
@@ -295,21 +291,43 @@ def A520Wr_LD_t1_2e : SchedWriteRes<[A520UnitLoad]> { let Latency = 2; let Relea
 def : InstRW<[A520Wr_WB, A520Wr_LD_t1_2e, A520Wr_LDHi], (instregex "^LDP(W|X|SW)(pre|post)$")>;
 // Stores with 3 GPR sources -> 2 issue entries: STR (register offset) of a GPR, STP of GPRs (l.3567-3580)
 def A520Wr_ST_2e : SchedWriteRes<[A520UnitLdSt]> { let Latency = 1; let NumMicroOps = 2; }
+// [a520_store_zr] docs/a520-sog.md D-15: the zero register is not a GPR source, so a store whose data (Rt, Rt2)
+//   or index register is WZR/XZR has at most two GPR sources and takes one entry (A520Wr_ST).  MC operands:
+//   STR ro: 0 = Rt, 1 = Rn, 2 = Rm; STP/STNP offset: 0 = Rt, 1 = Rt2, 2 = Rn; STP pre/post: 0 = written-back
+//   base, 1 = Rt, 2 = Rt2, 3 = Rn.
+def A520StRoZR   : MCSchedPredicate<CheckAny<[CheckRegOperand<0, WZR>, CheckRegOperand<0, XZR>,
+                                              CheckRegOperand<2, WZR>, CheckRegOperand<2, XZR>]>>;
+def A520StPZR    : MCSchedPredicate<CheckAny<[CheckRegOperand<0, WZR>, CheckRegOperand<0, XZR>,
+                                              CheckRegOperand<1, WZR>, CheckRegOperand<1, XZR>]>>;
+def A520StPIdxZR : MCSchedPredicate<CheckAny<[CheckRegOperand<1, WZR>, CheckRegOperand<1, XZR>,
+                                              CheckRegOperand<2, WZR>, CheckRegOperand<2, XZR>]>>;
+def A520Wr_STRo   : SchedWriteVariant<[SchedVar<A520StRoZR,   [A520Wr_ST]>, SchedVar<NoSchedPred, [A520Wr_ST_2e]>]>;
+def A520Wr_STP    : SchedWriteVariant<[SchedVar<A520StPZR,    [A520Wr_ST]>, SchedVar<NoSchedPred, [A520Wr_ST_2e]>]>;
+def A520Wr_STPIdx : SchedWriteVariant<[SchedVar<A520StPIdxZR, [A520Wr_ST]>, SchedVar<NoSchedPred, [A520Wr_ST_2e]>]>;
 // [a520_from_a55_store_data] B-2: the data operands (Rt, Rt2) read ReadST; reads in operand order Rt (, Rt2), Rn.
-def : InstRW<[A520Wr_ST_2e, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)ro[WX]$")>;
-def : InstRW<[A520Wr_ST_2e, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P(W|X)i$")>;
-def : InstRW<[A520Wr_WB, A520Wr_ST_2e, ReadST, ReadST, ReadAdrBase], (instregex "^STP(W|X)(pre|post)$")>;
+def : InstRW<[A520Wr_STRo, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)ro[WX]$")>;
+def : InstRW<[A520Wr_STP, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P(W|X)i$")>;
+def : InstRW<[A520Wr_WB, A520Wr_STPIdx, ReadST, ReadST, ReadAdrBase], (instregex "^STP(W|X)(pre|post)$")>;
 // [a520_from_a55_store_data] B-2: the store forms whose stock Sched lists name no reads ([WriteST],
 //   [WriteAdr, WriteST], [WriteSTP], [WriteAdr, WriteSTP]): same writes, plus ReadST on the data (the A55's
-//   rows of AArch64SchedA55.td, [a55_sog_u9]).  Release stores as on the A55 (stock writes WriteST / WriteSTX);
-//   STXR/STXP and the atomics have no ReadST, as on the A55.
+//   rows of AArch64SchedA55.td, [a55_sog_u9]).  Release stores as on the A55 (stock write WriteST; the
+//   exclusive stores: [a520_stx] below); STXR/STXP and the atomics have no ReadST, as on the A55.
 def : InstRW<[WriteST, ReadST, ReadAdrBase], (instregex "^STUR(BB|HH|W|X|B|H|S|D|Q)i$", "^STTR(B|H|W|X)i$")>;
 def : InstRW<[WriteAdr, WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X|B|H|S|D|Q)(pre|post)$")>;
 def : InstRW<[WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P(S|D)i$")>;
 def : InstRW<[WriteAdr, WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STP(S|D)(pre|post)$")>;
 def : InstRW<[WriteST, ReadST, ReadAdrBase], (instregex "^STL?LR(B|H|W|X)$")>;
-def : InstRW<[WriteSTX, ReadST, ReadAdrBase], (instregex "^STLXR(B|H|W|X)$")>;
-def : InstRW<[WriteSTX, ReadST, ReadST, ReadAdrBase], (instregex "^STLXP(W|X)$")>;
+// [a520_stx] docs/a520-sog.md N-1, U-6: the exclusive stores have no SOG row.  They take the store row of
+//   Table 3-7 ("- / 1 / Load/Store": latency 1 for the status result, the Load/Store pipe) and the entries of
+//   the sec. 4.1 rule (C-2): STXR/STLXR read Rt and Rn (one entry), STXP/STLXP read Rt, Rt2 and Rn (two
+//   entries; one when Rt or Rt2 is the zero register, D-15).  MC operands: 0 = Ws, 1 = Rt, (2 = Rt2,) then Rn.
+//   (The stock WriteSTX, a WriteSequence of WriteST and WriteLD, would give all four two entries, latency 3 and a
+//   load-pipe slot.)  STXR/STXP read no ReadST, as on the A55 (B-2).
+def A520Wr_STXP : SchedWriteVariant<[SchedVar<A520StPIdxZR, [A520Wr_ST]>, SchedVar<NoSchedPred, [A520Wr_ST_2e]>]>;
+def : InstRW<[A520Wr_ST], (instregex "^STXR(B|H|W|X)$")>;
+def : InstRW<[A520Wr_STXP], (instregex "^STXP(W|X)$")>;
+def : InstRW<[A520Wr_ST, ReadST, ReadAdrBase], (instregex "^STLXR(B|H|W|X)$")>;
+def : InstRW<[A520Wr_STXP, ReadST, ReadST, ReadAdrBase], (instregex "^STLXP(W|X)$")>;
 
 //===----------------------------------------------------------------------===//
 // FP / vector loads and stores
@@ -371,7 +389,7 @@ def : InstRW<[A520Wr_VALU_4], (instregex "^(ADD|SUB|RSUB)HNv", "^CMTSTv",
 def : InstRW<[A520Wr_VALU0_4], (instregex "^ADDVv4i(16|32)v$", "^(SADDLV|UADDLV|SMAXV|UMAXV|SMINV|UMINV)v",
                                           "^F(MAX|MIN)(NM)?Vv")>;
 // [a520_sog_fix] docs/a520-sog.md C-21: "ASIMD arith, reduce ADDV 3 1" (l.1485-1486) for the
-// forms other than 4H/4S (8B, 16B, 8H); was 4 (the 4H/4S row, l.1482).
+// forms other than 4H/4S (8B, 16B, 8H); the 4H/4S row (l.1482) is 4 (Reductions above).
 def : InstRW<[A520Wr_VALU0_3], (instrs ADDVv8i8v, ADDVv16i8v, ADDVv8i16v)>;
 // Transfers: UMOV/SMOV 3 / 1, INS from gen 3 / 1, DUP from gen 3 / 1 (l.1856, l.1926-1929)
 def : InstRW<[A520Wr_VALU0_3], (instregex "^[SU]MOVv", "^INSvi(8|16|32|64)gpr$", "^DUPv.*gpr$")>;
@@ -395,7 +413,7 @@ def : InstRW<[A520Wr_VMC<22, 38>], (instrs FSQRTv2f64)>;
 
 
 //===----------------------------------------------------------------------===//
-// 2026-10-30 a720_td_fix2 (proposed): rows found by the row-wise SOG check (README there).
+// Further rows from the row-wise SOG check (docs/a520-sog.md).
 def : InstRW<[A520Wr_VALU_4], (instrs FABD16, FABD32, FABD64)>;                                    // FP absolute value FABD 4, l.1122
 def : InstRW<[A520Wr_VALU_4], (instregex "^(SCVTF|UCVTF)[hsd]$", "^FCVTZ[SU][hsd]$")>;             // scalar-SIMD fixed-point converts: ASIMD FP convert 4 (l.1661 ff.)
 def A520Wr_ALU_t1q : SchedWriteRes<[A520UnitALU]> { let Latency = 1; let ReleaseAtCycles = [4]; }  // throughput 1/2
@@ -449,15 +467,15 @@ def : InstRW<[A520Wr_VALU_4], (instregex "^BFCVTN", "^BFCVT$")>;
 def : InstRW<[A520Wr_BFDOT], (instregex "^BFDOTv", "^BF16DOTlanev")>;
 // [a520_sog_fix] docs/a520-sog.md C-23: "ASIMD matrix multiply accumulate BFMMLA 14, 15
 // 1,1/2 VMAC, VALU" (l.1826-1827): A column, latency 14, throughput 1 (two units of each
-// resource, so each is held 2 cycles).  Was the default 3.
+// resource, so each is held 2 cycles).
 def A520Wr_BFMMLA : SchedWriteRes<[A520UnitVMAC, A520UnitVALU, A520UnitVPU]> {
   let Latency = 14; let ReleaseAtCycles = [2, 2, 1]; }
 def : InstRW<[A520Wr_BFMMLA], (instrs BFMMLA)>;
 // [a520_sog_fix] docs/a520-sog.md C-21: "ASIMD matrix multiply-accumulate SMMLA, UMMLA,
-// USMMLA 4 2,1 VALU" (l.1505-1507).  Was the default 3.
+// USMMLA 4 2,1 VALU" (l.1505-1507).
 def : InstRW<[A520Wr_VALU_4], (instrs SMMLA, UMMLA, USMMLA)>;
 // [a520_sog_fix] docs/a520-sog.md C-27: "Crypto SHA3 ops BCAX, EOR3 3 / XAR 4, 2,1 VALU"
-// (l.2262-2263).  XAR was the default 3.
+// (l.2262-2263).
 def : InstRW<[A520Wr_VALU_4], (instrs XAR)>;
 
 def A520Wr_VLS_3_Load1 : SchedWriteRes<[A520UnitLoad]> { let Latency = 3; let ReleaseAtCycles = [1]; }
@@ -473,7 +491,7 @@ def A520Wr_VLS_1_LdSt3 : SchedWriteRes<[A520UnitLdSt]> { let Latency = 1; let Re
 def A520Wr_VLS_1_LdSt4 : SchedWriteRes<[A520UnitLdSt]> { let Latency = 1; let ReleaseAtCycles = [4]; }
 def A520Wr_VLS_1_LdSt6 : SchedWriteRes<[A520UnitLdSt]> { let Latency = 1; let ReleaseAtCycles = [6]; }
 def A520Wr_VLS_1_LdSt8 : SchedWriteRes<[A520UnitLdSt]> { let Latency = 1; let ReleaseAtCycles = [8]; }
-// ASIMD load / store rows (generated by a720_td_fix2/gen_ldst.py from a520sog.txt; line = SOG line)
+// ASIMD load / store rows, one InstRW per SOG row (line = SOG line)
 // [a520_from_a55_store_data] B-2: the ST1-ST4 rows read the data Vt with ReadST (advance 1), the base Rn with
 //   ReadAdrBase; for the one-lane forms the lane index takes the read in between (ReadDefault), as in the
 //   A55's ST1-ST4 rows.  The post-index register Xm gets nothing.
@@ -616,8 +634,7 @@ def : InstRW<[A520Wr_WBn<2>, A520Wr_VLS_1_LdSt2, ReadST, ReadDefault, ReadAdrBas
 
 //===----------------------------------------------------------------------===//
 // [a520_pac] Pointer authentication, SOG sec. 3.5 Table 3-4 (l.702-773) and sec. 4.6
-// (l.3686-3689); docs/a520-sog.md C-13 and C-7.  These used to take the stock classes (latency 1 on
-// an ALU, or no resources at all for the combined branch forms).  PAC pipeline: one unit
+// (l.3686-3689); docs/a520-sog.md C-13 and C-7.  PAC pipeline: one unit
 // (fig. 1, l.421; table l.487).
 def A520UnitPAC : ProcResource<1>;
 // "Compute pointer authentication code ... 5 1 PAC" (PACDA..., PACGA, PACIA..., incl. the

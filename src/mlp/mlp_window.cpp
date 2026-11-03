@@ -82,10 +82,6 @@ struct WindowBudget {
     }
 };
 
-int window_end(int i, int n, int width) {
-    return std::min(n, i + width);
-}
-
 int count_loads_no_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, const WindowSpec &win, bool mlpWindowLoop) {
     int count = 0;
     WindowBudget budget(win);
@@ -230,7 +226,7 @@ int count_loads_io(const std::vector<MLPInstInfo> &inst_infos, int i, int n,
     return count_indep;
 }
 
-int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, int width,
+int count_loads_dependency(const std::vector<MLPInstInfo> &inst_infos, int i, int n, int /*width*/,
                            RegSet &load_dep_regs, bool mlpWindowLoop,
                            const llvm::MCRegisterInfo &MRI, const std::vector<unsigned> &return_regs) {
     load_dep_regs.reset();

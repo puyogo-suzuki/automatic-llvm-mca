@@ -177,7 +177,8 @@ enum class A720Consumer { None, BCOND, CSEL, CSET };
 // Everything the pairing table needs to know about a matched producer.  The
 // register-vs-immediate form and whether Rn is the zero register have to be
 // carried separately (rather than folded into the enum) because sec. 4.11
-// prints the "Rn != ZR" qualifier on the B.cond row ONLY - see (2) above.
+// prints the "Rn != ZR" qualifier on the B.cond row ONLY - see difference (2)
+// in docs/docs.md section 4.C.
 struct A720ProducerInfo {
     A720Producer Kind = A720Producer::None;
     bool RegisterForm = false; // register (incl. shifted/extended) vs immediate

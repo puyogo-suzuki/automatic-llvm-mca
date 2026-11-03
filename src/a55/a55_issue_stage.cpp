@@ -1,6 +1,6 @@
 #include "a55/a55_issue_stage.h"
-#include "mca/mca_simulation.h"
 #include "a55/a55_bypass.h"
+#include "mca/in_order_issue_helpers.h"
 #include "llvm/MCA/Stages/EntryStage.h"
 #include "llvm/MCA/HWEventListener.h"
 #include <algorithm>
@@ -8,31 +8,15 @@
 namespace llvm {
 namespace mca {
 
-static bool hasResourceHazard(const ResourceManager &RM, const InstRef &IR) {
-  return RM.checkAvailability(IR.getInstruction()->getDesc()) != 0;
-}
+using in_order_issue::addRegisterReadWrite;
+using in_order_issue::findFirstWriteBackCycle;
+using in_order_issue::hasResourceHazard;
 
-static unsigned findFirstWriteBackCycle(const InstRef &IR) {
-  unsigned FirstWBCycle = IR.getInstruction()->getLatency();
-  for (const WriteState &WS : IR.getInstruction()->getDefs()) {
-    int CyclesLeft = WS.getCyclesLeft();
-    if (CyclesLeft == UNKNOWN_CYCLES)
-      CyclesLeft = WS.getLatency();
-    if (CyclesLeft < 0)
-      CyclesLeft = 0;
-    FirstWBCycle = std::min(FirstWBCycle, (unsigned)CyclesLeft);
-  }
-  return FirstWBCycle;
-}
-
-// Member function (declared in a55_issue_stage.h): applies Cortex-A55's
-// same-cycle flag bypass (cmp -> csel/b.cc) and pointer-forwarding
-// (adrp -> ldr base) bypasses *before* consulting the register file's raw
-// RAW hazard, so they can actually suppress the stall they are meant to
-// suppress -- unlike the old Dispatched-event-based implementation, which
-// fired only after canExecute() had already gated the instruction on this
-// same hazard (see removed A55SteadyStateTracker::applyFlagTransferPenalty /
-// applyPointerForwarding in the old mca.cpp tracker).
+// Applies Cortex-A55's same-cycle flag bypass (cmp -> csel/b.cc) and
+// pointer-forwarding (adrp -> ldr base) bypasses *before* consulting the
+// register file's RAW hazard, so that they suppress the stall they are meant
+// to suppress (a Dispatched-event listener would run only after canExecute()
+// had already gated the instruction on this hazard).
 unsigned A55DecoupledIssueStage::checkRegisterHazard(const InstRef &IR) const {
   StringRef CurrName = MCII.getName(IR.getInstruction()->getOpcode());
   for (const ReadState &RS : IR.getInstruction()->getUses()) {
@@ -40,7 +24,7 @@ unsigned A55DecoupledIssueStage::checkRegisterHazard(const InstRef &IR) const {
     if (RegID == AArch64::NZCV &&
         a55IsFlagBypassEligible(PRF, MCII, SimInstrs, IR.getInstruction()->getOpcode()))
       continue;
-    // The base register Rn of LDR*ui is operand 1 (Rt, Rn, imm).
+    // The base register Rn of LDR*ui and STR*ui is operand 1 (Rt, Rn, imm).
     const ReadDescriptor &RD = RS.getDescriptor();
     if (!RD.isImplicitRead() &&
         a55IsAdrpForwardConsumer(CurrName, /*BaseOperandIndex=*/1, RD.OpIndex) &&
@@ -91,7 +75,7 @@ bool A55DecoupledIssueStage::isALUPipeOnly(unsigned SchedClassID) const {
 // extend" / "Count leading" / "Reverse bytes", the LSL/LSR/ASR-immediate
 // aliases of UBFM/SBFM [a55_shift_imm] and the ROR-immediate alias of EXTR
 // [a55_ror_imm]).  CRC32W/CW are 1-cycle in the .td but SOG 4.21
-// does not say they run in the ALU pipes, so they are kept out (as before).
+// does not say they run in the ALU pipes, so they are kept out.
 bool A55DecoupledIssueStage::isALUForwardProducer(const Instruction &IS) const {
   unsigned Opc = IS.getOpcode();
   if (Opc == AArch64::CRC32Wrr || Opc == AArch64::CRC32CWrr)
@@ -108,7 +92,7 @@ bool A55DecoupledIssueStage::isALUForwardProducer(const Instruction &IS) const {
 // within one stage can serve an in-order core.)  Across cycles an ALU result
 // is forwarded normally ("from the end of ex1 and ex2 to earlier stages of
 // both ALU pipelines") and seen at its exec latency, 1 for ALU basic: that is
-// the RegisterFile hazard itself, as the .td no longer has a ReadAdvance from
+// the RegisterFile hazard itself, as the .td has no ReadAdvance from
 // the ALU writes [a55_alu_fwd], so nothing is subtracted twice.
 //
 // Returns true if the hazard of `RS` (a read of instruction-1 candidate `IR`)
@@ -150,17 +134,6 @@ bool A55DecoupledIssueStage::isSameCycleALUForward(const InstRef &IR,
     FromSlot0 = true;
   }
   return FromSlot0;
-}
-
-static void addRegisterReadWrite(RegisterFile &PRF, Instruction &IS,
-                                 unsigned SourceIndex,
-                                 const MCSubtargetInfo &STI,
-                                 SmallVectorImpl<unsigned> &UsedRegs) {
-  for (ReadState &RS : IS.getUses())
-    PRF.addRegisterRead(RS, STI);
-
-  for (WriteState &WS : IS.getDefs())
-    PRF.addRegisterWrite(WriteRef(SourceIndex, &WS), UsedRegs);
 }
 
 A55DecoupledIssueStage::A55DecoupledIssueStage(const MCSubtargetInfo &STI,
@@ -237,11 +210,11 @@ bool A55DecoupledIssueStage::canExecute(const InstRef &IR, StallInfo &SI) {
   // divide results is retired in-order."  Modelled as: an instruction younger
   // than an in-flight SDIV/UDIV may not issue if it would complete (write back)
   // before that divide does.  This is the only write-back ordering rule on
-  // A55: the former generic "no younger instruction may write back before an
-  // older one" check (inherited from llvm::mca::InOrderIssueStage) is gone,
-  // because the SOG pipelines have fixed completion stages (sec. 3.1) and its
-  // throughput / dual-issue tables allow e.g. FADD+ADD or LDR+ADD pairs every
-  // cycle, which that check turned into up to three stall cycles per pair.
+  // A55: llvm::mca::InOrderIssueStage's generic "no younger instruction may
+  // write back before an older one" check is not applied, because the SOG
+  // pipelines have fixed completion stages (sec. 3.1) and its throughput /
+  // dual-issue tables allow e.g. FADD+ADD or LDR+ADD pairs every cycle, which
+  // that check would turn into up to three stall cycles per pair.
   if (DivWriteBackCycle) {
     unsigned NextWriteBackCycle = findFirstWriteBackCycle(IR);
     if (NextWriteBackCycle < DivWriteBackCycle) {
@@ -289,7 +262,7 @@ Error A55DecoupledIssueStage::issue(InstRef &IR) {
   // pair, sec. 3.2), not micro-ops.  TableGen sums NumMicroOps over the
   // SchedWrites of a class, so e.g. every writeback-form load/store ([WriteAdr,
   // WriteLD]) and every LDP (two data writes) has NumMicroOps = 2 and, counted
-  // in micro-ops, used to fill the whole issue width on its own: an LDP X
+  // in micro-ops, would fill the whole issue width on its own: an LDP X
   // ("01") or an STR post-index ("11") could never dual-issue.
   if (NumIssued == 0) {
     Slot0SourceIndex = SourceIndex;
@@ -395,7 +368,7 @@ void A55DecoupledIssueStage::retireInstruction(InstRef &IR) {
       HWInstructionRetiredEvent(IR, FreedRegs));
 }
 
-bool A55DecoupledIssueStage::isAvailable(const InstRef &IR) const {
+bool A55DecoupledIssueStage::isAvailable(const InstRef & /*IR*/) const {
   return DecodeWindow.size() < 2;
 }
 

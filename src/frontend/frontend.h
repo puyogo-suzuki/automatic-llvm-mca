@@ -30,7 +30,6 @@ struct TargetInfo {
     std::unique_ptr<llvm::MCContext> Ctx;
     std::unique_ptr<llvm::MCDisassembler> DisAsm;
     std::unique_ptr<llvm::MCInstrAnalysis> MCIA;
-    std::unique_ptr<llvm::mca::Context> MCAContext;
     llvm::mca::PipelineOptions PO;
     // SOG-documented Macro-op (Mop) decode/dispatch cap, a SECOND front-end
     // constraint independent of PO.DispatchWidth (which this tool sets to the
@@ -51,10 +50,15 @@ struct TargetInfo {
     TargetInfo() : PO(0, 0, 0, 0, 0, 0, true) {}
 };
 
+// Parses the command line (frontend/options.h), opens the input binary into
+// `Obj` and sets up `TI` for the target and the --mcpu CPU (local scheduling
+// model, dispatch widths, MLP analyser).  Prints an error and returns false on
+// failure.
 bool initializeFrontend(int argc, char **argv, const char *Overview,
                         std::unique_ptr<llvm::object::ObjectFile> &Obj,
                         TargetInfo &TI);
 
+// Redirects stderr (file descriptor 2) to /dev/null for its lifetime.
 struct ScopedSilence {
     int devNull = -1;
     int oldStderr = -1;

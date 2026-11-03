@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
         std::vector<McaRegion> regions;
         walkRegions(SectionInstrs, FunctionRanges,
                     [&](const RegionSpan &Span) {
-                        McaRegion r;
+                        McaRegion r{};
                         r.Start = Span.Start;
                         r.Size = Span.Size;
                         r.IsLoop = true;
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
                         regions.push_back(r);
                     },
                     [&](const RegionSpan &Span) {
-                        McaRegion r;
+                        McaRegion r{};
                         r.Start = Span.Start;
                         r.Size = Span.Size;
                         r.IsLoop = false;

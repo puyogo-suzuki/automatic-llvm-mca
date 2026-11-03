@@ -20,13 +20,16 @@ Reading the report
     instruction forms that are not distinguishable by mnemonic (scalar-SIMD forms vs
     GPR forms, F16 forms), and pipe sets where a group is listed together with one
     of its members.  Treat it as a triage list, not a verdict.
-  * It looks at the model tables only.  Corrections applied on top of the model in
-    facile.cpp (e.g. the A78 register-offset / M0-occupancy fixes) are not visible.
+  * It looks at the model tables only (what mca-insts-info prints).  Facile-side
+    behaviour that is not in the tables (macro-op fusion, zero-latency moves read
+    as "renamed away"; docs/docs.md section 4) is not visible.
+  * Only the Neoverse-derived models are supported (--model n1, n2, v1: the
+    Cortex-A76, A78 and X1 models).
   * Opcodes whose mnemonic no SOG row names, and SOG rows whose mnemonic maps to no
     opcode (aliases such as CMP, MOV) are listed separately.
 
 Usage
-  tools/sog_compare.py --sog tmp/x1sog.txt --csv x1.csv [--model v1|n1|n2]
+  tools/sog_compare.py --sog x1sog.txt --csv x1.csv [--model v1|n1|n2]
 
 --model selects the resource-name prefix and group structure and is detected from
 the CSV when omitted (V1Unit* -> v1, N2Unit* -> n2, N1Unit* -> n1).

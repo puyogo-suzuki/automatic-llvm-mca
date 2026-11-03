@@ -26,7 +26,7 @@ Contents
 | C, compatible | [C-1](#c-1) to [C-30](#c-30) |
 | N, not compatible | [N-1](#n-1) to [N-3](#n-3) |
 | D, deliberate deviation or interpretation | [D-1](#d-1) to [D-11](#d-11) |
-| U, unclear in the SOG | [U-1](#u-1) to [U-16](#u-16) |
+| U, unclear in the SOG | [U-1](#u-1) to [U-17](#u-17) |
 | I, inconsistent within the SOG | [I-1](#i-1) to [I-10](#i-10) |
 
 ---
@@ -37,11 +37,12 @@ Contents
 
 * **Guide**: "Arm® Cortex®-A55 Software Optimization Guide", document number **ARM-EPM-128372**,
   **Version 3.0** (30 November 2018), Copyright © 2017, 2018 Arm Limited (or its affiliates),
-  **Non-Confidential**. Called "the SOG" below.
+  **Non-Confidential**. Called "the SOG" below. Line numbers "l.N" refer to a text extraction of
+  the PDF (not tracked).
 
 ### 1.2 What "the implementation" is
 
-The state of the working tree on 2026-10-31 (last commit `023c744`, plus uncommitted changes):
+The implementation consists of:
 
 * `ModifiedTarget/AArch64/AArch64SchedA55.td`: the TableGen model `CortexA55Model`, compiled into
   the tool's own scheduling tables (see [docs.md](docs.md) section 5).
@@ -50,8 +51,7 @@ The state of the working tree on 2026-10-31 (last commit `023c744`, plus uncommi
 * `src/a55/a55_bypass.h`: the flag bypass and the ADRP pointer forwarding.
 * `src/a55/a55_adaptations.{h,cpp}`: corrections applied after `InstrBuilder` and to the cycle count.
 * `src/mca/mca_simulation.cpp` (`analyzeMcaRegion`): selects the A55 pipeline.
-* `tests/a55_sog_test.cpp`: unit tests that pin the values below to the SOG (the file was not yet
-  committed on 2026-10-31).
+* `tests/a55_sog_test.cpp`: unit tests that pin the values below to the SOG.
 
 Implementation facts are given by file and identifier (TableGen `def` names, C++ function names),
 not by line number, because line numbers change. The code marks its SOG-related changes with tags
@@ -66,7 +66,7 @@ Every item has an ID that other documents and code comments can refer to.
 |---|---|---|
 | **C-n** | compatible | The implementation does what the SOG states. |
 | **N-n** | not compatible | The SOG states something and the implementation does not follow it (wrong or missing). Each item says why it is still open. |
-| **D-n** | deliberate deviation or interpretation | The implementation knowingly departs from the literal SOG, or fills a gap with an interpretation the project chose. Each item gives the SOG text, the implementation, the reason, and an evaluation result where one exists. |
+| **D-n** | deliberate deviation or interpretation | The implementation knowingly departs from the literal SOG, or fills a gap with an interpretation the project chose. Each item gives the SOG text, the implementation and the reason. |
 | **U-n** | unclear | The SOG does not decide the question; the implementation makes an assumption or leaves it open. Each item gives the SOG text, what is unclear, the current handling, the expected impact, and how to settle it. |
 | **I-n** | inconsistent | Two places of the SOG disagree. Each item gives both places and which one the implementation follows. |
 
@@ -86,13 +86,15 @@ Sec. 4.1 (p.14, l.636-648):
   slot 1, `11` from both slots. Slot 0 is "instruction-0" (the older instruction of a pair) and
   slot 1 is "instruction-1" (sec. 3.2, p.9, l.371-374). The model encodes `01` as `BeginGroup`,
   `10` as `EndGroup` and `00` as `SingleIssue` (= both) ([C-2](#c-2)).
-* **`2*` / `11*`** (only in the ASIMD tables of sec. 4.15-4.17; the load/store tables of
-  sec. 4.18-4.19 have no asterisks): note 1 of those sections, "If the instruction has Q-form, the
+* **`2*` / `11*`** (in the ASIMD tables of sec. 4.15-4.17; the ASIMD load/store tables of
+  sec. 4.18-4.19 have no asterisks; the AArch32 load table of sec. 4.8, p.19-20, l.938-978, prints
+  `11*` for LDR/LDRB rows, but its notes, l.1087-1095, define no asterisk, and the A64 rows have
+  none): note 1 of sec. 4.15-4.17, "If the instruction has Q-form, the
   Q-form of the instruction can only be dual issued as instruction 0 and execution throughput is 1"
   (e.g. p.32, l.1785-1786). The D-form (and scalar) keeps throughput 2 and `11`. In the model the
-  D-form is one of the two `CortexA55UnitFPALU` units for one cycle (`CortexA55WriteVd`,
-  `CortexA55WriteAluVd_n`) and the Q-form holds both units for one cycle with `BeginGroup`
-  (`CortexA55WriteVq`, `CortexA55WriteAluVq_n`).
+  D-form is one of the two `CortexA55UnitFPALU` units for one cycle (the class `CortexA55WriteVd`,
+  e.g. `CortexA55WriteAluVd_2`) and the Q-form holds both units for one cycle with `BeginGroup`
+  (the class `CortexA55WriteVq`, e.g. `CortexA55WriteAluVq_2`).
 
 ---
 
@@ -110,7 +112,7 @@ Sec. 4.1 (p.14, l.636-648):
 | `CortexA55UnitDiv` | 1 | integer divide (iterative) |
 | `CortexA55UnitLd` | 1 | load pipe |
 | `CortexA55UnitSt` | 1 | store pipe |
-| `CortexA55UnitB` | 1 | branch (also used by `WriteSys`, `WriteBarrier`, `WriteHint`; not by NOP, [C-3](#c-3), [U-13](#u-13)) |
+| `CortexA55UnitB` | 1 | branch (also used by `WriteSys`, `WriteBarrier`, `WriteHint`; not by NOP or the pointer-authentication hints, [C-3](#c-3), [U-13](#u-13)) |
 | `CortexA55UnitVarShift` | 1 | not a pipe: caps the variable shifts at one per cycle ([D-7](#d-7), [U-1](#u-1)) |
 | `CortexA55UnitFPALU` | 2 | FP/ASIMD ALU |
 | `CortexA55UnitFPCmp` | 1 | not a pipe: caps the FP compares at one per cycle ([C-21](#c-21)) |
@@ -135,9 +137,9 @@ program order (`drainDecodeWindow`). For each candidate, `canExecute` checks, in
 The issue width is counted in instructions, not micro-ops ([C-1](#c-1)).
 
 **`--ignore-loop-carried`.** The tracker that forgets the previous iteration's producers
-(`LoopCarriedIgnoreSteadyStateTracker`) used to do so on the Dispatched event, which the issue stage
-raises after its hazard check, so the first instruction of every iteration still waited for the
-previous iteration (issue #12, see [docs.md](docs.md) section 2.C). The A55 issue stage calls
+(`LoopCarriedIgnoreSteadyStateTracker`) must do so before the first instruction of an iteration is
+checked for its register operands; the Dispatched event comes after the issue stage's hazard check,
+too late for that (the point tagged `#12`, see [docs.md](docs.md) section 2.C). The A55 issue stage calls
 `LoopCarriedIgnoreSteadyStateTracker::beforeRegisterHazardCheck()` before each hazard check
 (`setBeforeRegisterHazardCheckHook`, wired in `analyzeMcaRegion` only when the tracker is the
 loop-carried-ignoring one). Test: `A55SogTest.IgnoreLoopCarriedAppliesToFirstInstruction`. The
@@ -147,10 +149,8 @@ Cortex-A520 has its own issue stage with the same hook ([a520-sog.md](a520-sog.m
 
 * `applyA55InstructionAdaptations`: for `ADD/SUB/ADDS/SUBS (W|X)rs` with shift amount 0 the latency
   is set to 1. The `.td` already resolves this through `CortexA55WriteISRegV`, so the override is
-  redundant but harmless ([D-5](#d-5)). Its former second part (branches with latency 0 and no
-  resources) is disabled ([C-12](#c-12)).
-* `applyA55BranchOverlapCorrection`: formerly subtracted 0.5 cycle per steady-state iteration;
-  now returns the cycle count unchanged ([C-12](#c-12)).
+  redundant but harmless ([D-5](#d-5)). It does not change branches ([C-12](#c-12)).
+* `applyA55BranchOverlapCorrection`: returns the cycle count unchanged ([C-12](#c-12)).
 
 Instructions that `InstrBuilder` rejects are counted and reported for every core, not only the
 A55 ([docs.md](docs.md) section 2.F).
@@ -165,6 +165,7 @@ A55 ([docs.md](docs.md) section 2.F).
 | `[a55_varshift]` | [D-7](#d-7), [U-1](#u-1) |
 | `[a55_flag_bypass]` | [C-4](#c-4), [D-8](#d-8), [U-2](#u-2) |
 | `[a55_planB]` | [C-6](#c-6), [D-5](#d-5), [D-10](#d-10), [U-3](#u-3) |
+| `[a55_planB B2]` multiplicand / divide operands, accumulator advance | [C-8](#c-8), [U-3](#u-3) |
 | `[a55_td_fix]` | [C-15](#c-15), [C-16](#c-16), [C-17](#c-17), [C-22](#c-22); the `U` sub-tag: [C-12](#c-12) |
 | `[a55_sog_impl #3]` atomics | [C-19](#c-19), [U-5](#u-5) |
 | `[a55_sog_impl #4]` dual-issue column | [C-2](#c-2), [C-12](#c-12) |
@@ -174,6 +175,7 @@ A55 ([docs.md](docs.md) section 2.F).
 | `[a55_sog_impl #9*]` loads and stores | [C-7](#c-7), [C-17](#c-17), [C-18](#c-18), [C-23](#c-23), [C-24](#c-24), [C-28](#c-28), [C-29](#c-29) |
 | `[a55_sog_impl #10]` ASIMD rows | [C-25](#c-25) to [C-30](#c-30) |
 | `[a55_sog_impl #11]` integer divide | [C-15](#c-15), [D-1](#d-1) |
+| `[a55_sog_impl]` (no number) throughput as occupancy on the FP/ASIMD pipes; the block of further RBIT, CRC and ASIMD rows | [D-1](#d-1), [C-16](#c-16), [C-20](#c-20), [C-25](#c-25) to [C-27](#c-27) |
 | `[a55_sog_n5]` FP compare | [C-21](#c-21) |
 | `[a55_sog_n6]` ASIMD MOV | [C-25](#c-25), [I-8](#i-8) |
 | `[a55_sog_n7]` SQXTN / SQXTUN / UQXTN | [C-27](#c-27) |
@@ -182,6 +184,8 @@ A55 ([docs.md](docs.md) section 2.F).
 | `[a55_sog_n2]` pointer chasing from load pairs, LDPSW | [C-7](#c-7), [C-17](#c-17), [U-15](#u-15) |
 | `[a55_sog_n3]` pointer chasing into store and ASIMD load/store bases | [C-7](#c-7), [C-18](#c-18), [U-16](#u-16) |
 | `[a55_sog_u9]` store data read advance | [C-18](#c-18), [U-9](#u-9) |
+| `[a55_addp]` scalar ADDP | [C-25](#c-25) |
+| `[a55_ext]` extended-register Rm | [D-10](#d-10), [U-17](#u-17) |
 | `#12` (tests) loop-carried | [section 2.2](#22-issue-stage-srca55a55_issue_stagecpp) |
 
 ---
@@ -198,9 +202,8 @@ reordering at issue" (sec. 5.1, p.42, l.2386). Implementation: `A55DecoupledIssu
 issues the younger instruction of the window only in the same cycle as, and after, the older one,
 and caps the cycle at two (`NumIssued`). `issue()` counts instructions, not `NumMicroOps` (TableGen
 gives every writeback load/store and every LDP two micro-ops, which would otherwise fill the issue
-width alone). Tests: `StrictlyInOrderIssue`, `DualIssueColumn` (LDR post-index + ADD at one cycle).
-History: an earlier "decoupled" issue let an integer instruction-1 pass a stalled FP instruction-0;
-it had no SOG basis and was removed.
+width alone). An instruction never passes an older stalled one. Tests: `StrictlyInOrderIssue`,
+`DualIssueColumn` (LDR post-index + ADD at one cycle).
 
 <a id="c-2"></a>
 **C-2. The dual-issue column.**
@@ -225,16 +228,15 @@ SOG sec. 3.2 Table 1 (p.9-10, l.376-414) and Table 2 (p.10-11, l.417-460).
 | "Architectural NOP" can be instruction-1 (Table 2, l.458); not restricted as instruction-0 (Table 1) | `NOP`: `CortexA55WriteNop`, no resource, no group bits (`[a55_sog_n8]`) |
 
 AArch32-only rules (load/store multiple, LDRD, VMRS/VMSR, IT) cannot occur in A64 code.
-NOP: resolved 2026-10-31. The NOP opcode (`nop`) used to be `WriteHint` on
-`CortexA55UnitB`, so it could pair neither with a branch nor with another NOP; it now uses no
-resource, so a NOP pairs with anything the issue rules allow. The HINT-space pointer-authentication
-instructions (PACIASP, AUTIASP, PACIAZ, ..., XPACLRI) are NOPs as well (the project owner's decision
-of 2026-11-02, `[a55_pac_hint]`, [U-13](#u-13); they keep LLVM's implicit read and write of LR with
-latency 1; measured: `paciasp; autiasp` + branch 3.0 -> 2.0, `paciasp; add x1, x1, #1` + branch 2.0
--> 1.5). The SOG names no pipe for a NOP, and which other
+NOP: the NOP opcode (`nop`) uses no resource (not `WriteHint` on `CortexA55UnitB`, which would
+keep it from pairing with a branch or with another NOP), so a NOP pairs with anything the issue
+rules allow. The HINT-space pointer-authentication
+instructions (PACIASP, AUTIASP, PACIAZ, ..., XPACLRI) are NOPs as well (the project owner's decision,
+`[a55_pac_hint]`, [U-13](#u-13); they keep LLVM's implicit read and write of LR with
+latency 1; measured: `paciasp; autiasp` + branch 2.0, `paciasp; add x1, x1, #1` + branch
+1.5). The SOG names no pipe for a NOP, and which other
 hint instructions count as "Architectural NOP" is open: [U-13](#u-13). Measured
-(section 8): four `nop` + branch 2.5 cycles/iteration (was 5.0), `add; nop` + branch 1.5 (was
-2.0). Test: `NopDualIssues`. The compare-and-branch rule of Table 2 contradicts sec. 4.2:
+(section 8): four `nop` + branch 2.5 cycles/iteration, `add; nop` + branch 1.5. Tests: `NopDualIssues`, `PointerAuthenticationHints`. The compare-and-branch rule of Table 2 contradicts sec. 4.2:
 [U-14](#u-14).
 
 <a id="c-4"></a>
@@ -248,25 +250,29 @@ unless the consumer is ADC/ADCS/SBC/SBCS (W and X; NGC/NGCS are aliases), `a55Is
 or the producer is an FP compare ([D-8](#d-8)). RRX and MULS/MLAS exist only in AArch32, and no A64
 NEON instruction writes NZCV, so those exceptions cannot arise. The interlock after a flag-setting
 MUL (sec. 3.4, p.12, l.530-532) likewise has no A64 counterpart. Test:
-`FlagBypassExceptCarryAndFpCompare`. Open questions: [U-2](#u-2), [U-10](#u-10).
+`FlagBypassExceptCarryAndFpCompare` (`[a55_flag_bypass]`, `a55_bypass.h` and the test). Open
+questions: [U-2](#u-2), [U-10](#u-10).
 
 <a id="c-5"></a>
-**C-5. ADRP -> LDR pointer forwarding.**
-SOG sec. 5.10 (p.44, l.2528-2541): "adrp x0, <const>" followed by a load from "[x0, #lo12 <const>]"
-executes "without incurring a dependency based stall" (the SOG prints the load as "ldrp", see
+**C-5. ADRP -> load / store pointer forwarding.**
+SOG sec. 5.10 (p.44, l.2528-2541): "the following pointer sequence is expected to be common to generate
+load-store addresses": "adrp x0, <const>" followed by a load from "[x0, #lo12 <const>]" executes
+"without incurring a dependency based stall" (the SOG prints the load as "ldrp", see
 [I-10](#i-10)). Implementation: `a55IsAdrpForwardConsumer` and `a55IsPointerForwardEligible`
 (`a55_bypass.h`): a register whose current producer is `ADRP` causes no stall when it is the **base
-register (operand 1) of an unsigned-immediate-offset load**, i.e. an opcode `LDR*ui` (LDR, LDRB, LDRH,
-LDRSB, LDRSH, LDRSW, and the FP/SIMD LDR of B/H/S/D/Q), which is the form the SOG shows. Not covered
-(the ADRP result is waited for, latency 1): LDUR, pre/post-index and register-offset loads, the index
-register of a register-offset load, and every other consumer. Decision of the project owner
-2026-10-31 (the check used to be only "opcode name starts with LDR or LDUR, any operand"; that also
-waived the index register, LDUR and the pre/post-index forms, which the SOG does not show). The SOG's
-`#lo12 <const>` (the offset is the low 12 bits of the same symbol as the ADRP) cannot be known from the
-instructions and is **not checked**; compiler output pairs them by construction. Whether the SOG's
-rule extends to the forms not covered is not stated (not verified on hardware). Test:
-`AdrpPointerForwardingBaseOfUnsignedImmediateLoads` (with the loop branch: `adrp; ldr x2, [x1, #8]` 1.5
-cycles per iteration, `adrp; ldur` / `ldr [x1, #8]!` / `ldr [x3, x1]` 2.0).
+register (operand 1) of an unsigned-immediate-offset load or store**, i.e. an opcode `LDR*ui` (LDR,
+LDRB, LDRH, LDRSB, LDRSH, LDRSW, and the FP/SIMD LDR of B/H/S/D/Q) or `STR*ui` (STR, STRB, STRH and the
+FP/SIMD STR of B/H/S/D/Q). The SOG's example is a load, but it speaks of "load-store addresses", and
+the stores take the same address form; the lower estimate is chosen (decision of the project owner,
+the same scope as the Cortex-A520's, [a520-sog.md](a520-sog.md) D-7). Not covered (the
+ADRP result is waited for, latency 1): LDUR/STUR, pre/post-index and register-offset forms, LDP/STP,
+the index register of a register-offset access, the data operand of a store, and every other
+consumer. The SOG's `#lo12 <const>` (the offset is the low 12 bits of the same symbol as the ADRP)
+cannot be known from the instructions and is **not checked**; compiler output pairs them by
+construction. Whether the SOG's rule extends to the forms not covered is not stated (not verified on
+hardware). Test: `AdrpPointerForwardingBaseOfUnsignedImmediateLoads` (with the loop branch: `adrp; ldr x2,
+[x1, #8]` and `adrp; str x2, [x1, #8]` 1.5 cycles per iteration, `adrp; ldur` / `ldr [x1, #8]!` /
+`ldr [x3, x1]` / `stur` 2.0).
 
 <a id="c-6"></a>
 **C-6. Load-use latency 2 to the ALU.**
@@ -276,7 +282,7 @@ ALU of a dependent datapath instruction is two cycles." Implementation: `ReadAdv
 `WriteLDHi`, `CortexA55WriteLDP1`, `CortexA55WriteLDPW3SI`, `CortexA55WriteLDPX4`,
 `CortexA55WriteLDPX4b`, `CortexA55WriteLDPX4SI`, `CortexA55WriteLdAcq`, `CortexA55WriteLdAXP`,
 `CortexA55WriteLdAXPb`, `CortexA55WriteLDPSW3SI`, `CortexA55WriteLDPSW3b`: every register of every
-load, including both registers of every pair); a load of latency 3 is seen at 2. Since 2026-10-31 the
+load, including both registers of every pair); a load of latency 3 is seen at 2. The
 pointer-chasing path has a producer list of its own ([C-7](#c-7)). Operands that go through the shifter do not get it ([D-10](#d-10)).
 Test: `StrictlyInOrderIssue`, `SameCycleAluForwarding`. See also [I-2](#i-2).
 
@@ -288,8 +294,7 @@ to 2-cycle, load data from a limited set of load instructions can be forwarded f
 the wr pipeline stage to either the load or store AGU base operand", limited by Table 3; the table
 latency in parentheses ("3 (2)", "4 (3)"). Implementation: `ReadAdvance<ReadAdrBase, 1, [...]>`.
 
-*Producers* (`[a55_sog_n2]`, resolved 2026-10-31): a list of their own, no
-longer the ALU load-use list of [C-6](#c-6). Table 3 (l.492-495): "LDR & LDRT/LDTR (all
+*Producers* (`[a55_sog_n2]`): a list of their own, not the ALU load-use list of [C-6](#c-6). Table 3 (l.492-495): "LDR & LDRT/LDTR (all
 variants)" -> `WriteLD`, `WriteLDIdx` (every single-register load, see [I-7](#i-7)); "LDRD/LDP (all
 variants): Only the first register of the pair if 32-bit load or the second register of the pair if
 64-bit load" -> LDP/LDNP W-form: the first register only (`CortexA55WriteLDPW3SI`, not
@@ -297,25 +302,25 @@ variants): Only the first register of the pair if 32-bit load or the second regi
 `CortexA55WriteLDPX4`/`CortexA55WriteLDPX4SI`); LDPSW "3" with no parentheses and no note 1 (sec.
 4.8, p.21, l.1078): none (LDPSW has its own writes `CortexA55WriteLDPSW3SI`/`CortexA55WriteLDPSW3b`,
 which are only in the ALU list). Load acquire (`CortexA55WriteLdAcq`) and LDAXP (both registers,
-`CortexA55WriteLdAXP`, `CortexA55WriteLdAXPb`) keep the path as before: "3 (2)" with note 1 in sec.
+`CortexA55WriteLdAXP`, `CortexA55WriteLdAXPb`) are in the list: "3 (2)" with note 1 in sec.
 4.8, but Table 3 does not list them ([U-15](#u-15)). `WriteLDHi` (second register of the stock
-LDXP class, no SOG row, [U-12](#u-12)) unchanged. Little-endian and aligned addresses are assumed
-([D-2](#d-2)). Measured (section 8, one instruction + loop branch, before -> after): `ldp x1, x2,
-[x1]` 3.0 -> 4.0; `ldp x1, x2, [x2]` 3.0 (unchanged); `ldp w1, w2, [x2]` 2.0 -> 3.0; `ldpsw x1, x2,
-[x1]` 2.0 -> 3.0. Test: `LoadPairPointerChasingPerRegister`.
+LDXP class, no SOG row, [U-12](#u-12)) is in the list as well. Little-endian and aligned addresses are assumed
+([D-2](#d-2)). Measured (section 8, one instruction + loop branch): `ldp x1, x2,
+[x1]` 4.0; `ldp x1, x2, [x2]` 3.0; `ldp w1, w2, [x2]` 3.0; `ldpsw x1, x2,
+[x1]` 3.0. Test: `LoadPairPointerChasingPerRegister`.
 
-*Consumers* (`[a55_sog_n3]`, resolved 2026-10-31): `ReadAdrBase` is on the
+*Consumers* (`[a55_sog_n3]`): `ReadAdrBase` is on the
 base operand of every LDR/LDUR/LDTR/LDP/LDNP/LDAR/LDAXR/LDAXP form (`InstRW` rows, and the stock
-`Sched` lists of the register-offset loads) and now also of every store form with an SOG row: STR/STUR
+`Sched` lists of the register-offset loads) and of every store form with an SOG row: STR/STUR
 /STTR (immediate, unscaled, unprivileged, pre/post-index, all register sizes incl. FP B/H/S/D/Q),
 STP/STNP (all sizes and addressing modes, incl. Q), STLR/STLLR, STLXR, STLXP (the register-offset
-stores had it already through their stock `Sched` list), and of the ASIMD LD1-LD4 / ST1-ST4 rows
+stores through their stock `Sched` list), and of the ASIMD LD1-LD4 / ST1-ST4 rows
 (multiple, one lane, replicate, post-index). The SOG names the ASIMD structure loads/stores neither in
 sec. 3.3 nor in sec. 4.18/4.19; the statement is about the AGU base operand of the load/store
 pipelines, which they use like every other load/store, so it is applied to them
 ([U-16](#u-16)). Not covered (no SOG row): atomics, PRFM, LDXR/LDXP/STXR/STXP ([U-16](#u-16)).
-Measured (section 8, before -> after): `ldr x1, [x0]; str x2, [x1]` 4.0 -> 3.0 (= the register-offset
-`str x2, [x1, x4]`, 3.0); `ldr x1, [x1]; ld1 {v0.8b}, [x1]` 4.0 -> 3.0. Tests:
+Measured (section 8): `ldr x1, [x0]; str x2, [x1]` 3.0 (= the register-offset
+`str x2, [x1, x4]`); `ldr x1, [x1]; ld1 {v0.8b}, [x1]` 3.0. Tests:
 `StoreAndAsimdBasePointerChasing`, `ScalarAndPairLoadsStores` (9g).
 
 <a id="c-8"></a>
@@ -342,9 +347,8 @@ SOG Table 4 (sec. 3.5.1, p.13, l.583-590): note b (accumulate forwarding) appear
 non-fused AArch32 VMLA/VNMLA/VMLS/VNMLS/VRECPS/VRSQRTS row ("8 (4b)"); the fused row
 "VFMA/FMADD, ..." gives a plain 4. Sec. 4.11 FMADD "4, 2, 11" (p.26, l.1367) and sec. 4.16 FMLA/FMLS
 "4, 2*, 11*" (p.34, l.1889) have no number in parentheses. Implementation: `CortexA55WriteFMAC`
-/ `CortexA55WriteFMACq` with no read advance; a chain through the accumulator costs 4 per step.
-History: the former `CortexA55ReadFMAC` (advance 2, citing "SOG Table 4 Note b") was removed
-(`[a55_sog_impl #6b]`). Test: `AccumulatorForwarding`.
+/ `CortexA55WriteFMACq` with no read advance (`[a55_sog_impl #6b]`); a chain through the
+accumulator costs 4 per step. Test: `AccumulatorForwarding`.
 
 <a id="c-11"></a>
 **C-11. FP divide and square root.**
@@ -360,10 +364,9 @@ Test: `SquareRootAndReciprocalSqrt`.
 **C-12. Branches.**
 SOG sec. 4.2 (p.14, l.666-676): B, BL, CBZ/CBNZ/TBZ/TBNZ "1, 1, 11"; BR, RET, BLR "1, 1, 10".
 Implementation: `WriteBr` (latency 1, `CortexA55UnitB`), `WriteBrReg` (latency 1, `EndGroup`).
-History: two corrections without an SOG basis were disabled (`[a55_td_fix U]`): the zero-latency,
-resource-free override of B/B.cond in `applyA55InstructionAdaptations`, and the -0.5
-cycle/iteration "branch overlap" correction (`applyA55BranchOverlapCorrection` now returns its
-input). See [U-14](#u-14) for compare-and-branch as instruction-1.
+No correction without an SOG basis is applied to branches (`[a55_td_fix U]`):
+`applyA55InstructionAdaptations` leaves B/B.cond as the model gives them, and
+`applyA55BranchOverlapCorrection` returns its input. See [U-14](#u-14) for compare-and-branch as instruction-1.
 
 ### 3.2 Instruction tables, integer
 
@@ -452,9 +455,9 @@ Test: `ScalarAndPairLoadsStores`, `DualIssueColumn`.
 | (Store, writeback form) | (1/T) / same as before | `WriteAdr` 1 (T = 1) ([U-11](#u-11)) |
 
 Operand timing of stores. Base: pointer chasing from loads ([C-7](#c-7)).
-Data (`[a55_sog_u9]`, resolved 2026-10-31): `ReadAdvance<ReadST, 1>` (advance 1
-from every producer) is now on the data operands of every store with an SOG row, not only of the
-register-offset stores (whose stock `Sched` lists had it): STR/STUR/STTR (all addressing modes and
+Data (`[a55_sog_u9]`): `ReadAdvance<ReadST, 1>` (advance 1
+from every producer) is on the data operands of every store with an SOG row (the register-offset
+stores through their stock `Sched` lists): STR/STUR/STTR (all addressing modes and
 sizes, incl. FP), STP/STNP (both data registers, incl. Q), STLR/STLLR, STLXR/STLXP, and the data
 `Vt` of every ASIMD ST1-ST4 row ([C-29](#c-29)). SOG: sec. 4.9 (p.22, l.1108-1109) stores "do not need
 to wait for data operands (which are required at wr)"; sec. 3.1.1 (p.9, l.351-352) "a dedicated
@@ -462,9 +465,9 @@ forwarding path ... from the ex2 stage of the ALU0 to the ex2 stage of the store
 (p.28, l.1521-1522) FP store data "required at f2" (FP operands are read in f1, p.8); sec. 4.19
 (p.38, l.2193) ASIMD stores "do not need to wait for data operands" (no stage given); sec. 5.7
 (p.43, l.2453-2456) similar instructions behave alike. The amount (1) is the project's reading
-([U-9](#u-9)). Measured (section 8, before -> after): `mul x1, x2, x3; str x1, [x0]` 5.0 -> 4.0 (=
-register-offset, 4.0); `ldr x1, [x0]; str x1, [x5]; ldr x2, [x0, #8]; str x2, [x5, #8]` 7.0 -> 5.0;
-`add x1, x1, #1; str x1, [x0]` twice 3.0 -> 2.5. Not covered: atomics, STXR/STXP (no SOG row).
+([U-9](#u-9)). Measured (section 8): `mul x1, x2, x3; str x1, [x0]` 4.0 (= the
+register-offset form); `ldr x1, [x0]; str x1, [x5]; ldr x2, [x0, #8]; str x2, [x5, #8]` 5.0;
+`add x1, x1, #1; str x1, [x0]` twice 2.5. Not covered: atomics, STXR/STXP (no SOG row).
 Test: `StoreDataNeededLater`.
 
 <a id="c-19"></a>
@@ -481,7 +484,7 @@ Test: `StoreDataNeededLater`.
 | SWP{A} / SWPL, SWPAL | 2 / 1/2 / 01, 3 / 1/3 / 01 | `<2, 2>`, `<3, 3>` |
 
 ST&lt;OP&gt; is LD&lt;OP&gt; with Rt = WZR/XZR (same opcode), recognised by `CortexA55AtomicToZR`.
-Atomics used to be `Unsupported` and silently dropped. Which resources they occupy: [U-5](#u-5).
+Atomics are modelled (not `Unsupported`, which would drop them). Which resources they occupy: [U-5](#u-5).
 Test: `AtomicsAreModelled`.
 
 <a id="c-20"></a>
@@ -503,14 +506,14 @@ Test: `AtomicsAreModelled`.
 | FP multiply accumulate (FMADD, FMSUB, FNMADD, FNMSUB) | 4 / 2 / 11 | `CortexA55WriteFMAC` ([C-10](#c-10)) |
 | FP select (FCSEL) | 2 / 1 / 01 | `CortexA55WriteFCSEL` (both FP ALU units, `BeginGroup`) |
 
-FP compare: resolved 2026-10-31 (`[a55_sog_n5]`). It used to be
-`CortexA55WriteFPALU_F1` (one of the two FP ALU units), i.e. throughput 2. The SOG gives throughput
+FP compare (`[a55_sog_n5]`): one FP ALU unit alone (`CortexA55WriteFPALU_F1`) would give
+throughput 2. The SOG gives throughput
 1 (AArch32 VCMP likewise "1, 1, 11", p.25, l.1302) but not which FP ALU unit compares; as for the
 variable shifts ([D-7](#d-7)), a one-unit resource caps the FP compares at one per cycle and leaves
 the other FP ALU unit free, so an FP compare still pairs with another FP ALU instruction (11). (The
 other "throughput 1, dual-issue 11" row, AESMC/AESIMC, holds both FP ALU units instead.) Measured
-(section 8): four independent `fcmp` + branch 4.0 cycles/iteration (was 2.5); `fcmp; fadd; fcmp;
-fadd` + branch 2.5 (unchanged). Test: `FpCompareThroughputOne`.
+(section 8): four independent `fcmp` + branch 4.0 cycles/iteration; `fcmp; fadd; fcmp;
+fadd` + branch 2.5. Test: `FpCompareThroughputOne`.
 
 <a id="c-22"></a>
 **C-22. Sec. 4.12, FP miscellaneous (A64 table, p.27, l.1417-1443).**
@@ -558,7 +561,7 @@ model's `WriteVd`/`WriteVq` aliases (latency 4).
 | SABA, UABA, SABAL(2), UABAL(2) | 4 / 1/2 / 01 | `CortexA55WriteAluT2_4` (one unit 4 cycles, `BeginGroup`) |
 | SABDL, UABDL | 3 / 1 / 01 | `CortexA55WriteAluVq_3` |
 | ADD, SUB, NEG, [SU]HADD, [SU]HSUB, [SU]RHADD | 2 / 2* / 11* | `AluVd_2` / `AluVq_2` |
-| ABS, ADDP, [SU]ADDLP, SQADD, UQADD, SQNEG, SQSUB, UQSUB, SUQADD, USQADD | 3 / 2* / 11* | `AluVd_3` / `AluVq_3` |
+| ABS, ADDP, [SU]ADDLP, SQADD, UQADD, SQNEG, SQSUB, UQSUB, SUQADD, USQADD | 3 / 2* / 11* | `AluVd_3` / `AluVq_3`; scalar ADDP (`ADDPv2i64p`) `AluVd_3` (below) |
 | [SU]ADDL(2), [SU]ADDW(2), [SU]SUBL(2), [SU]SUBW(2), ADDHN(2), SUBHN(2) | 3 / 1 / 01 | `AluVq_3` |
 | SQABS | 4 / 2* / 11* | default |
 | RADDHN(2), RSUBHN(2) | 4 / 1/2 / 01 | `AluT2_4` |
@@ -589,14 +592,20 @@ model's `WriteVd`/`WriteVq` aliases (latency 4).
 | SQSHL{U}, UQSHL, SQRSHRN(2), UQRSHRN(2), SQRSHRUN(2), SQSHRUN(2) | 4 / 2* / 11* | default |
 | SSHL, USHL; SRSHL, URSHL; SQSHL, UQSHL, SQRSHL, UQRSHL (register) | 2; 3; 4 / 2* / 11* | `AluVd_2`/`AluVq_2`; `AluVd_3`/`AluVq_3`; default |
 
-ASIMD MOV: resolved 2026-10-31 (`[a55_sog_n6]`). `MOV Vd.T, Vn.T` is
-`ORR Vd.T, Vn.T, Vn.T` (`ORRv8i8` / `ORRv16i8`) and used to take the ORR row (latency 1). The
-register-form ORR now has a `SchedWriteVariant` on `CheckSameRegOperand<1, 2>`: with Rn == Rm it
-takes the A64 MOV row (2, 2*, 11*), otherwise the ORR row (1, 2*, 11*). ORR (immediate) is
-unchanged. The A64 MOV row is the SOG's statement for this A64 instruction; the AArch32 VMOV
+ASIMD MOV (`[a55_sog_n6]`): `MOV Vd.T, Vn.T` is
+`ORR Vd.T, Vn.T, Vn.T` (`ORRv8i8` / `ORRv16i8`), so it would take the ORR row (latency 1). The
+register-form ORR has a `SchedWriteVariant` on `CheckSameRegOperand<1, 2>`: with Rn == Rm it
+takes the A64 MOV row (2, 2*, 11*), otherwise the ORR row (1, 2*, 11*). ORR (immediate) takes
+the ORR row. The A64 MOV row is the SOG's statement for this A64 instruction; the AArch32 VMOV
 (register) row says 1, so the SOG remains inconsistent ([I-8](#i-8)). Measured (section 8): a chain
-of four `mov v0.16b, v0.16b` + branch 8.0 cycles/iteration (was 4.0). Test:
+of four `mov v0.16b, v0.16b` + branch 8.0 cycles/iteration. Test:
 `AsimdMovRegisterLatencyTwo`.
+
+Scalar ADDP (`[a55_addp]`): `ADDP Dd, Vn.2D` (`ADDPv2i64p`) is listed in the row's regular
+expressions next to the vector forms (otherwise it would fall on the default 4) and takes the row's
+scalar/D-form value, 3 on one FP ALU unit, both slots. The other scalar pairwise forms (FADDP,
+FMAXP, FMINP, FMAXNMP, FMINNMP) are 4 by default, which is their row (FADDP 4, FMAX/FMIN pairwise
+4, [C-26](#c-26)). Measured (section 8): two dependent `addp d0, v0.2d` + branch 6.0. Test: `ScalarAddpTakesTheAsimdArithRow`.
 
 <a id="c-26"></a>
 **C-26. Sec. 4.16, ASIMD FP (A64 table, p.33-34, l.1843-1898).**
@@ -633,17 +642,17 @@ of four `mov v0.16b, v0.16b` + branch 8.0 cycles/iteration (was 4.0). Test:
 | REV16, REV32, REV64 | 2 / 2* / 11* | `AluVd_2` / `AluVq_2` |
 | TBL | 2+N-1 / 1/N / 01 | `CortexA55WriteTBL1..4` (latency 2..5, one unit 2N cycles, `BeginGroup`) |
 | TBX | 2+N / 1/(N+1) / 01 | `CortexA55WriteTBX1..4` (latency 3..6, one unit 2(N+1) cycles) |
-| SMOV, UMOV | 2 / 2 / 11 | `CortexA55WriteFPALU_F2` |
+| SMOV, UMOV | 2 / 2 / 11 | `CortexA55WriteFPALU_F2` (test `AsimdMiscRows`) |
 | TRN1, TRN2 .2D; other | 2 / 1 / 01; 2 / 2* / 11* | `AluVq_2`; `AluVd_2` / `AluVq_2` |
 | UZP1, UZP2, ZIP1, ZIP2 | 2 / 2* / 11* | `AluVd_2` / `AluVq_2` |
 
-SQXTN / SQXTUN / UQXTN: resolved 2026-10-31 (`[a55_sog_n7]`). The vector
-forms (D and Q) used to fall on the default `WriteVq` (both FP ALU units, `BeginGroup`): throughput
+SQXTN / SQXTUN / UQXTN (`[a55_sog_n7]`): without an `InstRW` of their own the vector
+forms (D and Q) would fall on the default `WriteVq` (both FP ALU units, `BeginGroup`): throughput
 1, slot 0 only. The row has no asterisk (no Q-form note), and the AArch32 row "ASIMD move,
 saturating VQMOVN, VQMOVUN 4, 2, 11" (p.34, l.1931) agrees, so every form (D, Q = the "2" forms,
-scalar) is now one FP ALU unit for one cycle, latency 4, both slots (`InstRW` on
+scalar) is one FP ALU unit for one cycle, latency 4, both slots (`InstRW` on
 `^(SQXTN|SQXTUN|UQXTN)v`). Measured (section 8): `add; sqxtn v0.8b, v1.8h; add; sqxtn` + branch
-2.5 cycles/iteration (was 3.0), the same as with XTN. Test: `SaturatingExtractNarrowDualIssues`.
+2.5 cycles/iteration, the same as with XTN. Test: `SaturatingExtractNarrowDualIssues`.
 
 <a id="c-28"></a>
 **C-28. Sec. 4.18, ASIMD loads (A64 table, p.37-38, l.2102-2183).** Every row has its own
@@ -705,7 +714,7 @@ the writeback row's `01` is meant to override the base row is not stated (not ve
 
 <a id="n-3"></a>
 **N-3. WFE and WFI can be dual-issued.**
-*Status: recorded 2026-10-31; deliberately not fixed (decision of the project owner).*
+*Status: recorded; deliberately not changed (decision of the project owner).*
 SOG sec. 3.2 Table 1 (p.10-11, l.410-412): "Control instructions cannot be dual issued. These include
 MRC/MCR, MRS/MSR, WFI, WFE, CPS, and barriers." Implementation: `WriteSys` and `WriteBarrier` have
 `SingleIssue` ([C-3](#c-3)), but in LLVM WFE and WFI are not separate opcodes: they are `HINT #2`
@@ -771,8 +780,8 @@ Implementation (`[a55_ror_imm]`): `CortexA55WriteEXTR` selects `CortexA55WriteSh
 **D-5. Shifted-register ALU forms with shift amount 0 are "ALU, basic".**
 SOG: "ALU, basic" 1 and "ALU, extend and/or shift" 2 (sec. 4.3, p.15, l.713-718); the SOG does not
 say how a zero shift is classified. Implementation: `CortexA55WriteISRegV` (`RegShiftedPred` ->
-`CortexA55WriteISReg2`, else `CortexA55WriteISReg1`), and for the reads `CortexA55ReadISReg` /
-`CortexA55ReadIEReg` (a zero shift reads like a plain ALU operand). `applyA55InstructionAdaptations`
+`CortexA55WriteISReg2`, else `CortexA55WriteISReg1`), and for the read `CortexA55ReadISReg` (a zero
+shift reads like a plain ALU operand; the extended-register forms have no such case, [D-10](#d-10)). `applyA55InstructionAdaptations`
 sets the same latency 1 for `ADD/SUB/ADDS/SUBS (W|X)rs` with shift 0 (redundant). Reason: a zero
 shift does no shifting; `MOV Xd, Xn` (ORR with XZR) is the common case.
 
@@ -827,17 +836,21 @@ throughput and dual-issue tables allow, for example, FADD + ADD or LDR + ADD pai
 Implementation: `llvm::mca::InOrderIssueStage`'s rule "a younger instruction may not write back
 before an older one" is not used; the only ordering rule kept is the divide rule ([U-4](#u-4)).
 Reason: with fixed completion stages in-order completion needs no stall, and the general rule
-turned such pairs into up to three stall cycles each. Test: `NoWriteBackOrderStallAfterLongLatencyOp`.
+would turn such pairs into up to three stall cycles each. Test: `NoWriteBackOrderStallAfterLongLatencyOp`.
 
 <a id="d-10"></a>
 **D-10. Operands that pass through the shifter get no load-use advance.**
 SOG: load-use latency 2 "to the ALU" (sec. 3.3, l.484); fig. 1 (p.8) draws, in each ALU pipe, a
 "shift" box and an "ALU" box (in the text extraction they fall under ex1 and ex2, l.271-278; check
-the PDF). The SOG gives no number for load -> shifter. Implementation (`[a55_planB]`):
-`CortexA55ReadShifted` (`SchedReadAdvance<0>`) for shifted/extended Rm (`RegShiftedPred`,
-`RegExtendedPred`), the source of UBFM/SBFM/BFM, both sources of EXTR and of the variable shifts;
-these operands see a load at 3, other ALU operands at 2. Reason: an operand that is shifted is
-needed one stage earlier than one consumed by the ALU box. Not verified on hardware.
+the PDF). The SOG gives no number for load -> shifter. Implementation (`[a55_planB]`, `[a55_ext]`):
+`CortexA55ReadShifted` (`SchedReadAdvance<0>`) for shifted Rm (`RegShiftedPred`), the Rm of every
+extended-register form (the identity extend: [U-17](#u-17)), the source of UBFM/SBFM/BFM, both
+sources of EXTR and of the variable shifts; these operands see a load at 3, other ALU operands at 2.
+Reason: an operand that is shifted or extended is needed one stage earlier than one consumed by the
+ALU box. Not verified on hardware. The extended Rm is selected by opcode (`[a55_ext]`), not by
+`RegExtendedPred` ("extend operand != 0"), which is false for UXTB #0, a real extend; so UXTB's Rm
+sees a load at 3 like UXTH's: measured `ldr x1, [x0]; add x0, x3, w1, uxtb` + branch
+5.0 (= UXTH). Test: `ExtendedRmIncludingUxtbGetsNoLoadUseAdvance`.
 
 <a id="d-11"></a>
 **D-11. ASIMD FSQRT takes the scalar rows.**
@@ -878,10 +891,8 @@ Expected impact: one cycle, rare. How to settle: on hardware, a micro-benchmark 
 
 <a id="u-3"></a>
 **U-3. ALU -> MAC / DIV / AGU forwarding.**
-*Status: decided 2026-10-31 to keep the effective ALU -> MAC / DIV / AGU latency at 1 (default
-handling). The 2-cycle ALU -> AGU reading was implemented as an experimental option and removed
-again the same day (project owner decision; see below). ALU -> MAC / DIV: not
-implemented.*
+*Status: decided to keep the effective ALU -> MAC / DIV / AGU latency at 1 (project owner
+decision).*
 SOG sec. 3.1.1 (p.9, l.349-351): "The ... (ALU) pipeline can forward results from the end of ex1 and
 ex2 to earlier stages of both ALU pipelines, and to the iss stage of the Divide (DIV) and
 Multiply-Accumulate (MAC) pipelines and the load/store Address Generation Units (AGUs)"; "Load-Store
@@ -899,25 +910,10 @@ only from loads, so the effective ALU -> MAC/DIV/AGU latency is 1 (test `SameCyc
 `add w1; mul w1, w1, w1` 4 cycles; measured `add x1, x1, #8; ldr x2, [x1]` + branch 2.0). Depending
 on the reading this is one cycle optimistic.
 
-Removed experiment (2026-10-31): the 2-cycle ALU -> AGU reading was implemented as an issue-stage rule
-behind the command-line option `--a55-alu-agu-latency2` (default off), compared on the research
-evaluation, and then deleted together with the option at the project owner's decision (no tag remains
-in the code). The rule, for reconstruction: in `A55DecoupledIssueStage::checkRegisterHazard`, after an
-operand's register hazard had cleared, the instruction stalled one more cycle if (a) the operand was an
-*address operand* of a load/store (the register operand of class GPR64sp, i.e. the base Rn of every
-load, store, atomic, exclusive, PRFM and ASIMD structure load/store, and the index Rm of the
-register-offset forms `...roW`/`...roX`; not the data registers and not the post-index register Xm of
-the ASIMD forms), (b) its producer was an ALU-pipe instruction (the producer set of [D-6](#d-6): only
-`CortexA55UnitALU`, CRC32W/CW excluded), and (c) that producer wrote back in this very cycle
-(`RegisterFile::getElapsedCyclesFromWriteBack` = 0). So an address operand saw an ALU result at the
-exec latency + 1: ALU basic -> AGU 2, ALU extend/shift -> AGU 3; ALU -> ALU, ALU -> store data, load
--> base, base update -> base and MAC -> base were unchanged, and ADRP -> LDR (then also LDUR) kept the waiver of
-[C-5](#c-5). Measured: `add x1, x1, #8; ldr x2, [x1]` + branch 2.0 -> 3.0 with the option. The test
-`AluToAguIsOneCycle` pins the default (ALU -> base 1). A negative
-`ReadAdvance` is supported by the simulator (checked 2026-10-31: with `ReadIM` advance -1,
-`add w1, w1, #1; mul w1, w1, w1` goes from 4.0 to 5.0 cycles/iteration; the Cortex-A520 model also uses
-negative advances, `AArch64SchedA520.td`). An earlier version of this item said that LLVM's `ReadAdvance`
-cannot be negative; that was wrong. How to settle: on hardware, `add x1, x1, #8; ldr x2, [x1]` chains.
+The test `AluToAguIsOneCycle` pins the handling (ALU -> base 1). The 2-cycle reading for MAC / DIV
+operands could be expressed with a negative `ReadAdvance`, which the simulator supports (with `ReadIM`
+advance -1, `add w1, w1, #1; mul w1, w1, w1` takes 5.0 cycles/iteration instead of 4.0; the
+Cortex-A520 model uses negative advances, `AArch64SchedA520.td`). How to settle: on hardware, `add x1, x1, #8; ldr x2, [x1]` chains.
 
 <a id="u-4"></a>
 **U-4. "Integer divides are serializing".**
@@ -947,9 +943,13 @@ settle: on hardware, LDADD interleaved with independent LDR or STR.
 **U-6. ST4, one lane, S and D.**
 SOG sec. 4.19 A64 (p.40, l.2289) has only "ASIMD store, 4 element, one lane, B/H 2, 1/2, 01"; S and
 D element sizes have no row (AArch32 "VST4, 4 element, one lane 2, 1/2, 01", p.39, l.2232).
-Current handling: `ST4i(32|64)` keep the former `CortexA55WriteVST2` (latency 5, store pipe 2
-cycles, no `BeginGroup`), post-index with `WriteAdr`. Expected impact: negligible (rare). How to
-settle: hardware measurement, or adopt the B/H row (2, 1/2, 01) by analogy.
+Current handling: `ST4i(32|64)` use the stock `CortexA55WriteVST2` (latency 5, store pipe 2
+cycles, no `BeginGroup`, no `RetireOOO`), with `ReadST` on the data and `ReadAdrBase` on the base;
+the post-index forms `ST4i(32|64)_POST` add `WriteAdr` (base update latency 1). The "(1/T)"
+base-update rule of the ASIMD rows ([U-11](#u-11), `CortexA55WriteVAdr<1/T>`) is not applied to
+them: with the store pipe held 2 cycles (T = 1/2) it would give 2, as for the B/H row. Expected
+impact: negligible (rare). How to settle: hardware measurement, or adopt the B/H row (2, 1/2, 01,
+base update 2) by analogy.
 
 <a id="u-7"></a>
 **U-7. Q-forms of SHL, SSHR, USHR, SHRN2.**
@@ -971,7 +971,7 @@ How to settle: hardware measurement of `sxtw` and `uxth` chains.
 
 <a id="u-9"></a>
 **U-9. When store data is needed.**
-*Status: decided 2026-10-31: the natural reading is adopted (store data is needed one cycle later
+*Status: decided: the natural reading is adopted (store data is needed one cycle later
 than an ordinary operand: `ReadST` advance 1 from every producer, for all stores, [C-18](#c-18));
 hardware measurement is still the way to settle it.*
 SOG: stores "do not need to wait for data operands (which are required at wr)" (sec. 4.9, p.22,
@@ -982,8 +982,8 @@ earlier than an ordinary operand the store data is needed, and whether an ALU in
 the data of a store instruction-1 in the same cycle. Taken literally, "required at wr" would be two
 stages after ex1 (an advance of 2 against an ALU operand); the ALU0 ex2 -> store ex2 path and FP
 "required at f2" (one stage after the f1 operand read) point to one stage. The ASIMD stores (sec.
-4.19, l.2193) give no stage. Current handling (since 2026-10-31): advance 1 for the data of every
-store with an SOG row (before: register-offset stores only); with it, an ALU
+4.19, l.2193) give no stage. Current handling: advance 1 for the data of every
+store with an SOG row; with it, an ALU
 instruction-0 and a store instruction-1 that stores its result pair in one cycle (an ALU result of
 latency 1 is seen at 0). Not covered: atomics and STXR/STXP (no SOG row). How to settle: hardware
 measurement of `ldr; str` and `add; str` with the stored register dependent.
@@ -1005,7 +1005,8 @@ note 1 without "parentheses", l.2189) and 4.19 (l.2291-2295). Unclear: whether "
 reciprocal of the row's throughput" (the reading taken) and how it applies to rows with throughput
 1 (latency 1) and to loads, where note 1 says only "shorter latency". Current handling:
 `WriteAdr` 1, `CortexA55WriteAdr2` for STP Q (T = 1/2), `CortexA55WriteVAdr<1/T>` for the ASIMD
-rows (e.g. LD1 four Q registers: 8, test `AsimdLoadsStores`).
+rows (e.g. LD1 four Q registers: 8, test `AsimdLoadsStores`); ST4 one lane S/D, which has no row,
+keeps `WriteAdr` 1 ([U-6](#u-6)).
 
 <a id="u-12"></a>
 **U-12. Exclusives without acquire/release.**
@@ -1023,12 +1024,12 @@ row for NOP or any other hint. Unclear: (a) which pipe, if any, a NOP occupies, 
 (beyond the pairing rules, the SOG gives none); (b) whether "Architectural NOP" covers only `nop`
 or also the hint-space instructions that the Cortex-A55 (Armv8.2) executes as NOPs, such as BTI
 (Armv8.5), YIELD, SEV, SEVL, CSDB. *Status: the pointer-authentication hints (Armv8.3) are decided:
-NOPs, 2026-11-02.* Current handling (`[a55_sog_n8]`, `[a55_pac_hint]`, [C-3](#c-3)): the `NOP`
+NOPs.* Current handling (`[a55_sog_n8]`, `[a55_pac_hint]`, [C-3](#c-3)): the `NOP`
 opcode and the pointer-authentication hints PACIAZ, PACIBZ, PACIASP, PACIBSP,
 PACIA1716, PACIB1716, AUTIAZ, AUTIBZ, AUTIASP, AUTIBSP, AUTIA1716, AUTIB1716 and XPACLRI have no
 resource and no group bits (the Cortex-A55 has no FEAT_PAuth, so they execute as NOPs), so two of
 them, or one and a branch, pair; every other hint keeps `WriteHint` on `CortexA55UnitB` (one per
-cycle, no pairing with a branch): `HINT` (YIELD, WFE, WFI, SEV, SEVL, BTI, CSDB, ...). Side note found while checking: WFE
+cycle, no pairing with a branch): `HINT` (YIELD, WFE, WFI, SEV, SEVL, BTI, CSDB, ...). WFE
 and WFI are `HINT` in LLVM, not `WriteSys`, so they do not get the `SingleIssue` that [C-3](#c-3)
 attributes to the control instructions of Table 1 (recorded as [N-3](#n-3), not changed). Expected impact: small; NOPs
 are mostly alignment padding. How to settle (the remaining hints): on hardware, loops of `nop` /
@@ -1036,7 +1037,7 @@ are mostly alignment padding. How to settle (the remaining hints): on hardware, 
 
 <a id="u-14"></a>
 **U-14. Compare-and-branch (CBZ, CBNZ, TBZ, TBNZ) as instruction-1: which row applies.**
-*Status: decided 2026-10-31 to keep the current handling.*
+*Status: decided to keep the current handling.*
 Table 2 (p.10, l.436-438): "Most branches can be dual-issued from this position except compare and
 branch instructions." Sec. 4.2 A64 (p.14, l.676): "Compare and branch CBZ, CBNZ, TBZ, TBNZ 1, 1, 11"
 (both slots). The AArch32 row "Compare and branch CBZ, CBNZ 1, 1, 01" (l.662) agrees with Table 2.
@@ -1047,18 +1048,18 @@ hardware measurement of `cbz` pairs and `add; cbz` in the second slot.
 
 <a id="u-15"></a>
 **U-15. Pointer chasing from LDAXP: which register.**
-*Status: recorded 2026-10-31.*
+*Status: recorded.*
 SOG sec. 4.8 (p.21): "Load acquire exclusive, pair LDAXP 3(2) 1 00", note 1 (the pointer-chasing
 path, "See section 3.3"). Table 3 (sec. 3.3, p.11, l.492-495) lists only "LDR & LDRT/LDTR" and
 "LDRD/LDP (all variants)", with the per-register rule for LDP. Unclear: whether LDAXP follows the LDP
 rule (first register of a 32-bit pair, second of a 64-bit pair) or both registers have the path.
 Current handling: both registers (`CortexA55WriteLdAXP`, `CortexA55WriteLdAXPb` in the
-`ReadAdrBase` list), as before. Expected impact: negligible (LDAXP feeding an address is rare). How
+`ReadAdrBase` list). Expected impact: negligible (LDAXP feeding an address is rare). How
 to settle: adopt the LDP rule by analogy (a project decision), or hardware measurement.
 
 <a id="u-16"></a>
 **U-16. Which load/store bases take the pointer-chasing path.**
-*Status: recorded 2026-10-31.*
+*Status: recorded.*
 SOG sec. 3.3 (p.11, l.486-489): load data "can be forwarded ... to either the load or store AGU base
 operand". The SOG does not list the consumer instructions. Current handling ([C-7](#c-7)): every load
 and store form that has an SOG row, including the ASIMD LD1-LD4 / ST1-ST4 rows of sec. 4.18/4.19,
@@ -1067,6 +1068,18 @@ covered: atomics (sec. 4.10), PRFM, and the exclusives without acquire/release L
 ([U-12](#u-12)), whose base waits the full load latency. Expected impact: small (pointer chasing into
 these is rare). How to settle: hardware measurement of `ldr x1, [x1]; ld1 {v0.8b}, [x1]` and
 `ldr x1, [x0]; ldadd x2, x3, [x1]` chains, or a project decision to extend the rule.
+
+<a id="u-17"></a>
+**U-17. ADD/SUB (extended register) with an identity extend.**
+SOG sec. 4.3 (p.15, l.713-718): "ALU, basic" 1 and "ALU, extend and/or shift" 2. Unclear: whether the
+extended-register form with a zero shift and a full-width extend (UXTX/SXTX for X, UXTW/SXTW for W),
+which assemblers write as `add x1, sp, x3` (the register form with SP needs the extended encoding),
+is "extend and/or shift" or "basic". Current handling (`[a55_ext]`): an extend: `WriteIEReg` 2, and Rm
+reads `CortexA55ReadShifted` ([D-10](#d-10)). This is the reading of the Cortex-A78 document
+(a78-sog.md U-4; also A76, X1, A720), which counts it as an extend. Expected impact: one cycle per
+such instruction on a dependency chain (SP-relative address computations). How to settle: hardware
+measurement of an `add x1, sp, x1` chain, or an owner decision. Test:
+`ExtendedRmIncludingUxtbGetsNoLoadUseAdvance`.
 
 ---
 
@@ -1135,8 +1148,8 @@ Implementation: the tables (every scalar load is a producer); measured `ldrsw x1
 **I-8. ASIMD register move: 2 in A64, 1 in AArch32.**
 Sec. 4.15 A64 "ASIMD logical MOV 2, 2*, 11*" (p.31, l.1709); A64 ORR (the instruction MOV is an
 alias of) "1, 2*, 11*" (l.1707-1708); AArch32 sec. 4.17 "ASIMD move, register VMOV 1, 2*, 11*"
-(p.34, l.1925); sec. 5.7 (l.2455-2456). Implementation: since 2026-10-31 the A64 MOV row, 2 for
-the register-form ORR with Rn == Rm and 1 for any other ORR ([C-25](#c-25)); before, 1 for all.
+(p.34, l.1925); sec. 5.7 (l.2455-2456). Implementation: the A64 MOV row, 2 for
+the register-form ORR with Rn == Rm and 1 for any other ORR ([C-25](#c-25)).
 
 <a id="i-9"></a>
 **I-9. "Minimum" vs. "worst-case" latency.**
@@ -1158,8 +1171,7 @@ Implementation: the evident meaning.
 ## 8. Reproducing the cycle counts quoted here
 
 The cycles/iteration figures in sections 4-6 that are not from `tests/a55_sog_test.cpp` were
-measured by the author on 2026-10-31 with a private build of the working tree (CMake, Release; not
-`build/`), as follows:
+measured with `mca_tool` built from this tree (CMake, Release), as follows:
 
 ```sh
 # body: the instructions of one iteration, e.g. "ldr x1, [x0]" "str x2, [x1]"
@@ -1170,20 +1182,22 @@ mca_tool --mcpu=cortex-a55 --mtriple=aarch64 --iterations=200 t
 # cycles/iteration = cycles / (retired_instructions / length), first CSV row (the loop)
 ```
 
-The loop branch `b 1b` is part of every body (so "four `fcmp`" is five instructions). The working
-tree was being changed by other sessions at the time; re-measure before quoting a number.
+The loop branch `b 1b` is part of every body (so "four `fcmp`" is five instructions). Re-measure
+before quoting a number.
 
 ---
 
 ## 9. Maintaining this document
 
 * Update an item when the SOG reading or the implementation changes. IDs run from 1 without gaps
-  within each category, in the order of the items; an item whose difference has been fixed becomes a
+  within each category, in the order of the items; an item whose difference is resolved becomes a
   C item, and the code, tests and other documents that name an ID are updated with it.
 * When a deviation is introduced on purpose, add a D item, and tag the code with a comment that names
   the ID.
 * Evaluation results (accuracy metrics, totals over benchmark sets) are not recorded in this document;
   cycles/iteration only when reproduced with `mca_tool` as in section 8.
-* [docs.md](docs.md) holds the rest of the technical documentation (other cores, the MCA steady-state
-  machinery, MLP, Facile, the scheduling-model plumbing); it links here for the Cortex-A55.
+* [docs.md](docs.md) holds the rest of the technical documentation (the MCA steady-state machinery,
+  MLP, Facile, the scheduling-model plumbing); [a520-sog.md](a520-sog.md), [a76-sog.md](a76-sog.md),
+  [a78-sog.md](a78-sog.md), [x1-sog.md](x1-sog.md) and [a720-sog.md](a720-sog.md) are the counterparts
+  of this document for the other cores.
   [README.md](README.md) lists the documents.

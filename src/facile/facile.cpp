@@ -34,9 +34,9 @@ double getInstLatency(const llvm::mca::Instruction &Inst) {
 }
 
 // Is this a CPU whose scheduling model uses a zero-latency write to mean
-// "renamed away, so there is no dependence at all"?  See point (c) in the
-// getEdgeLatency() comment below for why this must be asked per-target rather
-// than by just trusting any Latency==0 write.
+// "renamed away, so there is no dependence at all"?  docs/docs.md section 4.B
+// ("WHY THIS IS GATED ON THE TARGET") explains why this must be asked
+// per-target rather than by just trusting any Latency==0 write.
 bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
     return getCpuTraits(STI.getCPU()).ZeroLatencyMov;
 }
@@ -52,14 +52,19 @@ bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
 // edge), and so that a register tuple (the destination of LD1-LD4, the source of ST1-ST4:
 // Q0_Q1, ...) is both a producer and a consumer of each of its registers: a consumer
 // of v1 after "ld1 {v0, v1}" depends on the load.  A register with a single unit
-// (every non-tuple register) has one key, as before.
+// (every non-tuple register) has one key.
+//
+// GFacileMRI is set by computeFacilePrediction() before the graph is built.
+// A register-unit key has kRegUnitKeyBit set, so it never equals a register id;
+// such a key, passed back in, is its own only key.
 static const llvm::MCRegisterInfo *GFacileMRI = nullptr;
+constexpr unsigned kRegUnitKeyBit = 0x80000000u;
 static void regKeys(unsigned Reg, llvm::SmallVectorImpl<unsigned> &Keys) {
     Keys.clear();
     if (Reg == 0) return;
-    if (!GFacileMRI || (Reg & 0x80000000u)) { Keys.push_back(Reg); return; }
+    if (!GFacileMRI || (Reg & kRegUnitKeyBit)) { Keys.push_back(Reg); return; }
     for (llvm::MCRegUnit U : GFacileMRI->regunits(llvm::MCRegister(Reg)))
-        Keys.push_back(static_cast<unsigned>(U) | 0x80000000u);
+        Keys.push_back(static_cast<unsigned>(U) | kRegUnitKeyBit);
     if (Keys.empty()) Keys.push_back(Reg);
 }
 
@@ -229,6 +234,18 @@ bool isStoreWritebackDef(const llvm::mca::Instruction &Inst, const llvm::mca::Wr
     return false;
 }
 
+// Latency of a loop-carried edge from `Writer` to use slot `Slot` of `Reader`:
+// the per-operand latency of getEdgeLatency(), or the writer's instruction
+// latency if `Slot` is out of range.
+double loopCarriedEdgeLatency(const llvm::MCSubtargetInfo &STI,
+                              const llvm::mca::Instruction &Writer,
+                              const llvm::mca::Instruction &Reader,
+                              size_t Slot, unsigned Reg) {
+    const auto &Uses = Reader.getUses();
+    return (Slot < Uses.size()) ? getEdgeLatency(STI, Writer, Uses[Slot], Reg)
+                                : getInstLatency(Writer);
+}
+
 // 3. Build Read-After-Write (RAW) Register Dependency Graph
 //
 // One node per instruction, plus one extra node per store with a writeback (see
@@ -318,10 +335,8 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
         size_t ReaderSlot = entry.second.second;
         auto it = LastWriter.find(Reg);
         if (it != LastWriter.end()) {
-            const auto &Uses = SimInstrs[ReaderIdx]->getUses();
-            double Lat = (ReaderSlot < Uses.size())
-                             ? getEdgeLatency(STI, *SimInstrs[it->second.Inst], Uses[ReaderSlot], Reg)
-                             : getInstLatency(*SimInstrs[it->second.Inst]);
+            double Lat = loopCarriedEdgeLatency(STI, *SimInstrs[it->second.Inst], *SimInstrs[ReaderIdx],
+                                                ReaderSlot, Reg);
             Adj[it->second.Node].push_back({ReaderIdx, Lat, 1});
         }
     }
@@ -329,10 +344,8 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
     for (const EarlyRead &E : EarlyReads) {
         auto it = LastWriter.find(E.Reg);
         if (it == LastWriter.end()) continue;
-        const auto &Uses = SimInstrs[E.Inst]->getUses();
-        double Lat = (E.Slot < Uses.size())
-                         ? getEdgeLatency(STI, *SimInstrs[it->second.Inst], Uses[E.Slot], E.Reg)
-                         : getInstLatency(*SimInstrs[it->second.Inst]);
+        double Lat = loopCarriedEdgeLatency(STI, *SimInstrs[it->second.Inst], *SimInstrs[E.Inst],
+                                            E.Slot, E.Reg);
         Adj[it->second.Node].push_back({E.Node, Lat, 1});
     }
 
@@ -356,8 +369,8 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
 // single-block throughput but not for the loop-recurrence bound this tool
 // actually computes.
 //
-// WHY IT MATTERS ASYMMETRICALLY, AND WHY IT SHOWED UP AS A FireStorm-ONLY
-// ERROR.  EstimatedCycles = max(IssueBound, PortBound, PrecedenceBound).  A
+// WHY IT MATTERS MOST ON WIDE CORES.  EstimatedCycles =
+// max(IssueBound, PortBound, PrecedenceBound).  A
 // missing precedence bound is invisible on a narrow core, because IssueBound
 // (uops / issue width) is larger anyway and still wins the max; it becomes
 // visible exactly on the WIDEST core of a pair, whose IssueBound is smallest.
@@ -619,6 +632,14 @@ void addMemoryDependencies(const llvm::MCInstrInfo &MCII,
     }
 }
 
+// Relaxation budget of isAchievableRatio(): N * max(kSpfaMinOpsFactor, N)
+// queue pops; past it the ratio is taken as achievable.
+constexpr size_t kSpfaMinOpsFactor = 10;
+// Slack below which a relaxation does not count as an improvement.
+constexpr double kSpfaEpsilon = 1e-9;
+// Bisection steps of calculatePrecedenceBound().
+constexpr int kMcrBisectionSteps = 30;
+
 // Check if a cycle ratio mu is achievable using SPFA negative cycle detection on transformed weights: c = mu * distance - latency
 bool isAchievableRatio(double mu,
                        size_t N,
@@ -631,7 +652,7 @@ bool isAchievableRatio(double mu,
         q.push(i);
     }
 
-    size_t maxOps = N * std::max<size_t>(10, N);
+    size_t maxOps = N * std::max<size_t>(kSpfaMinOpsFactor, N);
     size_t ops = 0;
 
     while (!q.empty()) {
@@ -645,7 +666,7 @@ bool isAchievableRatio(double mu,
 
         for (const auto &E : Adj[u]) {
             double weight = mu * E.Distance - E.Latency;
-            if (dist[u] + weight < dist[E.Target] - 1e-9) {
+            if (dist[u] + weight < dist[E.Target] - kSpfaEpsilon) {
                 dist[E.Target] = dist[u] + weight;
                 count[E.Target] = count[u] + 1;
                 if (count[E.Target] >= N) {
@@ -701,7 +722,7 @@ double calculatePrecedenceBound(
     double high = std::max({MaxRatio + 1.0, maxLatencySum, 1.0});
 
     // Binary search for exact MCR
-    for (int iter = 0; iter < 30; ++iter) {
+    for (int iter = 0; iter < kMcrBisectionSteps; ++iter) {
         double mid = low + (high - low) / 2.0;
         if (isAchievableRatio(mid, N, Adj)) {
             low = mid;
@@ -725,6 +746,15 @@ std::string determineDominantBottleneck(double EstimatedCycles,
         return "Execution Ports (" + PortBottleneckName + ")";
     }
     return "Issue Width (Dispatch Limit)";
+}
+
+// The --facile-reason column: "prec", "exec" or "inst".
+std::string classifyFacileReason(const FacileResult &Res) {
+    if (Res.EstimatedCycles == Res.PrecedenceBound && Res.PrecedenceBound > 0.0)
+        return "prec";
+    if (Res.EstimatedCycles == Res.PortBound && Res.PortBound > Res.IssueBound)
+        return "exec";
+    return "inst";
 }
 
 } // namespace
@@ -771,13 +801,7 @@ FacileResult computeFacilePrediction(const llvm::MCSubtargetInfo &STI,
     Res.EstimatedCPI = Res.EstimatedCycles / static_cast<double>(Res.TotalInstructions);
     Res.DominantBottleneck = determineDominantBottleneck(Res.EstimatedCycles, Res.PrecedenceBound, Res.PortBound, Res.PortBottleneckName);
 
-    if (Res.EstimatedCycles == Res.PrecedenceBound && Res.PrecedenceBound > 0.0) {
-        Res.FacileReason = "prec";
-    } else if (Res.EstimatedCycles == Res.PortBound && Res.PortBound > Res.IssueBound) {
-        Res.FacileReason = "exec";
-    } else {
-        Res.FacileReason = "inst";
-    }
+    Res.FacileReason = classifyFacileReason(Res);
 
     return Res;
 }

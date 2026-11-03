@@ -45,7 +45,7 @@ struct BaseSteadyStateTracker : llvm::mca::HWEventListener {
         }
     }
 
-    virtual void onInstructionDispatched(const llvm::mca::HWInstructionEvent &Event) {}
+    virtual void onInstructionDispatched(const llvm::mca::HWInstructionEvent &/*Event*/) {}
 };
 
 // Additionally removes the dependence of a loop iteration on the previous one
@@ -67,9 +67,10 @@ struct LoopCarriedIgnoreSteadyStateTracker : public BaseSteadyStateTracker {
     // event comes after the issue stage's register hazard check, so on its own
     // it is too late for the first instruction of each iteration.  An issue
     // stage that calls this before its hazard check makes the first instruction
-    // independent of the previous iteration like every other one.  Only the
-    // Cortex-A55 issue stage (src/a55/a55_issue_stage.cpp) calls it; the stock
-    // llvm::mca stages offer no such hook.
+    // independent of the previous iteration like every other one.  The
+    // Cortex-A55 and Cortex-A520 issue stages (src/a55/a55_issue_stage.cpp,
+    // src/a520/a520_issue_stage.h) call it; the stock llvm::mca stages offer no
+    // such hook and do not need one (docs.md 2.C).
     void beforeRegisterHazardCheck(const llvm::mca::InstRef &IR);
 };
 

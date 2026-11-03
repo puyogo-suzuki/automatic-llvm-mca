@@ -1,52 +1,34 @@
-#include "test_support.h"
+#include "sog_test_support.h"
 
 // ============================================================================
 // Facile Predictor Unit & Corner Case Tests
 // ============================================================================
 
+// Facile prediction with the model's issue width and no Mop cap; `runFacileAArch64Mem` also
+// supplies the per-instruction MemAccessInfo array, enabling facile's store->load memory RAW edges.
 static facile::FacileResult runFacileAArch64(const AArch64TestContext &TC, const std::string &asm_code,
                                              bool LoopCarried = true) {
-    initLLVMAArch64();
-    auto instrs = parseAsm(TC, asm_code);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    for (const auto &I : instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (ExpectedInst) {
-            SimInstrs.push_back(std::move(*ExpectedInst));
-            MCInsts.push_back(&I.Inst);
-        }
-    }
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, 0, {}, 0, LoopCarried);
+    FacileOptions O;
+    O.LoopCarried = LoopCarried;
+    return runFacile(TC, asm_code, O);
 }
 
-
-// Same as runFacileAArch64 but also supplies the per-instruction
-// MemAccessInfo array, enabling facile's store->load memory RAW edges.
 static facile::FacileResult runFacileAArch64Mem(const AArch64TestContext &TC, const std::string &asm_code,
                                                 bool LoopCarried = true) {
-    initLLVMAArch64();
-    auto instrs = parseAsm(TC, asm_code);
-    auto Analyzer = MLPAnalyzer::create(*TC.STI);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    std::vector<MemAccessInfo> MemInfos;
-    for (const auto &I : instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (ExpectedInst) {
-            SimInstrs.push_back(std::move(*ExpectedInst));
-            MCInsts.push_back(&I.Inst);
-            const MCInstrDesc &MCID = TC.MCII->get(I.Inst.getOpcode());
-            MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, MCID, *TC.MRI, *TC.MCII));
-        }
-    }
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, 0, MemInfos, 0, LoopCarried);
+    FacileOptions O;
+    O.MemoryEdges = true;
+    O.LoopCarried = LoopCarried;
+    return runFacile(TC, asm_code, O);
 }
 
+// facile with an explicit dispatch / Mop width, as frontend.cpp passes them.
+static facile::FacileResult runFacileAArch64Widths(const AArch64TestContext &TC, const std::string &asm_code,
+                                                   unsigned DispatchWidth, unsigned MopWidth) {
+    FacileOptions O;
+    O.UopWidth = DispatchWidth;
+    O.MopWidth = MopWidth;
+    return runFacile(TC, asm_code, O);
+}
 
 // A value that round-trips through memory across the backedge is a real
 // loop-carried recurrence.  The store and the load index the same base with
@@ -74,7 +56,7 @@ TEST(FacileTest, MemoryLoopCarriedRecurrence) {
 
 // A register tuple (LD1-LD4 destination, ST1-ST4 source) is a producer and a consumer of EACH of its
 // registers: a recurrence through the second register of "ld1 {v0, v1}" is as long as one through
-// the first (before, only the first register of the tuple had dependence edges).
+// the first.
 TEST(FacileTest, RegisterTupleDefinesAndUsesEveryRegister) {
     initLLVMAArch64();
     AArch64TestContext TC("cortex-a78");
@@ -439,7 +421,7 @@ TEST(FacileTest, A720FusionDoesNotLeakToOtherCores) {
 // ============================================================================
 // Cortex-A720 zero-latency instructions (A720 SOG 109720 Issue 7.0 sec. 4.12)
 //
-// AArch64SchedA720.td now models sec. 4.12 with an A720-local A720ZeroMove
+// AArch64SchedA720.td models sec. 4.12 with an A720-local A720ZeroMove
 // predicate selecting A720Write_0c (Latency 0, SchedWriteRes<[]>), and
 // facile.cpp's getEdgeLatency() drops the max(Lat,1.0) floor for A720.  Two
 // observables are used below:
@@ -497,8 +479,7 @@ TEST(FacileTest, A720ZeroLatencyOrrRequiresNoShift) {
 // the reason A720 needed its own predicate.  The recurrence is fadd -> fmov ->
 // fadd.  "FP arithmetic FADD, FSUB 2 2 V" (A720 SOG Table 3-11, l.964), so zero
 // latency shows as 2.0 and the unmodelled case would be 2 + 2 = 4.0
-// (docs/a720-sog.md C-4, C-15; the expectation was 3.0 when the model's WriteF
-// was 3, which is not an A720 SOG value).
+// (docs/a720-sog.md C-4, C-15).
 TEST(FacileTest, A720ZeroLatencyFmovFpToFp) {
     initLLVMAArch64();
     AArch64TestContext A720("cortex-a720");
@@ -619,26 +600,6 @@ TEST(FacileTest, A720ZeroLatencyDoesNotLeakToOtherCores) {
 //   * "Zero Latency MOVs" is the A78 list, and must not turn the second
 //     destination of a load pair (V1Write_0c_0Z in stock V1) into a free value.
 // ============================================================================
-
-// facile with an explicit dispatch / Mop width, as frontend.cpp passes them.
-static facile::FacileResult runFacileAArch64Widths(const AArch64TestContext &TC, const std::string &asm_code,
-                                                   unsigned DispatchWidth, unsigned MopWidth) {
-    initLLVMAArch64();
-    auto instrs = parseAsm(TC, asm_code);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    for (const auto &I : instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (ExpectedInst) {
-            SimInstrs.push_back(std::move(*ExpectedInst));
-            MCInsts.push_back(&I.Inst);
-        }
-    }
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts, DispatchWidth, {}, MopWidth);
-}
-
 
 TEST(FacileTest, X1MachineParameters) {
     initLLVMAArch64();
@@ -801,7 +762,8 @@ TEST(FacileTest, X1DotProductAccumulatorLatency) {
 
 // Data comes from a load off the same base register that the store updates.  The
 // only recurrence is the 1-cycle base update; the ldr -> sub -> str data path is
-// not part of a cycle.  Before the fix this was ldr(4) + sub(1) + str(1) = 6.
+// not part of a cycle (with one node per instruction it would be ldr(4) + sub(1) +
+// str(1) = 6).
 TEST(FacileTest, PostIndexStoreWritebackDoesNotDependOnStoreData) {
     initLLVMAArch64();
     for (const char *cpu : {"cortex-a78", "cortex-x1", "cortex-a720", "cortex-a76", "firestorm", "icestorm"}) {
@@ -819,7 +781,7 @@ TEST(FacileTest, PreIndexAndPairStoreWritebackDoNotDependOnStoreData) {
     EXPECT_NEAR(runFacileAArch64(TC, "ldp w1, w2, [x0]\nadd w1, w1, w2\nstp w1, w2, [x0], #8\ncmp x0, x21\n").PrecedenceBound, 1.0, 0.01);
 }
 
-// What was not wrong stays as it was: a load with writeback, a store whose base is
+// Other recurrences are not affected: a load with writeback, a store whose base is
 // updated by a separate add, and a data recurrence that does not involve the base.
 TEST(FacileTest, StoreWritebackChangeLeavesOtherRecurrencesAlone) {
     initLLVMAArch64();
@@ -853,7 +815,8 @@ double memoryEdgeEffect(const std::string &body) {
 }  // namespace
 
 // The index moves by 2 and the accesses are 2 bytes wide: the load reads the NEXT
-// element, so there is no memory dependence (x264 quant_4x4).
+// element, so there is no memory dependence (a loop over a halfword array whose index
+// advances between the store and the next load).
 TEST(FacileTest, MemoryNoEdgeWhenIndexAdvancesPastTheStore) {
     initLLVMAArch64();
     EXPECT_DOUBLE_EQ(memoryEdgeEffect("add w3, w3, w5\nstrh w3, [x0, x4]\nadd x4, x4, #2\nldrsh w5, [x0, x4]\n"), 0.0);
@@ -879,7 +842,7 @@ TEST(FacileTest, MemoryEdgeKeptUnlessProvablyDisjoint) {
 // ---------------------------------------------------------------------------
 // FP multiply-accumulate (SOGs: FMADD / FMLA "4 (2)"): result latency 4, and the
 // accumulate operand is needed 2 cycles early, so a chain of accumulations costs
-// 2 cycles each.  The A720 model used to treat FMADD as an FMUL (3, no early read).
+// 2 cycles each, on the A720 as on the other cores (docs/docs.md section 4.H).
 // ---------------------------------------------------------------------------
 TEST(FacileTest, FmaAccumulateChainIsTwoCyclesPerLink) {
     initLLVMAArch64();
@@ -971,3 +934,50 @@ TEST(FacileTest, FpDivSqrtOccupancyIsBestThroughputRoundedUp) {
     EXPECT_NEAR(port("cortex-a720", "fdiv v0.8h, v8.8h, v9.8h\nfdiv v1.8h, v8.8h, v9.8h\n"), 16.0, 0.01);
     EXPECT_NEAR(port("cortex-a720", "fdiv v0.2d, v8.2d, v9.2d\nfdiv v1.2d, v8.2d, v9.2d\n"), 4.0, 0.01);
 }
+
+// llvm::mca::InstrBuilder caches the descriptor of a non-variant scheduling class by (opcode,
+// scheduling class id), and a descriptor made from an instruction with a constant register (WZR /
+// XZR) as a source has no Read for that operand.  ZeroAwareInstrBuilder keeps one builder per
+// pattern of constant-register operands, so the instruction that comes first does not decide
+// the dependences of the later ones (docs/docs.md 4.K).
+TEST(FacileTest, ZeroRegisterDoesNotHideLaterReads) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a76");
+    auto Instrs = parseAsm(TC, "str wzr, [x0]\nstr x9, [x0]");
+    ASSERT_EQ(Instrs.size(), 2u);
+    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
+    ZeroAwareInstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+    auto First = IB.createInstruction(Instrs[0].Inst, {});
+    auto Second = IB.createInstruction(Instrs[1].Inst, {});
+    ASSERT_TRUE(static_cast<bool>(First));
+    ASSERT_TRUE(static_cast<bool>(Second));
+    // STRXui reads the data register and the base: the zero register of the first store does not
+    // hide the data read of the second.
+    EXPECT_EQ((*Second)->getUses().size(), 2u);
+}
+
+// Multiply, which is MADD with the zero register as accumulator, followed by a MADD with a real
+// accumulator: the accumulator read must exist (it did not on the Cortex-A76, whose MADD is not a
+// variant class), in either order.
+TEST(FacileTest, MulBeforeMaddKeepsTheAccumulatorDependence) {
+    initLLVMAArch64();
+    AArch64TestContext TC("cortex-a76");
+    for (const char *Asm : {"mul w1, w1, w2\nmadd w1, w3, w4, w1", "madd w1, w3, w4, w1\nmul w1, w1, w2"}) {
+        auto Instrs = parseAsm(TC, Asm);
+        ASSERT_EQ(Instrs.size(), 2u);
+        mca::InstrumentManager IM(*TC.STI, *TC.MCII);
+        ZeroAwareInstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
+        size_t MaddUses = 0;
+        for (const auto &I : Instrs) {
+            auto E = IB.createInstruction(I.Inst, {});
+            ASSERT_TRUE(static_cast<bool>(E));
+            // Three source registers for the real accumulator; the multiply's zero accumulator is
+            // not a source that can be written, so it only counts as a harmless extra read or none.
+            if (TC.MCII->getName(I.Inst.getOpcode()) == "MADDWrrr" && I.Inst.getOperand(3).getReg() != 0 &&
+                !TC.MRI->isConstant(I.Inst.getOperand(3).getReg()))
+                MaddUses = (*E)->getUses().size();
+        }
+        EXPECT_EQ(MaddUses, 3u) << Asm;
+    }
+}
+

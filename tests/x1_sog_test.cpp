@@ -1,5 +1,5 @@
 // Cortex-X1: values pinned to the Arm Cortex-X1 Core Software Optimization Guide
-// (PJDOC-466751330-12804, Issue 4.0, "SOG" below; text copy in tmp/x1sog.txt, "l.N" = line N).
+// (PJDOC-466751330-12804, Issue 4.0, "SOG" below; "l.N" = line N of a text extraction of the guide).
 // The items (C-n, D-n, ...) are those of docs/x1-sog.md.
 //
 // Two kinds of checks:
@@ -12,97 +12,19 @@
 //
 // AArch64TestContext("cortex-x1") already installs the local model (tests/test_support.h).
 
-#include "test_support.h"
-
-#include <cstdlib>
-#include <iostream>
-#include <map>
-#include <sstream>
-#include <string>
-#include <vector>
+#include "sog_test_support.h"
 
 namespace {
 
-struct X1InstInfo {
-    std::string Opcode;
-    unsigned MaxLatency = 0;
-    unsigned NumMicroOps = 0;
-    std::vector<unsigned> WriteLatencies;  // per def, in operand order (implicit defs last)
-    // Total resource cycles per resource name, as the scheduling tables list them (a use of a
-    // pipeline also appears under every group that contains it, e.g. M0 under M and I).
-    std::map<std::string, unsigned> ResourceCycles;
-    // ReadAdvance entries of the sched class: "use index:cycles".
-    std::vector<std::string> ReadAdvances;
-    bool Valid = false;
-};
+constexpr const char *kCpu = "cortex-x1";
 
-X1InstInfo x1Desc(const std::string &AsmLine) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-x1");
-    auto Instrs = parseAsm(TC, AsmLine);
-    X1InstInfo Info;
-    if (Instrs.size() != 1)
-        return Info;
-    Info.Opcode = TC.MCII->getName(Instrs[0].Inst.getOpcode()).str();
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    auto ExpectedInst = IB.createInstruction(Instrs[0].Inst, {});
-    if (!ExpectedInst) {
-        consumeError(ExpectedInst.takeError());
-        return Info;
-    }
-    const mca::Instruction &IS = **ExpectedInst;
-    Info.MaxLatency = IS.getLatency();
-    Info.NumMicroOps = IS.getNumMicroOps();
-    for (const mca::WriteState &WS : IS.getDefs())
-        Info.WriteLatencies.push_back(WS.getLatency());
-    const MCSchedModel &SM = TC.STI->getSchedModel();
-    const MCSchedClassDesc *SCD = SM.getSchedClassDesc(IS.getDesc().SchedClassID);
-    if (SCD) {
-        for (const MCWriteProcResEntry *E = TC.STI->getWriteProcResBegin(SCD),
-                                       *End = TC.STI->getWriteProcResEnd(SCD);
-             E != End; ++E)
-            Info.ResourceCycles[SM.getProcResource(E->ProcResourceIdx)->Name] +=
-                E->ReleaseAtCycle - E->AcquireAtCycle;
-        for (const MCReadAdvanceEntry &RA : TC.STI->getReadAdvanceEntries(*SCD))
-            Info.ReadAdvances.push_back(std::to_string(RA.UseIdx) + ":" + std::to_string(RA.Cycles) +
-                                        "(w" + std::to_string(RA.WriteResourceID) + ")");
-    }
-    Info.Valid = true;
-    return Info;
-}
+using X1InstInfo = SogInstInfo;
 
-// Facile prediction for the loop body `Body` (one instruction per line, no loop branch), with the
-// widths, fusion and memory edges of `mca_tool --mcpu cortex-x1 --dependency ooo --facile`.
-facile::FacileResult x1Facile(const std::string &Body) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-x1");
-    auto Instrs = parseAsm(TC, Body);
-    auto Analyzer = MLPAnalyzer::create(*TC.STI);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    std::vector<MemAccessInfo> MemInfos;
-    for (const auto &I : Instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (!ExpectedInst) {
-            consumeError(ExpectedInst.takeError());
-            continue;
-        }
-        SimInstrs.push_back(std::move(*ExpectedInst));
-        MCInsts.push_back(&I.Inst);
-        MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, TC.MCII->get(I.Inst.getOpcode()),
-                                                      *TC.MRI, *TC.MCII));
-    }
-    const CpuTraits &T = getCpuTraits("cortex-x1");
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts,
-                                           T.UopDispatchWidth, MemInfos, T.MopDispatchWidth);
-}
-
+X1InstInfo x1Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
+facile::FacileResult x1Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
 double x1Cycles(const std::string &Body) { return x1Facile(Body).EstimatedCycles; }
 
-constexpr double kTol = 0.01;
+constexpr double kTol = kSogFacileTol;
 
 } // namespace
 
@@ -111,26 +33,7 @@ constexpr double kTol = 0.01;
 // the reproduction of docs/x1-sog.md (section 10).  Passes when the variable is unset.
 // ---------------------------------------------------------------------------
 TEST(X1SogTest, Dump) {
-    const char *Env = std::getenv("X1_DUMP");
-    if (!Env)
-        return;
-    std::stringstream SS(Env);
-    std::string Line;
-    while (std::getline(SS, Line, ';')) {
-        if (Line.empty())
-            continue;
-        X1InstInfo I = x1Desc(Line);
-        std::cout << Line << " | " << I.Opcode << " | lat " << I.MaxLatency << " [";
-        for (unsigned L : I.WriteLatencies)
-            std::cout << " " << L;
-        std::cout << " ] uops " << I.NumMicroOps << " |";
-        for (const auto &[N, C] : I.ResourceCycles)
-            std::cout << " " << N << ":" << C;
-        std::cout << " | RA";
-        for (const auto &R : I.ReadAdvances)
-            std::cout << " " << R;
-        std::cout << (I.Valid ? "" : " INVALID") << "\n";
-    }
+    sogDump(kCpu, "X1_DUMP");
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +173,11 @@ TEST(X1SogTest, DivideAndMultiply) {
     EXPECT_NEAR(x1Cycles("madd x1, x2, x3, x1\numaddl x1, w4, w5, x1"), 2.0, kTol);
     // "Multiply high SMULH, UMULH 3 2 M" (l.710).
     EXPECT_EQ(x1Desc("smulh x1, x2, x3").MaxLatency, 3u);
+    // [x1_mul_acc_fwd] U-5: a multiply without an accumulator (MUL, SMULL) forwards to the
+    // accumulator of a MADD / SMADDL: 1 + 2.  SMULH does not (note 2, l.795): 3 + 2.
+    EXPECT_NEAR(x1Cycles("mul x1, x1, x2\nmadd x1, x3, x4, x1"), 3.0, kTol);
+    EXPECT_NEAR(x1Cycles("smull x1, w1, w2\nsmaddl x1, w3, w4, x1"), 3.0, kTol);
+    EXPECT_NEAR(x1Cycles("smulh x1, x1, x2\nmadd x1, x3, x4, x1"), 5.0, kTol);
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +268,7 @@ TEST(X1SogTest, FpScalar) {
     // Two FDIV D: 4 cycles on each of the two dividers (ceil(2 / (4/7)), D-2), 4 per iteration;
     // FRINT and FCVT (V02) beside them do not wait for the dividers (D-3).
     EXPECT_NEAR(x1Cycles("fdiv d0, d2, d1\nfdiv d3, d2, d1\nfrinta d4, d5\nfcvtzs w1, d6"), 4.0, kTol);
-    // V02: FDIV 1 + FRINTA 1 + FCVTZS 2 + FRINTX 1 = 5 cycles on two pipes (it was 4 + 1 + 2 + 1).
+    // V02: FDIV 1 + FRINTA 1 + FCVTZS 2 + FRINTX 1 = 5 cycles on two pipes.
     EXPECT_NEAR(x1Cycles("fdiv d0, d2, d1\nfrinta d4, d5\nfcvtzs w1, d6\nfrintx d7, d8"), 2.5, kTol);
     // FMADD 4 (2) and the FMUL -> accumulator forwarding (notes 2, 3, l.1297-1302).
     EXPECT_NEAR(x1Cycles("fmadd d0, d1, d2, d0"), 2.0, kTol);
@@ -444,6 +352,19 @@ TEST(X1SogTest, Asimd) {
     EXPECT_NEAR(x1Cycles("ssra d0, d1, #3"), 1.0, kTol);
     EXPECT_EQ(x1Desc("sqdmull s0, h1, h2").MaxLatency, 3u);
     EXPECT_EQ(x1Desc("fmulx d0, d1, d2").MaxLatency, 3u);
+    // Scalar FMULX "3 4 V" (l.1842), FRECPS / FRSQRTS "4 4 V" (l.1975): one V cycle.
+    for (const char *Asm : {"fmulx s0, s1, s2", "fmulx d0, d1, v2.d[1]", "frecps d0, d1, d2",
+                            "frsqrts s0, s1, s2", "frecps h0, h1, h2"}) {
+        X1InstInfo I = x1Desc(Asm);
+        EXPECT_EQ(I.MaxLatency, Asm[1] == 'm' ? 3u : 4u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["V1UnitV"], 1u) << Asm;
+    }
+    // [x1_mul_acc_fwd] U-5: ASIMD MUL and SMULL/UMULL forward to the accumulator of MLA/MLAL
+    // (note 1, l.1758-1760), and MLA and MLAL to each other; SQDMULH does not.
+    EXPECT_NEAR(x1Cycles("mul v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 5.0, kTol);    // 4 + 1
+    EXPECT_NEAR(x1Cycles("smull v0.4s, v0.4h, v1.4h\nsmlal v0.4s, v2.4h, v3.4h"), 5.0, kTol); // 1 + 4
+    EXPECT_NEAR(x1Cycles("mla v0.4s, v1.4s, v2.4s\nsmlal v0.4s, v3.4h, v4.4h"), 2.0, kTol);   // 1 + 1
+    EXPECT_NEAR(x1Cycles("sqdmulh v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 8.0, kTol); // 4 + 4
     // [x1_v_throughput] Q-form F16 converts and rounds 6 1/2 V02: V02 4 cycles.
     for (const char *Asm : {"fcvtzs v0.8h, v1.8h", "scvtf v0.8h, v1.8h", "frintz v0.8h, v1.8h",
                             "frecpe v0.8h, v1.8h"}) {

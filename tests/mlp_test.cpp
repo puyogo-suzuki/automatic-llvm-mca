@@ -413,7 +413,6 @@ TEST(MLPTest, AArch64OverrideLoadLatencyInfluence) {
     auto instrs = parseAsm(TC, "ldr x0, [x0, #8]\nadd x0, x0, #1");
     ASSERT_EQ(instrs.size(), 2u);
 
-    float ratio = 0.0f;
     AArch64MLPAnalyzer analyzer;
     mca::PipelineOptions PO(0, 0, 0, 0, 0, 0, true);
 

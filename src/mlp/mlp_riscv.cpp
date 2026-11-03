@@ -23,7 +23,7 @@ bool RISCVMLPAnalyzer::isZeroRegister(unsigned reg, const llvm::MCRegisterInfo &
     return false;
 }
 
-MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo &MCII) const {
+MemAccessInfo RISCVMLPAnalyzer::getMemAccessInfo(const MCInst &Inst, const MCInstrDesc &MCID, const MCRegisterInfo &MRI, const MCInstrInfo & /*MCII*/) const {
     MemAccessInfo info;
     if (!MCID.mayLoad() && !MCID.mayStore()) return info;
     unsigned num_ops = Inst.getNumOperands();

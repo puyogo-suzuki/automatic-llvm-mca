@@ -13,7 +13,9 @@ namespace {
 // Cores that only share a uop DispatchWidth with a modelled core and whose own
 // SOG has not been consulted keep MopDispatchWidth = 0 (bound not applied):
 // cortex-a710/a715/neoverse-n2 (10) and neoverse-v1 (16) - do not assume their
-// Mop width equals the A720's or X1's.
+// Mop width equals the A720's or X1's.  neoverse-n1 is the exception: it has
+// the Cortex-A76 widths (8 uops, 4 Mops, from the A76 SOG) although the
+// Neoverse N1's own SOG has not been consulted (docs/docs.md section 4.E).
 //
 // The Apple icestorm/firestorm entries have no Mop width either:
 // computeFacilePrediction() already forces NumMicroOps = 1 for the

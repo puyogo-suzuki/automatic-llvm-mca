@@ -2,10 +2,13 @@
 // (llvm/lib/MCA/Stages/InOrderIssueStage.cpp; part of the LLVM Project, under
 // the Apache License v2.0 with LLVM Exceptions, see https://llvm.org/LICENSE.txt)
 // with the three changes described in a520_issue_stage.h.  The code below follows
-// the stock file function by function; the comments mark the changes.
+// the stock file function by function (its file-local helpers are shared with the
+// Cortex-A55 issue stage in mca/in_order_issue_helpers.h); the comments mark the
+// changes.
 
 #include "a520/a520_issue_stage.h"
 #include "a55/a55_bypass.h"  // [a520_from_a55_flags] a55IsFlagBypassEligible
+#include "mca/in_order_issue_helpers.h"
 #include "llvm/MCA/HWEventListener.h"
 #include "llvm/MCA/HardwareUnits/RetireControlUnit.h"
 #include "llvm/MCA/Instruction.h"
@@ -50,22 +53,9 @@ bool A520InOrderIssueStage::isAvailable(const InstRef &IR) const {
   return true;
 }
 
-static bool hasResourceHazard(const ResourceManager &RM, const InstRef &IR) {
-  return RM.checkAvailability(IR.getInstruction()->getDesc()) != 0;
-}
-
-static unsigned findFirstWriteBackCycle(const InstRef &IR) {
-  unsigned FirstWBCycle = IR.getInstruction()->getLatency();
-  for (const WriteState &WS : IR.getInstruction()->getDefs()) {
-    int CyclesLeft = WS.getCyclesLeft();
-    if (CyclesLeft == UNKNOWN_CYCLES)
-      CyclesLeft = WS.getLatency();
-    if (CyclesLeft < 0)
-      CyclesLeft = 0;
-    FirstWBCycle = std::min(FirstWBCycle, (unsigned)CyclesLeft);
-  }
-  return FirstWBCycle;
-}
+using in_order_issue::addRegisterReadWrite;
+using in_order_issue::findFirstWriteBackCycle;
+using in_order_issue::hasResourceHazard;
 
 unsigned A520InOrderIssueStage::checkRegisterHazard(const InstRef &IR) const {
   for (const ReadState &RS : IR.getInstruction()->getUses()) {
@@ -125,16 +115,6 @@ bool A520InOrderIssueStage::canExecute(const InstRef &IR) {
   }
 
   return true;
-}
-
-static void addRegisterReadWrite(RegisterFile &PRF, Instruction &IS, unsigned SourceIndex,
-                                 const MCSubtargetInfo &STI,
-                                 SmallVectorImpl<unsigned> &UsedRegs) {
-  for (ReadState &RS : IS.getUses())
-    PRF.addRegisterRead(RS, STI);
-
-  for (WriteState &WS : IS.getDefs())
-    PRF.addRegisterWrite(WriteRef(SourceIndex, &WS), UsedRegs);
 }
 
 Error A520InOrderIssueStage::execute(InstRef &IR) {

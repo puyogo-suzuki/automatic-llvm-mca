@@ -116,9 +116,6 @@ def : WriteRes<WriteHint,    []> { let Latency = 1; }
 //===----------------------------------------------------------------------===//
 // Define generic 0 micro-op types
 
-let Latency = 0, NumMicroOps = 0 in
-def V1Write_0c_0Z : SchedWriteRes<[]>;
-
 def V1Write_0c : SchedWriteRes<[]> { let Latency = 0; }
 
 // [x1_ldpsw] docs/x1-sog.md C-12: "Load pair, signed immed offset, signed words LDPSW
@@ -135,7 +132,7 @@ def V1Write_5c_1I_2L : SchedWriteRes<[V1UnitI, V1UnitL]> {
 // shares the first write's L micro-op: no extra uOP and no resource, but the register
 // is NOT available at cycle 0 - it comes out of the same L1 access as the low half
 // ("the maximum latency to load all the registers written by the instruction",
-// l.961-962, l.1375-1376).  Stock V1 uses V1Write_0c_0Z (Latency 0) here, which is
+// l.961-962, l.1375-1376).  Stock V1 uses a latency-0, zero-uOP write here, which is
 // indistinguishable from a rename-time zero-latency MOV once facile trusts
 // Latency == 0 for the X1 (facile.cpp: isZeroLatencyMovTarget()), and would make the
 // high half of LDPW/LDPSW/LDP[SDQ] free.  Give it the latency of the load instead.
@@ -154,14 +151,9 @@ def V1Write_1c_1I      : SchedWriteRes<[V1UnitI]>   { let Latency = 1; }
 def V1Write_1c_1I_1Flg : SchedWriteRes<[V1UnitI, V1UnitFlg]>   { let Latency = 1; }
 def V1Write_4c_1L      : SchedWriteRes<[V1UnitL]>   { let Latency = 4; }
 def V1Write_6c_1L      : SchedWriteRes<[V1UnitL]>   { let Latency = 6; }
-def V1Write_1c_1L01    : SchedWriteRes<[V1UnitL01]> { let Latency = 1; }
-def V1Write_4c_1L01    : SchedWriteRes<[V1UnitL01]> { let Latency = 4; }
-def V1Write_6c_1L01    : SchedWriteRes<[V1UnitL01]> { let Latency = 6; }
 def V1Write_2c_1M      : SchedWriteRes<[V1UnitM]>   { let Latency = 2; }
 def V1Write_2c_1M_1Flg : SchedWriteRes<[V1UnitM, V1UnitFlg]>   { let Latency = 2; }
 def V1Write_3c_1M      : SchedWriteRes<[V1UnitM]>   { let Latency = 3; }
-def V1Write_4c_1M      : SchedWriteRes<[V1UnitM]>   { let Latency = 4; }
-def V1Write_1c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 1; }
 def V1Write_2c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 2; }
 def V1Write_3c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 3; }
 def V1Write_5c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; }
@@ -171,17 +163,12 @@ def V1Write_5c_1M0     : SchedWriteRes<[V1UnitM0]>  { let Latency = 5; }
 def X1Write_5c_1M0_IDiv : SchedWriteRes<[V1UnitM0, X1UnitIDiv]> { let Latency = 5;
                                                                  let ReleaseAtCycles = [1, 5]; }
 def V1Write_2c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 2; }
-def V1Write_3c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 3; }
 def V1Write_4c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 4; }
-def V1Write_5c_1V      : SchedWriteRes<[V1UnitV]>   { let Latency = 5; }
 def V1Write_2c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 2; }
 def V1Write_3c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 3; }
 def V1Write_4c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 4; }
-def V1Write_6c_1V0     : SchedWriteRes<[V1UnitV0]>  { let Latency = 6; }
 def V1Write_2c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 2; }
 def V1Write_3c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 3; }
-def V1Write_4c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 4; }
-def V1Write_5c_1V01    : SchedWriteRes<[V1UnitV01]> { let Latency = 5; }
 def V1Write_2c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 2; }
 def V1Write_3c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 3; }
 def V1Write_4c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
@@ -192,8 +179,6 @@ def V1Write_4c_1V02    : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
 def V1Write_10c7_1V02  : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;
                                                                   let ReleaseAtCycles = [1, 7]; }
 def V1Write_2c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 2; }
-def V1Write_3c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 3; }
-def V1Write_4c_1V1     : SchedWriteRes<[V1UnitV1]>  { let Latency = 4; }
 def V1Write_2c_1V13    : SchedWriteRes<[V1UnitV13]> { let Latency = 2; }
 def V1Write_4c_1V13    : SchedWriteRes<[V1UnitV13]> { let Latency = 4; }
 
@@ -212,64 +197,24 @@ let Latency = 7, NumMicroOps = 2 in
 def V1Write_7c_1I_1L     : SchedWriteRes<[V1UnitI, V1UnitL]>;
 let Latency = 6, NumMicroOps = 2 in
 def V1Write_6c_2L        : SchedWriteRes<[V1UnitL, V1UnitL]>;
-let Latency = 6, NumMicroOps = 2 in
-def V1Write_6c_1L_1M     : SchedWriteRes<[V1UnitL, V1UnitM]>;
 let Latency = 8, NumMicroOps = 2 in
 def V1Write_8c_1L_1V     : SchedWriteRes<[V1UnitL, V1UnitV]>;
-let Latency = 9, NumMicroOps = 2 in
-def V1Write_9c_1L_1V     : SchedWriteRes<[V1UnitL, V1UnitV]>;
-let Latency = 11, NumMicroOps = 2 in
-def V1Write_11c_1L_1V     : SchedWriteRes<[V1UnitL, V1UnitV]>;
 let Latency = 1, NumMicroOps = 2 in
 def V1Write_1c_1L01_1D   : SchedWriteRes<[V1UnitL01, V1UnitD]>;
-let Latency = 6, NumMicroOps = 2 in
-def V1Write_6c_1L01_1S   : SchedWriteRes<[V1UnitL01, V1UnitS]>;
-let Latency = 7, NumMicroOps = 2 in
-def V1Write_7c_1L01_1S   : SchedWriteRes<[V1UnitL01, V1UnitS]>;
-let Latency = 2, NumMicroOps = 2 in
-def V1Write_2c_1L01_1V   : SchedWriteRes<[V1UnitL01, V1UnitV]>;
-let Latency = 4, NumMicroOps = 2 in
-def V1Write_4c_1L01_1V   : SchedWriteRes<[V1UnitL01, V1UnitV]>;
-let Latency = 6, NumMicroOps = 2 in
-def V1Write_6c_1L01_1V   : SchedWriteRes<[V1UnitL01, V1UnitV]>;
 let Latency = 2, NumMicroOps = 2 in
 def V1Write_2c_1L01_1V01 : SchedWriteRes<[V1UnitL01, V1UnitV01]>;
 let Latency = 4, NumMicroOps = 2 in
 def V1Write_4c_1L01_1V01 : SchedWriteRes<[V1UnitL01, V1UnitV01]>;
-let Latency = 2, NumMicroOps = 2 in
-def V1Write_2c_2M0       : SchedWriteRes<[V1UnitM0, V1UnitM0]>;
-let Latency = 3, NumMicroOps = 2 in
-def V1Write_3c_2M0       : SchedWriteRes<[V1UnitM0, V1UnitM0]>;
 let Latency = 9, NumMicroOps = 2 in
 def V1Write_9c_1M0_1L    : SchedWriteRes<[V1UnitM0, V1UnitL]>;
 let Latency = 5, NumMicroOps = 2 in
 def V1Write_5c_1M0_1V    : SchedWriteRes<[V1UnitM0, V1UnitV]>;
 let Latency = 4, NumMicroOps = 2 in
-def V1Write_4c_1M0_1V0    : SchedWriteRes<[V1UnitM0, V1UnitV0]>;
-let Latency = 7, NumMicroOps = 2 in
-def V1Write_7c_1M0_1V0   : SchedWriteRes<[V1UnitM0, V1UnitV1]>;
-let Latency = 5, NumMicroOps = 2 in
-def V1Write_5c_1M0_1V01    : SchedWriteRes<[V1UnitM0, V1UnitV01]>;
-let Latency = 6, NumMicroOps = 2 in
-def V1Write_6c_1M0_1V1   : SchedWriteRes<[V1UnitM0, V1UnitV1]>;
-let Latency = 9, NumMicroOps = 2 in
-def V1Write_9c_1M0_1V1    : SchedWriteRes<[V1UnitM0, V1UnitV1]>;
-let Latency = 4, NumMicroOps = 2 in
 def V1Write_4c_2V        : SchedWriteRes<[V1UnitV, V1UnitV]>;
-let Latency = 8, NumMicroOps = 2 in
-def V1Write_8c_1V_1V01   : SchedWriteRes<[V1UnitV, V1UnitV01]>;
-let Latency = 4, NumMicroOps = 2 in
-def V1Write_4c_2V0       : SchedWriteRes<[V1UnitV0, V1UnitV0]>;
-let Latency = 5, NumMicroOps = 2 in
-def V1Write_5c_2V0       : SchedWriteRes<[V1UnitV0, V1UnitV0]>;
-let Latency = 2, NumMicroOps = 2 in
-def V1Write_2c_2V01      : SchedWriteRes<[V1UnitV01, V1UnitV01]>;
 let Latency = 4, NumMicroOps = 2 in
 def V1Write_4c_2V01      : SchedWriteRes<[V1UnitV01, V1UnitV01]>;
 let Latency = 4, NumMicroOps = 2 in
 def V1Write_4c_2V02      : SchedWriteRes<[V1UnitV02, V1UnitV02]>;
-let Latency = 6, NumMicroOps = 2 in
-def V1Write_6c_2V02      : SchedWriteRes<[V1UnitV02, V1UnitV02]>;
 let Latency = 4, NumMicroOps = 2 in
 def V1Write_4c_1V13_1V   : SchedWriteRes<[V1UnitV13, V1UnitV]>;
 let Latency = 4, NumMicroOps = 2 in
@@ -280,16 +225,10 @@ def V1Write_4c_2V13      : SchedWriteRes<[V1UnitV13, V1UnitV13]>;
 
 let Latency = 2, NumMicroOps = 3 in
 def V1Write_2c_1I_1L01_1V01 : SchedWriteRes<[V1UnitI, V1UnitL01, V1UnitV01]>;
-let Latency = 7, NumMicroOps = 3 in
-def V1Write_7c_2M0_1V01     : SchedWriteRes<[V1UnitM0, V1UnitM0, V1UnitV01]>;
 let Latency = 8, NumMicroOps = 3 in
 def V1Write_8c_1L_2V        : SchedWriteRes<[V1UnitL, V1UnitV, V1UnitV]>;
 let Latency = 6, NumMicroOps = 3 in
 def V1Write_6c_3L           : SchedWriteRes<[V1UnitL, V1UnitL, V1UnitL]>;
-let Latency = 2, NumMicroOps = 3 in
-def V1Write_2c_1L01_1S_1V   : SchedWriteRes<[V1UnitL01, V1UnitS, V1UnitV]>;
-let Latency = 4, NumMicroOps = 3 in
-def V1Write_4c_1L01_1S_1V   : SchedWriteRes<[V1UnitL01, V1UnitS, V1UnitV]>;
 let Latency = 2, NumMicroOps = 3 in
 def V1Write_2c_2L01_1V01    : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitV01]>;
 let Latency = 6, NumMicroOps = 3 in
@@ -298,28 +237,14 @@ let Latency = 4, NumMicroOps = 3 in
 def V1Write_4c_3V01         : SchedWriteRes<[V1UnitV01, V1UnitV01, V1UnitV01]>;
 let Latency = 6, NumMicroOps = 3 in
 def V1Write_6c_3V01         : SchedWriteRes<[V1UnitV01, V1UnitV01, V1UnitV01]>;
-let Latency = 8, NumMicroOps = 3 in
-def V1Write_8c_3V01         : SchedWriteRes<[V1UnitV01, V1UnitV01, V1UnitV01]>;
 
 //===----------------------------------------------------------------------===//
 // Define generic 4 micro-op types
 
-let Latency = 8, NumMicroOps = 4 in
-def V1Write_8c_2M0_2V0   : SchedWriteRes<[V1UnitM0, V1UnitM0,
-                                          V1UnitV0, V1UnitV0]>;
 let Latency = 7, NumMicroOps = 4 in
 def V1Write_7c_4L        : SchedWriteRes<[V1UnitL, V1UnitL, V1UnitL, V1UnitL]>;
 let Latency = 8, NumMicroOps = 4 in
 def V1Write_8c_2L_2V        : SchedWriteRes<[V1UnitL, V1UnitL,
-                                             V1UnitV, V1UnitV]>;
-let Latency = 9, NumMicroOps = 4 in
-def V1Write_9c_2L_2V        : SchedWriteRes<[V1UnitL, V1UnitL,
-                                             V1UnitV, V1UnitV]>;
-let Latency = 11, NumMicroOps = 4 in
-def V1Write_11c_2L_2V       : SchedWriteRes<[V1UnitL, V1UnitL,
-                                             V1UnitV, V1UnitV]>;
-let Latency = 10, NumMicroOps = 4 in
-def V1Write_10c_2L01_2V     : SchedWriteRes<[V1UnitL01, V1UnitL01,
                                              V1UnitV, V1UnitV]>;
 let Latency = 2, NumMicroOps = 4 in
 def V1Write_2c_2L01_2V01    : SchedWriteRes<[V1UnitL01, V1UnitL01,
@@ -327,29 +252,6 @@ def V1Write_2c_2L01_2V01    : SchedWriteRes<[V1UnitL01, V1UnitL01,
 let Latency = 4, NumMicroOps = 4 in
 def V1Write_4c_2L01_2V01    : SchedWriteRes<[V1UnitL01, V1UnitL01,
                                              V1UnitV01, V1UnitV01]>;
-let Latency = 8, NumMicroOps = 4 in
-def V1Write_8c_2L01_2V01    : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                             V1UnitV01, V1UnitV01]>;
-let Latency = 9, NumMicroOps = 4 in
-def V1Write_9c_2L01_2V01    : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                             V1UnitV01, V1UnitV01]>;
-let Latency = 10, NumMicroOps = 4 in
-def V1Write_10c_2L01_2V01   : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                             V1UnitV01, V1UnitV01]>;
-let Latency = 10, NumMicroOps = 4 in
-def V1Write_10c_1V_1V01_2V1 : SchedWriteRes<[V1UnitV, V1UnitV01,
-                                             V1UnitV1, V1UnitV1]>;
-let Latency = 12, NumMicroOps = 4 in
-def V1Write_12c_1V_1V01_2V1 : SchedWriteRes<[V1UnitV, V1UnitV01,
-                                             V1UnitV1, V1UnitV1]>;
-let Latency = 6, NumMicroOps = 4 in
-def V1Write_6c_4V0          : SchedWriteRes<[V1UnitV0, V1UnitV0,
-                                             V1UnitV0, V1UnitV0]>;
-let Latency = 12, NumMicroOps = 4 in
-def V1Write_12c_4V01        : SchedWriteRes<[V1UnitV01, V1UnitV01,
-                                             V1UnitV01, V1UnitV01]>;
-let Latency = 6, NumMicroOps = 4 in
-def V1Write_6c_4V02         : SchedWriteRes<[V1UnitV02, V1UnitV02]>;
 
 //===----------------------------------------------------------------------===//
 // Define generic 5 micro-op types
@@ -357,15 +259,6 @@ def V1Write_6c_4V02         : SchedWriteRes<[V1UnitV02, V1UnitV02]>;
 let Latency = 8, NumMicroOps = 5 in
 def V1Write_8c_2L_3V            : SchedWriteRes<[V1UnitL, V1UnitL,
                                                  V1UnitV, V1UnitV, V1UnitV]>;
-let Latency = 14, NumMicroOps = 5 in
-def V1Write_14c_1V_1V0_2V1_1V13 : SchedWriteRes<[V1UnitV,
-                                                 V1UnitV0,
-                                                 V1UnitV1, V1UnitV1,
-                                                 V1UnitV13]>;
-let Latency = 9, NumMicroOps = 5 in
-def V1Write_9c_1V_4V01          : SchedWriteRes<[V1UnitV,
-                                                 V1UnitV01, V1UnitV01,
-                                                 V1UnitV01, V1UnitV01]>;
 let Latency = 6, NumMicroOps = 5 in
 def V1Write_6c_5V01             : SchedWriteRes<[V1UnitV01, V1UnitV01,
                                                  V1UnitV01, V1UnitV01, V1UnitV01]>;
@@ -373,9 +266,6 @@ def V1Write_6c_5V01             : SchedWriteRes<[V1UnitV01, V1UnitV01,
 //===----------------------------------------------------------------------===//
 // Define generic 6 micro-op types
 
-let Latency = 6, NumMicroOps = 6 in
-def V1Write_6c_3L_3V      : SchedWriteRes<[V1UnitL, V1UnitL, V1UnitL,
-                                           V1UnitV, V1UnitV, V1UnitV]>;
 let Latency = 8, NumMicroOps = 6 in
 def V1Write_8c_3L_3V      : SchedWriteRes<[V1UnitL, V1UnitL, V1UnitL,
                                            V1UnitV, V1UnitV, V1UnitV]>;
@@ -388,16 +278,6 @@ def V1Write_5c_3L01_3V01  : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
 let Latency = 6, NumMicroOps = 6 in
 def V1Write_6c_3L01_3V01  : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
                                            V1UnitV01, V1UnitV01, V1UnitV01]>;
-let Latency = 11, NumMicroOps = 6 in
-def V1Write_11c_3L01_3V01 : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
-                                           V1UnitV01, V1UnitV01, V1UnitV01]>;
-let Latency = 11, NumMicroOps = 6 in
-def V1Write_11c_1V_5V01   : SchedWriteRes<[V1UnitV,
-                                           V1UnitV01, V1UnitV01,
-                                           V1UnitV01, V1UnitV01, V1UnitV01]>;
-let Latency = 13, NumMicroOps = 6 in
-def V1Write_13c_6V01      : SchedWriteRes<[V1UnitV01, V1UnitV01, V1UnitV01,
-                                           V1UnitV01, V1UnitV01, V1UnitV01]>;
 
 //===----------------------------------------------------------------------===//
 // Define generic 7 micro-op types
@@ -405,19 +285,10 @@ def V1Write_13c_6V01      : SchedWriteRes<[V1UnitV01, V1UnitV01, V1UnitV01,
 let Latency = 8, NumMicroOps = 7 in
 def V1Write_8c_3L_4V         : SchedWriteRes<[V1UnitL, V1UnitL, V1UnitL,
                                               V1UnitV, V1UnitV, V1UnitV, V1UnitV]>;
-let Latency = 8, NumMicroOps = 7 in
-def V1Write_13c_3L01_1S_3V01 : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
-                                              V1UnitS,
-                                              V1UnitV01, V1UnitV01, V1UnitV01]>;
 
 //===----------------------------------------------------------------------===//
 // Define generic 8 micro-op types
 
-let Latency = 9, NumMicroOps = 8 in
-def V1Write_9c_4L_4V      : SchedWriteRes<[V1UnitL, V1UnitL,
-                                           V1UnitL, V1UnitL,
-                                           V1UnitV, V1UnitV,
-                                           V1UnitV, V1UnitV]>;
 let Latency = 2, NumMicroOps = 8 in
 def V1Write_2c_4L01_4V01  : SchedWriteRes<[V1UnitL01, V1UnitL01,
                                            V1UnitL01, V1UnitL01,
@@ -428,31 +299,6 @@ def V1Write_4c_4L01_4V01  : SchedWriteRes<[V1UnitL01, V1UnitL01,
                                            V1UnitL01, V1UnitL01,
                                            V1UnitV01, V1UnitV01,
                                            V1UnitV01, V1UnitV01]>;
-let Latency = 12, NumMicroOps = 8 in
-def V1Write_12c_4L01_4V01 : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                           V1UnitL01, V1UnitL01,
-                                           V1UnitV01, V1UnitV01,
-                                           V1UnitV01, V1UnitV01]>;
-
-//===----------------------------------------------------------------------===//
-// Define generic 10 micro-op types
-
-let Latency = 13, NumMicroOps = 10 in
-def V1Write_13c_4L01_2S_4V01 : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                              V1UnitL01, V1UnitL01,
-                                              V1UnitS, V1UnitS,
-                                              V1UnitV01, V1UnitV01,
-                                              V1UnitV01, V1UnitV01]>;
-let Latency = 7, NumMicroOps = 10 in
-def V1Write_7c_5L01_5V       : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                              V1UnitL01, V1UnitL01, V1UnitL01,
-                                              V1UnitV, V1UnitV,
-                                              V1UnitV, V1UnitV, V1UnitV]>;
-let Latency = 11, NumMicroOps = 10 in
-def V1Write_11c_10V0         : SchedWriteRes<[V1UnitV0,
-                                              V1UnitV0, V1UnitV0, V1UnitV0,
-                                              V1UnitV0, V1UnitV0, V1UnitV0,
-                                              V1UnitV0, V1UnitV0, V1UnitV0]>;
 
 //===----------------------------------------------------------------------===//
 // Define generic 12 micro-op types
@@ -462,50 +308,6 @@ def V1Write_7c_6L01_6V01 : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
                                           V1UnitL01, V1UnitL01, V1UnitL01,
                                           V1UnitV01, V1UnitV01, V1UnitV01,
                                           V1UnitV01, V1UnitV01, V1UnitV01]>;
-
-//===----------------------------------------------------------------------===//
-// Define generic 15 micro-op types
-
-let Latency = 7, NumMicroOps = 15 in
-def V1Write_7c_5L01_5S_5V : SchedWriteRes<[V1UnitL01, V1UnitL01,
-                                           V1UnitL01, V1UnitL01, V1UnitL01,
-                                           V1UnitS, V1UnitS,
-                                           V1UnitS, V1UnitS, V1UnitS,
-                                           V1UnitV, V1UnitV,
-                                           V1UnitV, V1UnitV, V1UnitV]>;
-
-
-//===----------------------------------------------------------------------===//
-// Define generic 18 micro-op types
-
-let Latency = 19, NumMicroOps = 18 in
-def V1Write_11c_9L01_9V : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
-                                         V1UnitL01, V1UnitL01, V1UnitL01, 
-                                         V1UnitL01, V1UnitL01, V1UnitL01,
-                                         V1UnitV, V1UnitV, V1UnitV, 
-                                         V1UnitV, V1UnitV, V1UnitV,
-                                         V1UnitV, V1UnitV, V1UnitV]>;
-let Latency = 19, NumMicroOps = 18 in
-def V1Write_19c_18V0    : SchedWriteRes<[V1UnitV0, V1UnitV0, V1UnitV0,
-                                         V1UnitV0, V1UnitV0, V1UnitV0, 
-                                         V1UnitV0, V1UnitV0, V1UnitV0,
-                                         V1UnitV0, V1UnitV0, V1UnitV0, 
-                                         V1UnitV0, V1UnitV0, V1UnitV0,
-                                         V1UnitV0, V1UnitV0, V1UnitV0]>;
-
-//===----------------------------------------------------------------------===//
-// Define generic 27 micro-op types
-
-let Latency = 11, NumMicroOps = 27 in
-def V1Write_11c_9L01_9S_9V : SchedWriteRes<[V1UnitL01, V1UnitL01, V1UnitL01,
-                                            V1UnitL01, V1UnitL01, V1UnitL01, 
-                                            V1UnitL01, V1UnitL01, V1UnitL01,
-                                            V1UnitS, V1UnitS, V1UnitS, 
-                                            V1UnitS, V1UnitS, V1UnitS,
-                                            V1UnitS, V1UnitS, V1UnitS,
-                                            V1UnitV, V1UnitV, V1UnitV, 
-                                            V1UnitV, V1UnitV, V1UnitV,
-                                            V1UnitV, V1UnitV, V1UnitV]>;
 
 //===----------------------------------------------------------------------===//
 // Define predicate-controlled types
@@ -602,7 +404,13 @@ def X1Wr_IMAL  : SchedWriteRes<[V1UnitM]> { let Latency = 2; }
 def X1WriteIML : SchedWriteVariant<
                    [SchedVar<NeoverseMULIdiomPred, [V1Wr_IM]>,
                     SchedVar<NoSchedPred,          [X1Wr_IMAL]>]>;
-def V1Rd_IMA : SchedReadAdvance<1, [V1Wr_IMA, X1Wr_IMAL]>;
+// [x1_mul_acc_fwd] docs/x1-sog.md U-5: "late-forwarding of accumulate operands from similar µOPs"
+// (note 2, l.793-795) is taken to include the multiplies without an accumulator (MUL, MNEG and
+// SMULL, UMULL, SMNEGL, UMNEGL, i.e. V1Wr_IM, the zero-accumulator arm of the variants above): their
+// result reaches the accumulator of a following MADD/MSUB/SMADDL-family one cycle early, the lower
+// estimate and the reading of the Cortex-A55, A520, A76 and A720 models.  SMULH/UMULH are excluded
+// by the note.
+def V1Rd_IMA : SchedReadAdvance<1, [V1Wr_IMA, X1Wr_IMAL, V1Wr_IM]>;
 
 def V1Wr_FMA : SchedWriteRes<[V1UnitV]> { let Latency = 4; }
 def V1Rd_FMA : SchedReadAdvance<2, [WriteFMul, V1Wr_FMA]>;
@@ -618,10 +426,18 @@ def V1Wr_VMMA : SchedWriteRes<[V1UnitV]> { let Latency = 3; }
 def V1Rd_VMMA : SchedReadAdvance<2, [V1Wr_VMMA]>;
 
 def V1Wr_VMA : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
-def V1Rd_VMA : SchedReadAdvance<3, [V1Wr_VMA]>;
-
 def V1Wr_VMAL : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
-def V1Rd_VMAL : SchedReadAdvance<3, [V1Wr_VMAL]>;
+// [x1_mul_acc_fwd] docs/x1-sog.md U-5: ASIMD "Multiply-accumulate pipelines support late-forwarding
+// of accumulate operands from similar µOPs" (Table 3-24 note 1, l.1758-1760) on the MLA/MLS and
+// [SU]MLAL/[SU]MLSL rows "4(1)" (l.1630, l.1633-1636).  Taken to include the multiplies of the same
+// mnemonics without an accumulator (ASIMD multiply MUL "4 2 V02", l.1628-1629; multiply long SMULL,
+// UMULL "3 2 V02", l.1643-1645) and the other form (MLA <-> MLAL), as the integer forwarding above
+// and the Cortex-A720 model; the lower estimate.  SQDMULH, SQRDMULH and SQDMULL stay
+// V1Write_4c_1V02 / V1Write_3c_1V02: their accumulating forms (SQRDMLAH, SQDMLAL) have no forwarding.
+def X1Wr_VMUL  : SchedWriteRes<[V1UnitV02]> { let Latency = 4; }
+def X1Wr_VMULL : SchedWriteRes<[V1UnitV02]> { let Latency = 3; }
+def V1Rd_VMA  : SchedReadAdvance<3, [V1Wr_VMA, V1Wr_VMAL, X1Wr_VMUL, X1Wr_VMULL]>;
+def V1Rd_VMAL : SchedReadAdvance<3, [V1Wr_VMA, V1Wr_VMAL, X1Wr_VMUL, X1Wr_VMULL]>;
 
 def V1Wr_VSA : SchedWriteRes<[V1UnitV13]> { let Latency = 4; }
 def V1Rd_VSA : SchedReadAdvance<3, [V1Wr_VSA]>;
@@ -713,9 +529,9 @@ def               : InstRW<[V1WriteISRegS],
                            (instregex "^(ADD|SUB)S[WX]rs$")>;
 
 // [x1_ext_flagset] docs/x1-sog.md C-9, U-4: "ALU, extend and shift ADD{S}, SUB{S} 2 2 M"
-// (l.568) for every extended-register form, as the non-flag-setting forms (WriteIEReg).  The
-// IsCheapLSL variant used before read the extend operand as a shift, so UXTB (extend operand 0)
-// got the basic row (1, I).
+// (l.568) for every extended-register form, as the non-flag-setting forms (WriteIEReg).  No
+// IsCheapLSL variant: it would read the extend operand as a shift and give UXTB (extend operand 0)
+// the basic row (1, I).
 def               : InstRW<[V1Write_2c_1M_1Flg],
                            (instregex "^(ADD|SUB)S[WX]rx(64)?$")>;
 
@@ -725,7 +541,7 @@ def : InstRW<[V1Write_0or1c_1I], (instregex "^ORR[WX]rs$")>;
 
 // Logical, shift, flagset
 // [x1_logical_flagset] docs/x1-sog.md C-9: the unshifted register form (TST, ANDS, BICS
-// Rd, Rn, Rm) is "ALU, basic, flagset" (1 3 I); it used to be 2 on M like the shifted forms.
+// Rd, Rn, Rm) is "ALU, basic, flagset" (1 3 I), unlike the shifted forms (2 on M).
 def : InstRW<[X1Write_LogicalS], (instregex "^(AND|BIC)S[WX]rs$")>;
 
 // Flag manipulation instructions
@@ -825,7 +641,7 @@ def : SchedAlias<WriteAdr,   V1Write_1c_1I>;
 
 // [x1_reg_offset_h] docs/x1-sog.md C-12: "Load register, register offset, scale by 2" and
 // "..., extend, scale by 2" LDRH, LDRSH: "5 3 I, L" (l.989-990, l.996-997); without the scale
-// they are "basic" / "extend" (4 3 L).  They used to be 4 (L) whatever the scale.
+// they are "basic" / "extend" (4 3 L).
 def X1WriteLDRH : SchedWriteVariant<[
                     SchedVar<X1IsMemScaled, [V1Write_5c_1I_1L]>,
                     SchedVar<NoSchedPred,   [V1Write_4c_1L]>]>;
@@ -861,8 +677,7 @@ def : SchedAlias<WriteSTIdx, V1Write_1c_1L01_1D>;
 def : SchedAlias<WriteSTP, V1Write_1c_1L01_1D>;
 
 // [x1_store_rows] docs/x1-sog.md C-13, I-3: "Store register, register offset, scaled by 2" and
-// "..., extend, scale by 1" (sic) STRH: "2 2 I, L01, D" (l.1135-1136, l.1141-1142).  It used to
-// be latency 1 (L01, D).
+// "..., extend, scale by 1" (sic) STRH: "2 2 I, L01, D" (l.1135-1136, l.1141-1142).
 def X1WriteSTRH : SchedWriteVariant<[
                     SchedVar<X1IsMemScaled, [X1Write_2c_1I_1L01_1D]>,
                     SchedVar<NoSchedPred,   [V1Write_1c_1L01_1D]>]>;
@@ -903,8 +718,7 @@ def : SchedAlias<WriteFDiv, V1Write_10c7_1V02>;
 //   ASIMD D-form F16 2/7 -> 7, D-form F32 4/7 -> 4, Q-form F16 1/5 (FDIV) / 2/11 (FSQRT)
 //   -> 10 / 11, Q-form F32 2/7 -> 7, Q-form F64 2/7 -> 7.
 // Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).  [x1_dividers] D-3: the occupancy is
-// on an FP divide unit (X1UnitFDiv); V02 is taken for one cycle (it used to be held for the
-// occupancy).
+// on an FP divide unit (X1UnitFDiv); V02 is taken for one cycle.
 def V1WriteFDS_7c2   : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 2]; }
 def V1WriteFDS_7c4   : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 4]; }
 def V1WriteFDS_7c7   : SchedWriteRes<[V1UnitV02, X1UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 7]; }
@@ -950,8 +764,8 @@ def : InstRW<[V1Write_3c_1M0], (instregex "^[SU]CVTF[SU][WX][HSD]ri$")>;
 // FP convert, from vec to gen reg
 // X1 SOG Table 3-18: "3, 1, V02" - either of V0/V2 but only ONE per cycle
 // (stock V1: V0 only).  Expressed as a 2-cycle occupancy of the V02 group (D-2).
-// [x1_fp_cvt] docs/x1-sog.md C-15: also the fixed-point forms (#fbits, "ri"); they took
-// WriteFCvt (V02 one cycle, 2 per cycle).
+// [x1_fp_cvt] docs/x1-sog.md C-15: also the fixed-point forms (#fbits, "ri"), not WriteFCvt
+// (V02 one cycle, 2 per cycle).
 def V1Write_3c2_1V02 : SchedWriteRes<[V1UnitV02]> { let Latency = 3;
                                                     let ReleaseAtCycles = [2]; }
 def : InstRW<[V1Write_3c2_1V02], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]ri?$")>;
@@ -1005,7 +819,7 @@ def : InstRW<[V1Write_6c_1L, ReadAdrBase], (instregex "^LDR[BSD]ro[WX]$")>;
 // Load vector reg, register offset, extend, scale, H/Q-form
 // [x1_reg_offset_h] docs/x1-sog.md C-16, I-4: "7 3 I, L" only with the scale (l.1407-1408,
 // l.1413-1414); without it LDR H/Q is "basic" (X index, I-4) or "extend" (W index), 6 3 L
-// (l.1409-1410).  They used to be 7 (I, L) whatever the scale.
+// (l.1409-1410).
 def X1WriteLDRHQro : SchedWriteVariant<[
                        SchedVar<X1IsMemScaled, [V1Write_7c_1I_1L]>,
                        SchedVar<NoSchedPred,   [V1Write_6c_1L]>]>;
@@ -1015,8 +829,8 @@ def : InstRW<[X1WriteLDRHQro, ReadAdrBase], (instregex "^LDR[HQ]ro[WX]$")>;
 def : InstRW<[V1Write_6c_1L, V1Write_6c_0Z], (instregex "^LDN?P[SD]i$")>;
 
 // Load vector pair, immed offset, Q-form
-// [x1_ldp_hi] docs/x1-sog.md C-16, D-10: "6 3/2 L" (l.1417-1418): both registers 6; the second
-// used to be WriteLDHi (latency 4).  Two L uOPs, as before.
+// [x1_ldp_hi] docs/x1-sog.md C-16, D-10: "6 3/2 L" (l.1417-1418): both registers 6 (the second
+// is V1Write_6c_0Z, not WriteLDHi with latency 4).  Two L uOPs.
 def : InstRW<[V1Write_6c_2L, V1Write_6c_0Z], (instrs LDPQi, LDNPQi)>;
 
 // Load vector pair, immed post-index, S/D-form
@@ -1060,8 +874,7 @@ def : InstRW<[V1Write_2c_1L01_1V01, ReadST, ReadAdrBase],
 // Store vector reg, register offset, extend, scale, H/Q-form
 // [x1_store_rows] docs/x1-sog.md C-17: "2 2 I, L01, V01" only with the scale ("scale, H-form",
 // "scale, Q-form", "extend, scale, H-form", "extend, scale, Q-form", l.1486-1501); "basic" and
-// "extend" H/Q are "2 2 L01, V01" (l.1482-1485, l.1493-1495).  They used to have the I whatever the
-// scale.
+// "extend" H/Q are "2 2 L01, V01" (l.1482-1485, l.1493-1495).
 def X1WriteSTRHQro : SchedWriteVariant<[
                        SchedVar<X1IsMemScaled, [V1Write_2c_1I_1L01_1V01]>,
                        SchedVar<NoSchedPred,   [V1Write_2c_1L01_1V01]>]>;
@@ -1126,7 +939,9 @@ def : InstRW<[V1Wr_VDOT, V1Rd_VDOT],
 def : InstRW<[V1Wr_VMMA, V1Rd_VMMA], (instrs SMMLA, UMMLA, USMMLA)>;
 
 // ASIMD multiply
-def : InstRW<[V1Write_4c_1V02], (instregex "^MULv", "^SQ(R)?DMULHv")>;
+// [x1_mul_acc_fwd] MUL has a write of its own (U-5).
+def : InstRW<[X1Wr_VMUL],      (instregex "^MULv")>;
+def : InstRW<[V1Write_4c_1V02], (instregex "^SQ(R)?DMULHv")>;
 
 // ASIMD multiply accumulate
 def : InstRW<[V1Wr_VMA, V1Rd_VMA], (instregex "^MLAv", "^MLSv")>;
@@ -1148,8 +963,10 @@ def : InstRW<[V1Write_3c_1V01], (instregex "^PMULL?v(8|16)i8$")>;
 def : InstRW<[V1Write_2c_1V01], (instregex "^PMULLv(1i64|2i64)$")>;
 
 // ASIMD multiply long
+// [x1_mul_acc_fwd] SMULL, UMULL have a write of their own (U-5).
+def : InstRW<[X1Wr_VMULL],     (instregex "^[SU]MULLv")>;
 // [x1_asimd_scalar] docs/x1-sog.md D-5: the scalar SQDMULL (i16/i32) as well.
-def : InstRW<[V1Write_3c_1V02], (instregex "^([SU]|SQD)MULLv", "^SQDMULLi(16|32)$")>;
+def : InstRW<[V1Write_3c_1V02], (instregex "^SQDMULLv", "^SQDMULLi(16|32)$")>;
 
 // ASIMD shift accumulate
 // [x1_asimd_scalar] D-5: the scalar forms (SSRA Dd, ... "d") as well.
@@ -1218,8 +1035,8 @@ def : InstRW<[V1Write_3c_1V02], (instregex "^FCVTNv[24]i32$",
 // ASIMD FP convert, other, D-form F32 and Q-form F64
 // [x1_fp_cvt_scalar] docs/x1-sog.md D-4: every scalar form with the operand and the result in FP
 // registers (H, S, D; also with #fbits) takes this row, the lowest the SOG gives for these
-// mnemonics (as for the Cortex-A78, docs/a78-sog.md D-4).  The S forms took the D-form F16 /
-// Q-form F32 row (4, V02 two uOPs), the H forms the Q-form F16 row (6).
+// mnemonics (as for the Cortex-A78, docs/a78-sog.md D-4), not the D-form F16 /
+// Q-form F32 row (4, V02 two uOPs) for the S forms or the Q-form F16 row (6) for the H forms.
 def : InstRW<[V1Write_3c_1V02], (instregex "^FCVT[AMNPZ][SU]v2f(32|64)$",
                                            "^FCVT[AMNPZ][SU]v2i(32|64)_shift$",
                                            "^FCVT[AMNPZ][SU]v1(i64|i32|f16)$",
@@ -1237,7 +1054,7 @@ def : InstRW<[V1Write_4c_2V02], (instregex "^FCVT[AMNPZ][SU]v4f(16|32)$",
 
 // ASIMD FP convert, other, Q-form F16
 // [x1_v_throughput] docs/x1-sog.md C-19: "6 1/2 V02" (l.1808-1813): V02 held 4 cycles in total
-// (2 / (1/2), D-2); it was 2 (1 per cycle).
+// (2 / (1/2), D-2).
 def : InstRW<[X1WriteV02<6, 4, 4>], (instregex "^FCVT[AMNPZ][SU]v8f16$",
                                                "^FCVT[AMNPZ][SU]v8i16_shift$",
                                                "^[SU]CVTFv8f16$",
@@ -1280,7 +1097,7 @@ def : InstRW<[V1Write_3c_1V02], (instregex "^FRINT[AIMNPXZ]v2f(32|64)$")>;
 def : InstRW<[V1Write_4c_2V02], (instregex "^FRINT[AIMNPXZ]v4f(16|32)$")>;
 
 // ASIMD FP round, Q-form F16
-// [x1_v_throughput] C-19: "6 1/2 V02" (l.1853-1856): V02 held 4 cycles (it was 2).
+// [x1_v_throughput] C-19: "6 1/2 V02" (l.1853-1856): V02 held 4 cycles.
 def : InstRW<[X1WriteV02<6, 4, 4>], (instregex "^FRINT[AIMNPXZ]v8f16$")>;
 
 
@@ -1333,7 +1150,7 @@ def : InstRW<[V1Write_4c_1V13], (instregex "^[SU]QXTNv", "^SQXTUNv")>;
 // ASIMD reciprocal and square root estimate, D-form U32
 // ASIMD reciprocal and square root estimate, D-form F32 and scalar forms
 // [x1_v_throughput] docs/x1-sog.md C-20: "D-form F32 and scalar forms 3 2 V02" (l.1966-1968):
-// also the scalar H forms (they were 4, the D-form F16 row).
+// also the scalar H forms (not the D-form F16 row, 4).
 def : InstRW<[V1Write_3c_1V02], (instrs URECPEv2i32,
                                         URSQRTEv2i32,
                                         FRECPEv1i32, FRECPEv2f32, FRECPEv1i64, FRECPEv1f16,
@@ -1341,7 +1158,7 @@ def : InstRW<[V1Write_3c_1V02], (instrs URECPEv2i32,
 
 // ASIMD reciprocal and square root estimate, Q-form U32
 // ASIMD reciprocal and square root estimate, D-form F16 and Q-form F32
-// [x1_v_throughput] C-20: "4 1 V02" (l.1964-1965, l.1969-1971): V02 held 2 cycles (it was 1).
+// [x1_v_throughput] C-20: "4 1 V02" (l.1964-1965, l.1969-1971): V02 held 2 cycles.
 def : InstRW<[X1WriteV02<4, 1, 2>], (instrs URECPEv4i32,
                                             URSQRTEv4i32,
                                             FRECPEv4f16, FRECPEv4f32,
@@ -1350,7 +1167,7 @@ def : InstRW<[X1WriteV02<4, 1, 2>], (instrs URECPEv4i32,
 def : InstRW<[V1Write_4c_1V02], (instrs FRECPEv2f64, FRSQRTEv2f64)>;
 
 // ASIMD reciprocal and square root estimate, Q-form F16
-// [x1_v_throughput] C-20: "6 1/2 V02" (l.1972-1973): V02 held 4 cycles (it was 2).
+// [x1_v_throughput] C-20: "6 1/2 V02" (l.1972-1973): V02 held 4 cycles.
 def : InstRW<[X1WriteV02<6, 2, 4>], (instrs FRECPEv8f16,
                                             FRSQRTEv8f16)>;
 
@@ -1384,7 +1201,7 @@ def : InstRW<[V1Write_6c_5V01], (instrs TBXv8i8Four, TBXv16i8Four)>;
 
 // ASIMD transfer, element to gen reg
 // [x1_v_throughput] docs/x1-sog.md C-20: "UMOV, SMOV 2 1 V" (l.2002-2003): V held 4 cycles in
-// total (4 / 1, D-2); it was one cycle (4 per cycle).
+// total (4 / 1, D-2).
 def : InstRW<[X1WriteV<2, 1, 4>], (instregex "^SMOVvi(((8|16)to(32|64))|32to64)$",
                                          "^UMOVvi(8|16|32|64)$")>;
 
@@ -1487,7 +1304,7 @@ def : InstRW<[WriteAdr, V1Write_8c_3L_4V],
 
 // ASIMD load, 4 element, multiple, Q-form
 // [x1_ls_throughput] docs/x1-sog.md C-21, D-6: "9 1/2 L, V" (l.2169-2172): L held 6 cycles in
-// total (3 / (1/2)), the 8 uOPs and 4 V cycles kept; it was 3/4 per cycle.
+// total (3 / (1/2)), 8 uOPs and 4 V cycles.
 def : InstRW<[X1WriteLDV<9, 8, 6, 4>],
              (instregex "^LD4Fourv(16b|8h|4s|2d)$")>;
 def : InstRW<[WriteAdr, X1WriteLDV<9, 8, 6, 4>],
@@ -1585,9 +1402,8 @@ def : InstRW<[WriteAdr, V1Write_4c_4L01_4V01, ReadST, ReadAdrBase],
              (instrs ST4Fourv2d_POST)>;
 
 // ASIMD store, 4 element, one lane, B/H/S
-// [x1_ls_throughput] docs/x1-sog.md C-22, D-6: "6 4/3 V, L01" (l.2323-2326): it took the load
-// pipes L and the four V pipes (1 per cycle on L); now L01 and V01 like every other store, L01
-// held 2 / (4/3) = 1.5, rounded up to 2 cycles (D-2), V01 2 cycles, 6 uOPs as before.
+// [x1_ls_throughput] docs/x1-sog.md C-22, D-6: "6 4/3 V, L01" (l.2323-2326): L01 and V01 like every
+// other store, L01 held 2 / (4/3) = 1.5, rounded up to 2 cycles (D-2), V01 2 cycles, 6 uOPs.
 def : InstRW<[X1WriteSTV<6, 6, 2, 2>, ReadST, ReadDefault, ReadAdrBase],
              (instregex "^ST4i(8|16|32)$")>;
 def : InstRW<[WriteAdr, X1WriteSTV<6, 6, 2, 2>, ReadST, ReadDefault, ReadAdrBase],
@@ -1604,8 +1420,8 @@ def : InstRW<[WriteAdr, X1WriteSTV<6, 6, 2, 2>, ReadST, ReadDefault, ReadAdrBase
 // Cortex-X1 SOG Table 3-34: AESD/AESE/AESIMC/AESMC are "2, 2, V01" (latency 2,
 // throughput 2, the V0/V1 pipes only).  Stock V1 uses the 4-wide V group
 // (4 per cycle), which the X1 does not have for AES.
-// [x1_aes] docs/x1-sog.md U-6: no forwarding from AESE/AESD to AESMC/AESIMC (the stock read
-// advance of 2 is removed); the SOG gives no number for an adjacent dependent pair (sec. 4.7,
+// [x1_aes] docs/x1-sog.md U-6: no forwarding from AESE/AESD to AESMC/AESIMC (no read advance,
+// unlike the stock advance of 2); the SOG gives no number for an adjacent dependent pair (sec. 4.7,
 // l.2604-2605), the decision of the Cortex-A78 (docs/a78-sog.md U-6).
 def           : InstRW<[V1Write_2c_1V01], (instrs AESDrr, AESErr, AESMCrr, AESIMCrr)>;
 

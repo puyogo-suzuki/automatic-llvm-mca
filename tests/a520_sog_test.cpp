@@ -1,5 +1,5 @@
 // Cortex-A520: values pinned to the Arm Cortex-A520 Core Software Optimization Guide
-// (PJDOC-1505342170-671342, Issue 1.2, "SOG" below; text copy in tmp/a520sog.txt).
+// (PJDOC-1505342170-671342, Issue 1.2, "SOG" below; l.N = line N of a text extraction of the guide).
 // The items (C-n, D-n, ...) are those of docs/a520-sog.md.
 //
 // Two kinds of checks:
@@ -11,78 +11,25 @@
 //
 // Configuration: the SOG's "A" column (2x128-bit vector datapath), docs/a520-sog.md D-1.
 
-#include "test_support.h"
-
-#include <map>
-#include <string>
-#include <vector>
+#include "sog_test_support.h"
 
 namespace {
 
-struct A520InstInfo {
-    unsigned MaxLatency = 0;
-    unsigned NumMicroOps = 0;
-    std::vector<unsigned> WriteLatencies;  // per def, in operand order
-    // Total resource cycles per resource name (e.g. "A520UnitMAC" -> 2).
-    std::map<std::string, unsigned> ResourceCycles;
-    bool BeginGroup = false;
-    bool EndGroup = false;
-    bool Valid = false;
-};
+constexpr const char *kCpu = "cortex-a520";
 
-A520InstInfo a520Desc(const std::string &AsmLine) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-a520");
-    auto Instrs = parseAsm(TC, AsmLine);
-    A520InstInfo Info;
-    if (Instrs.size() != 1)
-        return Info;
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    auto ExpectedInst = IB.createInstruction(Instrs[0].Inst, {});
-    if (!ExpectedInst) {
-        consumeError(ExpectedInst.takeError());
-        return Info;
-    }
-    const mca::Instruction &IS = **ExpectedInst;
-    Info.MaxLatency = IS.getLatency();
-    Info.NumMicroOps = IS.getNumMicroOps();
-    Info.BeginGroup = IS.getBeginGroup();
-    Info.EndGroup = IS.getEndGroup();
-    for (const mca::WriteState &WS : IS.getDefs())
-        Info.WriteLatencies.push_back(WS.getLatency());
-    const MCSchedModel &SM = TC.STI->getSchedModel();
-    const MCSchedClassDesc *SCD = SM.getSchedClassDesc(IS.getDesc().SchedClassID);
-    if (SCD) {
-        for (const MCWriteProcResEntry *E = TC.STI->getWriteProcResBegin(SCD),
-                                       *End = TC.STI->getWriteProcResEnd(SCD);
-             E != End; ++E)
-            Info.ResourceCycles[SM.getProcResource(E->ProcResourceIdx)->Name] += E->ReleaseAtCycle;
-    }
-    Info.Valid = true;
-    return Info;
+using A520InstInfo = SogInstInfo;
+
+A520InstInfo a520Desc(const std::string &Asm) {
+    return sogDesc(kCpu, Asm, ResourceCycleCount::Release);
 }
 
-// Steady-state cycles per iteration of `Body` (one instruction per line),
-// simulated as a loop (loop-carried dependencies kept), --dependency dependency.
-// With `IgnoreLoopCarried`, as a basic block under --ignore-loop-carried=default.
+// Steady-state cycles per iteration of `Body` (one instruction per line) on the A520 issue stage;
+// with `IgnoreLoopCarried`, as a basic block under --ignore-loop-carried=default.
 double a520CyclesPerIter(const std::string &Body, bool IgnoreLoopCarried = false) {
-    initLLVMAArch64();
-    AArch64TestContext TC("cortex-a520");
-    auto Instrs = parseAsm(TC, Body);
-    AArch64MLPAnalyzer Analyzer;
-    mca::PipelineOptions PO(0, 0, 0, 0, 0, 0, true);
-    McaMetrics M = analyzeMcaRegion(Instrs, *TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), PO,
-                                    200, 16, DependencyKind::Dependency,
-                                    MLPWindowAssignmentKind::Forward, Analyzer,
-                                    IgnoreLoopCarried, -1, /*mlpWindowLoop=*/false);
-    if (!M.Valid || M.RetiredInstructions == 0 || Instrs.empty())
-        return -1.0;
-    return static_cast<double>(M.Cycles) /
-           (static_cast<double>(M.RetiredInstructions) / static_cast<double>(Instrs.size()));
+    return inOrderRun(kCpu, Body, IgnoreLoopCarried).CyclesPerIter;
 }
 
-constexpr double kTol = 0.1;
+constexpr double kTol = kSogInOrderTol;
 
 } // namespace
 
@@ -122,11 +69,9 @@ TEST(A520SogTest, NopHasNoResourceAndMulTakesOneEntry) {
     A520InstInfo Nop = a520Desc("nop");
     EXPECT_EQ(Nop.NumMicroOps, 1u);
     EXPECT_TRUE(Nop.ResourceCycles.empty());
-    // Four NOPs: three issue entries per cycle, no ALU limit (before: two ALUs, 2.0).
+    // Six NOPs: three issue entries per cycle, no ALU limit: 2.0 (on the two ALUs it would be 3.0).
     EXPECT_NEAR(a520CyclesPerIter("nop\nnop\nnop\nnop\nnop\nnop"), 2.0, kTol);
     EXPECT_NEAR(a520CyclesPerIter("nop\nnop\nnop"), 1.0, kTol);
-    // The other hints keep an ALU: YIELD is not a NOP.
-    EXPECT_FALSE(a520Desc("yield").ResourceCycles.empty());
     // MUL W: one entry; MADD W with a real accumulator: two (above).
     EXPECT_EQ(a520Desc("mul w1, w2, w3").NumMicroOps, 1u);
     EXPECT_EQ(a520Desc("mul x1, x2, x3").NumMicroOps, 1u);
@@ -150,7 +95,7 @@ TEST(A520SogTest, NopHasNoResourceAndMulTakesOneEntry) {
 }
 
 // ---------------------------------------------------------------------------
-// D-9 (the former open point of docs/a55-sog.md X-1) No general write-back ordering: an integer instruction does not wait
+// D-9 No general write-back ordering: an integer instruction does not wait
 // for an older FP instruction to write back.  FADD 4 (SOG 3.12), ADD 1: four independent
 // instructions, three per cycle -> 4 / 3.  (The stock InOrderIssueStage gave 6.)
 // ---------------------------------------------------------------------------
@@ -167,8 +112,8 @@ TEST(A520SogTest, NoWriteBackOrderStall) {
 }
 
 // ---------------------------------------------------------------------------
-// Section 2.2 (the former open point of docs/a55-sog.md X-2) --ignore-loop-carried: the first instruction of a basic block
-// no longer waits for the previous iteration (#12).  Two FADDs (two VPU per cycle): 1.0.
+// Section 2.2 --ignore-loop-carried: the first instruction of a basic block
+// does not wait for the previous iteration (#12).  Two FADDs (two VPU per cycle): 1.0.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, IgnoreLoopCarriedAppliesToFirstInstruction) {
     EXPECT_NEAR(a520CyclesPerIter("fadd d0, d0, d1\nfadd d2, d3, d1", /*IgnoreLoopCarried=*/true), 1.0, kTol);
@@ -196,7 +141,7 @@ TEST(A520SogTest, ArithmeticAndLogical) {
 // C-14 Miscellaneous data processing (SOG 3.6, Table 3-5), incl. the fixed variable shifts.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, MiscDataProcessing) {
-    // Variable shift ASRV, LSLV, LSRV, RORV: 1, 2, ALU (was 2).
+    // Variable shift ASRV, LSLV, LSRV, RORV: 1, 2, ALU.
     for (const char *Asm : {"lsl x1, x2, x3", "lsr w1, w2, w3", "asr x1, x2, x3", "ror w1, w2, w3"}) {
         A520InstInfo V = a520Desc(Asm);
         EXPECT_EQ(V.MaxLatency, 1u) << Asm;
@@ -222,7 +167,7 @@ TEST(A520SogTest, MiscDataProcessing) {
 }
 
 // ---------------------------------------------------------------------------
-// C-28 CRC (SOG 3.23, Table 3-22): CRC32, CRC32C 2, 1, MAC (was 1 on an ALU).
+// C-28 CRC (SOG 3.23, Table 3-22): CRC32, CRC32C 2, 1, MAC.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, CrcOnMac) {
     for (const char *Asm : {"crc32b w1, w1, w2", "crc32w w1, w1, w2", "crc32cx w1, w1, x2"}) {
@@ -371,7 +316,7 @@ TEST(A520SogTest, AsimdFixedRows) {
     EXPECT_EQ(a520Desc("addv b0, v1.16b").ResourceCycles["A520UnitVALU0"], 1u);  // throughput 1
     // SMMLA / UMMLA / USMMLA 4.  (XAR 4 / EOR3 3 and AESE 3 are not checked here: the test
     // context's cortex-a520 has no SHA3 / AES feature, so the assembler rejects them; they are
-    // checked with mca-insts-info, docs/a520-sog.md C-27 and X-2.)
+    // checked with mca-insts-info, docs/a520-sog.md C-27 and X-1.)
     EXPECT_EQ(a520Desc("smmla v0.4s, v1.16b, v2.16b").MaxLatency, 4u);
     EXPECT_EQ(a520Desc("usmmla v0.4s, v1.16b, v2.16b").MaxLatency, 4u);
     // BFMMLA 14, throughput 1, VMAC + VALU.
@@ -424,7 +369,6 @@ TEST(A520SogTest, SimdMacForwarding) {
 // ---------------------------------------------------------------------------
 // B-1 [a520_from_a55_atomics] LSE atomics: the A55's rows (A55 SOG 4.10, docs/a55-sog.md C-19,
 // U-5) on the A520's load pipe and Load/Store pipe; issue entries by the A520 SOG 4.1 rule.
-// Before: WriteAtomic Unsupported, dropped by InstrBuilder.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, BorrowedAtomicsFromA55) {
     struct Row { const char *Asm; unsigned Lat, Occ, Entries; bool Single; };
@@ -468,35 +412,34 @@ TEST(A520SogTest, BorrowedAtomicsFromA55) {
 // ---------------------------------------------------------------------------
 // B-2 [a520_from_a55_store_data] Store data read one cycle late (ReadST advance 1 from every
 // producer, on the data of every store form), as on the A55 (docs/a55-sog.md C-18, U-9).
-// Before: ReadST advance 0, and no ReadST at all on the forms with an InstRW row.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, BorrowedStoreDataNeededLater) {
-    // 64-bit MUL (4, MAC 2 cycles): c0 mul; c3 str (4 - 1) + next mul -> 3 (before: 4), the same
+    // 64-bit MUL (4, MAC 2 cycles): c0 mul; c3 str (4 - 1) + next mul -> 3, the same
     // for the register-offset store (two entries + the MUL's one fit in three).
     EXPECT_NEAR(a520CyclesPerIter("mul x1, x2, x3\nstr x1, [x0]"), 3.0, kTol);
     EXPECT_NEAR(a520CyclesPerIter("mul x1, x2, x3\nstr x1, [x0, x4]"), 3.0, kTol);
-    // Load (2) -> store data: c0 ldr; c1 store + next ldr -> 1 (before: 2), every store family.
+    // Load (2) -> store data: c0 ldr; c1 store + next ldr -> 1, every store family.
     for (const char *St : {"str x1, [x5]", "str x1, [x5, x6]", "stur x1, [x5, #-8]", "str x1, [x5], #8",
                            "str w1, [x5, #4]!", "sttr x1, [x5]", "strb w1, [x5]", "stp x1, x2, [x5]",
                            "stp x2, x1, [x5]", "stnp x1, x2, [x5]", "stp x1, x2, [x5, #16]!",
                            "stlr x1, [x5]", "stlrb w1, [x5]"}) {
         EXPECT_NEAR(a520CyclesPerIter(std::string("ldr x1, [x0]\n") + St), 1.0, kTol) << St;
     }
-    // Two load -> store pairs: one store per cycle -> 2 (before: 4).
+    // Two load -> store pairs: one store per cycle -> 2.
     EXPECT_NEAR(a520CyclesPerIter("ldr x1, [x0]\nstr x1, [x5]\nldr x2, [x0, #8]\nstr x2, [x5, #8]"), 2.0, kTol);
-    // FP: c0 fadd (4); c3 store + next fadd -> 3 (before: 4), incl. STP Q.
+    // FP: c0 fadd (4); c3 store + next fadd -> 3, incl. STP Q.
     for (const char *St : {"str d0, [x5]", "str q0, [x5, x6]", "stur d0, [x5, #-8]", "str d0, [x5], #8",
                            "stp d0, d1, [x5]", "stp d1, d0, [x5, #16]!", "stp q1, q0, [x5]",
                            "stnp q0, q1, [x5]"}) {
         EXPECT_NEAR(a520CyclesPerIter(std::string("fadd d0, d2, d2\n") + St), 3.0, kTol) << St;
     }
-    // ASIMD: ADD (3): c0 add; c2 st1 + next add -> 2 (before: 3), incl. one-lane and post-index forms.
+    // ASIMD: ADD (3): c0 add; c2 st1 + next add -> 2, incl. one-lane and post-index forms.
     for (const char *St : {"st1 {v0.8b}, [x5]", "st1 {v0.8b}, [x5], #8", "st1 {v0.b}[3], [x5]",
                            "st1 {v0.b}[3], [x5], #1", "st2 {v0.8b, v1.8b}, [x5]", "st2 {v31.8b, v0.8b}, [x5]",
                            "st4 {v0.s, v1.s, v2.s, v3.s}[1], [x5]"}) {
         EXPECT_NEAR(a520CyclesPerIter(std::string("add v0.8b, v2.8b, v2.8b\n") + St), 2.0, kTol) << St;
     }
-    // ASIMD load (3) -> ASIMD store: c0 ld1; c2 st1 + next ld1 -> 2 (before: 3).
+    // ASIMD load (3) -> ASIMD store: c0 ld1; c2 st1 + next ld1 -> 2.
     EXPECT_NEAR(a520CyclesPerIter("ld1 {v0.8b}, [x0]\nst1 {v0.8b}, [x5]"), 2.0, kTol);
     // The base register is an ordinary operand: an ADD -> base chain stays 1 per step and the
     // store cannot issue in the ADD's cycle: c0 add; c1 str + add; ... -> 1.
@@ -509,7 +452,6 @@ TEST(A520SogTest, BorrowedStoreDataNeededLater) {
 // ---------------------------------------------------------------------------
 // B-3 [a520_from_a55_base_update] Base-register update latency 1/T of the row's A520
 // throughput (rounded up; T >= 1 -> 1), the A55's "(1/T)" scheme (docs/a55-sog.md U-11).
-// Before: 1 for every writeback form.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, BorrowedBaseUpdateLatency) {
     struct Row { const char *Asm; unsigned Base; };
@@ -542,34 +484,32 @@ TEST(A520SogTest, BorrowedBaseUpdateLatency) {
         EXPECT_EQ(I.WriteLatencies[0], R.Base) << R.Asm;     // the base (wback) is the first def
     }
     // ADD chain from the updated base: c0 stp q (LdSt c0-c1); c2 add, c3 add, c4 add + next stp
-    // -> 4 (before: base at c1, the adds c1-c3, the next stp at c3 -> 3).
+    // -> 4.
     EXPECT_NEAR(a520CyclesPerIter("stp q0, q1, [x0], #32\nadd x1, x0, #1\nadd x1, x1, #1\nadd x1, x1, #1"),
                 4.0, kTol);
-    // A self-chain through the base is bounded by the occupancy anyway: 2 per STP Q (unchanged).
+    // A self-chain through the base is bounded by the occupancy anyway: 2 per STP Q.
     EXPECT_NEAR(a520CyclesPerIter("stp q0, q1, [x0], #32\nstp q0, q1, [x0], #32"), 4.0, kTol);
 }
 
 // ---------------------------------------------------------------------------
 // B-4 [a520_from_a55_flags] Same-cycle flag bypass from a flag setter to a conditional consumer,
 // with the A55's exclusions (docs/a55-sog.md C-4, D-8): consumers ADC/ADCS/SBC/SBCS (NGC) and
-// producers FCMP/FCCMP wait for the flags.  Before: the consumer saw the producer's latency (1).
+// producers FCMP/FCCMP wait for the flags.
 // ---------------------------------------------------------------------------
 TEST(A520SogTest, BorrowedFlagBypass) {
-    // cmp + csel + csel: three ALU instructions, two ALUs -> 1.5 (before: c0 cmp; c1 csel + csel
-    // -> 2).
+    // cmp + csel + csel: three ALU instructions, two ALUs -> 1.5.
     EXPECT_NEAR(a520CyclesPerIter("cmp x1, x2\ncsel x3, x4, x5, eq\ncsel x6, x4, x5, ne"), 1.5, kTol);
-    // A flag chain through CCMP (ALU 2 cycles, T = 1): c0 cmp + ccmp; c1 csel; c2 cmp + ccmp -> 2
-    // (before: c0 cmp; c1 ccmp; c2 csel + cmp; c3 ccmp ... -> 3).
+    // A flag chain through CCMP (ALU 2 cycles, T = 1): c0 cmp + ccmp; c1 csel; c2 cmp + ccmp -> 2.
     EXPECT_NEAR(a520CyclesPerIter("cmp x1, x2\nccmp x3, x4, #0, eq\ncsel x5, x6, x7, ne"), 2.0, kTol);
-    // Conditional branch in the same cycle as the compare: c0 subs + b.ne + add -> 1 (before: 2).
+    // Conditional branch in the same cycle as the compare: c0 subs + b.ne + add -> 1.
     EXPECT_NEAR(a520CyclesPerIter("subs x1, x2, #1\nb.ne #8\nadd x3, x3, #1"), 1.0, kTol);
-    // Load -> compare -> csel: c0 ldr; c2 cmp + csel + next ldr -> 2 (before: 3).
+    // Load -> compare -> csel: c0 ldr; c2 cmp + csel + next ldr -> 2.
     EXPECT_NEAR(a520CyclesPerIter("ldr x1, [x0]\ncmp x1, #0\ncsel x3, x4, x5, eq"), 2.0, kTol);
     // Arithmetic with carry waits for the flags: c0 cmp; c1 adc + adc -> 2.
     EXPECT_NEAR(a520CyclesPerIter("cmp x1, x2\nadc x3, x3, x4\nadc x6, x6, x4"), 2.0, kTol);
     EXPECT_NEAR(a520CyclesPerIter("cmp x1, x2\nsbc w3, w3, w4\nsbc w6, w6, w4"), 2.0, kTol);
     EXPECT_NEAR(a520CyclesPerIter("cmp x1, x2\nngc x3, x4\nngc x6, x4"), 2.0, kTol);
-    // A flag chain cmp -> csel -> cmp: 1 per iteration (before: 2).
+    // A flag chain cmp -> csel -> cmp: 1 per iteration.
     EXPECT_NEAR(a520CyclesPerIter("cmp x0, x1\ncsel x0, x4, x0, eq"), 1.0, kTol);
     // FP compares are excluded: the chain fcmp (1) -> csel (1) -> fmov to FP (3) -> fcmp costs
     // 1 + 1 + 3 = 5 (with the bypass it would be 4).
@@ -577,3 +517,92 @@ TEST(A520SogTest, BorrowedFlagBypass) {
     // FCCMP (5, VALU0 5 cycles): the csels wait for its flags, 5 cycles in any case.
     EXPECT_NEAR(a520CyclesPerIter("fccmp s0, s1, #0, eq\ncsel x3, x4, x5, eq"), 5.0, kTol);
 }
+
+// ---------------------------------------------------------------------------
+// D-15 [a520_store_zr] The zero register is not a GPR source for the two-entry rule (SOG 4.1, l.3574-3578):
+// STR (register offset) of WZR/XZR and STP/STNP with WZR/XZR data have at most two GPR sources: one entry.
+// ---------------------------------------------------------------------------
+TEST(A520SogTest, StoreOfZeroRegisterTakesOneEntry) {
+    EXPECT_EQ(a520Desc("stp xzr, xzr, [x0]").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("stp x1, xzr, [x0, #16]").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("stp wzr, w1, [x0]").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("stnp xzr, xzr, [x0]").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("stp xzr, xzr, [x0, #16]!").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("stp x1, xzr, [x0], #16").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("str wzr, [x0, x1, lsl #2]").NumMicroOps, 1u);
+    EXPECT_EQ(a520Desc("strb wzr, [x0, w1, sxtw]").NumMicroOps, 1u);
+    // With GPR data: two entries (C-2).
+    EXPECT_EQ(a520Desc("stp x1, x2, [x0, #16]!").NumMicroOps, 2u);
+    EXPECT_EQ(a520Desc("str w1, [x0, x1, lsl #2]").NumMicroOps, 2u);
+    // Store pipe, latency 1.
+    A520InstInfo S = a520Desc("stp xzr, xzr, [x0]");
+    EXPECT_EQ(S.ResourceCycles["A520UnitLdSt"], 1u);
+    // STP XZR + two ADDs: three entries, one cycle.
+    EXPECT_NEAR(a520CyclesPerIter("stp xzr, xzr, [x0]\nadd x5, x5, #1\nadd x6, x6, #1"), 1.0, kTol);
+}
+
+// ---------------------------------------------------------------------------
+// N-1, U-6 [a520_stx] Exclusive stores (no SOG row): the store row (latency 1, Load/Store pipe) and the
+// entries of the sec. 4.1 rule: STXR/STLXR (Rt, Rn) one entry, STXP/STLXP (Rt, Rt2, Rn) two.
+// ---------------------------------------------------------------------------
+TEST(A520SogTest, ExclusiveStoresFollowTheEntryRule) {
+    for (const char *Asm : {"stxr w3, x1, [x0]", "stlxr w3, x1, [x0]", "stxrb w3, w1, [x0]",
+                            "stlxr w3, w1, [x0]"}) {
+        A520InstInfo I = a520Desc(Asm);
+        ASSERT_TRUE(I.Valid) << Asm;
+        EXPECT_EQ(I.NumMicroOps, 1u) << Asm;
+        EXPECT_EQ(I.MaxLatency, 1u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["A520UnitLdSt"], 1u) << Asm;
+        EXPECT_EQ(I.ResourceCycles.count("A520UnitLd"), 0u) << Asm;
+    }
+    for (const char *Asm : {"stxp w3, x1, x2, [x0]", "stlxp w3, x1, x2, [x0]", "stxp w3, w1, w2, [x0]"}) {
+        A520InstInfo I = a520Desc(Asm);
+        ASSERT_TRUE(I.Valid) << Asm;
+        EXPECT_EQ(I.NumMicroOps, 2u) << Asm;
+        EXPECT_EQ(I.MaxLatency, 1u) << Asm;
+    }
+    EXPECT_EQ(a520Desc("stxp w3, xzr, xzr, [x0]").NumMicroOps, 1u);  // D-15
+}
+
+// ---------------------------------------------------------------------------
+// D-6, U-10 [a520_ext] Table 3-2 note 1 "Latency=2 when the dependency is on Rm": every extended-register
+// form, UXTB included; the identity extend (`add x1, sp, x1`, UXTX #0) counts as an extend.
+// ---------------------------------------------------------------------------
+TEST(A520SogTest, ExtendedRmNoteIncludesUxtb) {
+    for (const char *Asm : {"add x1, x2, w1, uxtb", "add x1, x2, w1, uxth", "sub x1, x2, w1, sxtb #2",
+                            "adds w1, w2, w1, uxtb", "add x1, sp, x1"})
+        EXPECT_NEAR(a520CyclesPerIter(Asm), 2.0, kTol) << Asm;
+    // Through Rn: 1.
+    EXPECT_NEAR(a520CyclesPerIter("add x1, x1, w2, uxtb"), 1.0, kTol);
+}
+
+// ---------------------------------------------------------------------------
+// C-5, U-7 [a520_mac_fwd] Table 3-3 note 1: the result of any MAC operation is forwarded to the accumulator
+// of a following MADD/MSUB of any form; the advance is the consumer's (W 1, X 2, long 0).
+// ---------------------------------------------------------------------------
+TEST(A520SogTest, MacAccumulatorForwardingAcrossForms) {
+    // X MADD (4) -> W accumulator: 4 - 1 = 3; W MADD (3) -> X accumulator: 3 - 2 = 1.  Chain 4 per iteration.
+    EXPECT_NEAR(a520CyclesPerIter("madd x4, x2, x3, x1\nmadd w1, w5, w6, w4"), 4.0, kTol);
+    // SMADDL (2) -> W accumulator: 2 - 1 = 1; W MADD (3) -> SMADDL accumulator: no advance, 3.  Chain 4.
+    EXPECT_NEAR(a520CyclesPerIter("smaddl x4, w2, w3, x1\nmadd w1, w5, w6, w4"), 4.0, kTol);
+    // Same form, unchanged: 2 per step.
+    EXPECT_NEAR(a520CyclesPerIter("madd w1, w2, w3, w1"), 2.0, kTol);
+    EXPECT_NEAR(a520CyclesPerIter("madd x1, x2, x3, x1"), 2.0, kTol);
+    EXPECT_NEAR(a520CyclesPerIter("smaddl x1, w2, w3, x1"), 2.0, kTol);
+    // Multiply high is not a producer: SMULH (6) -> MADD X accumulator 6.
+    EXPECT_NEAR(a520CyclesPerIter("smulh x4, x2, x3\nmadd x2, x5, x6, x4"), 6.0 + 4.0, kTol);
+}
+
+// D-16 [a520_sys]: system instructions, barriers and hints have no SOG row: latency 1, no pipeline.
+TEST(A520SogTest, SystemInstructionsAndHints) {
+    for (const char *Asm : {"mrs x1, tpidr_el0", "msr tpidr_el0, x1", "dmb ish", "dsb sy", "isb",
+                            "yield", "bti c"}) {
+        A520InstInfo I = a520Desc(Asm);
+        ASSERT_TRUE(I.Valid) << Asm;
+        EXPECT_EQ(I.MaxLatency, 1u) << Asm;
+        EXPECT_TRUE(I.ResourceCycles.empty()) << Asm;
+    }
+    // The pointer-authentication hints keep their PAC rows (C-13).
+    EXPECT_FALSE(a520Desc("paciasp").ResourceCycles.empty());
+}
+

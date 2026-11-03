@@ -43,14 +43,13 @@ Contents
   **Issue 7.0** of 30 November 2023 ("First release for r0p2 - Document confidentiality update"),
   revision r0p2, Copyright © 2022-2023 Arm Limited (or its affiliates), **Non-Confidential**, product
   status "Final" (title page and p.2-3, l.1-28, l.97). Called "the SOG" below. Page numbers are those
-  of the guide's footers ("Page N of 74"); "l.N" is line N of the text extraction `tmp/a720sog.txt`
+  of the guide's footers ("Page N of 74"); "l.N" is line N of the text extraction of the guide
   (not tracked). The row "Store vector reg, immed pre-index, B/H/S/D-form" was checked against the
   PDF (p.27, [I-3](#i-3)); all other rows were read from the text extraction only.
 
 ### 1.2 What "the implementation" is
 
-The state of the working tree on 2026-11-01 (last commit `3841880`, plus uncommitted changes of
-this and other sessions):
+The files concerned:
 
 * `ModifiedTarget/AArch64/AArch64SchedA720.td`: the TableGen model `CortexA720Model`, compiled
   into the tool's own scheduling tables ([docs.md](docs.md) section 5). `AArch64Processors.td` maps
@@ -60,27 +59,27 @@ this and other sessions):
 * `src/cpu/cpu_traits.cpp`: the A720 entry (`UopDispatchWidth = 10`, `MopDispatchWidth = 5`,
   `Fusion = FusionTable::A720`, `ZeroLatencyMov = true`, no MLP window resources).
 * `src/facile/facile.cpp` and `src/facile/fusion.cpp`: the Facile predictor and the A720 fusion
-  table (`computeA720FusedMask`), which produce the A720 cycle counts. The research runs `mca_tool
-  --merge-same-header --dependency ooo --mcpu cortex-a720 --facile` (CSV `mca.a720.csv`); with
-  `--facile` the MCA simulation is not run, the CSV `cycles` column is the rounded Facile estimate.
-* `tests/a720_sog_test.cpp` (suite `A720SogTest`, added by this audit) pins the values below; the
+  table (`computeA720FusedMask`), which produce the A720 cycle counts (`mca_tool --merge-same-header
+  --dependency ooo --mcpu cortex-a720 --facile`); with `--facile` the MCA simulation is not run, the
+  CSV `cycles` column is the rounded Facile estimate.
+* `tests/a720_sog_test.cpp` (suite `A720SogTest`) pins the values below; the
   A720 fusion and zero-latency tests of `tests/facile_test.cpp` pin [C-4](#c-4) and [C-5](#c-5).
   `AArch64TestContext("cortex-a720")` installs the local model (`tests/test_support.h`).
 
 Implementation facts are given by file and identifier (TableGen `def` names, C++ function names),
-not by line number. The changes of this audit carry tags; [section 2.4](#24-code-tags-and-the-items-of-this-document)
-maps them to the items.
+not by line number. The model's departures from a plain transcription of the SOG carry tags;
+[section 2.3](#24-code-tags-and-the-items-of-this-document) maps them to the items.
 
 ### 1.3 Categories
 
 | ID | Category | Meaning |
 |---|---|---|
-| **C-n** | compatible | The implementation does what the SOG states. Items fixed by this audit are C items marked *fixed 2026-11-01*. |
+| **C-n** | compatible | The implementation does what the SOG states. |
 | **N-n** | not compatible | The SOG states something and the implementation does not follow it. Each item says why it is still open. |
 | **D-n** | deliberate deviation or interpretation | The implementation knowingly departs from the literal SOG, or fills a gap with an interpretation. Each item gives the SOG text, the implementation and the reason. |
 | **U-n** | unclear | The SOG does not decide the question; the implementation makes an assumption or leaves it open. Each item gives the SOG text, what is unclear, the current handling, the expected impact, and how to settle it. |
 | **I-n** | inconsistent | Two places of the SOG disagree, or the SOG contradicts itself or has a misprint. Each item says which reading the implementation follows. |
-| **X-n** | outside the A720 path | Problems in shared code or in LLVM, found during this audit. Not changed. |
+| **X-n** | outside the A720 path | Problems in shared code or in LLVM that affect the A720 results; not changed for the A720. |
 | **B-n** | taken over from another core | The A720 SOG says nothing on the question, and the treatment the project decided for the Cortex-A55 / Cortex-A520 and applied to the Cortex-A76 / A78 is applied to the A720 for consistency. **Not SOG-based.** |
 
 ### 1.4 Reading the SOG instruction tables
@@ -148,18 +147,13 @@ For `--facile`, every region gets `EstimatedCycles = max(IssueBound, PortBound, 
 The MLP columns use a window of `MicroOpBufferSize` = 192 uops ([U-1](#u-1)); a change of an
 instruction's uop count therefore also changes the `mlp` / `mlp_r` columns of the regions around it.
 
-### 2.3 What changed in this audit
+### 2.3 Unit tests
 
-The model before the audit is the working-tree file of 2026-11-01: an uncommitted rewrite of
-2026-10-30 by another session ("every value from the SOG, nothing tuned") of the committed model.
-The committed model counted the pipeline groups I, M, B, L and V as resources of their own that
-shared no unit with S0/S1/M0/M1 etc., and gave FADD-class instructions latency 3 against the SOG's 2;
-the rewrite defines the pipelines with `ProcResGroup`s as Table 3-1 reads and transcribes most rows.
-This audit compared the rewrite row by row with the SOG, **kept it**, and corrected it where the SOG
-states something else (the C items marked *fixed 2026-11-01*); the deviations it adds are D and B
-items. The A720-specific C++ change is the two fusion rows of [C-5](#c-5). Two tests of
-`tests/facile_test.cpp` that failed against the rewrite (they assumed the committed model's FADD
-latency 3) were corrected to the SOG values ([C-4](#c-4)).
+`tests/a720_sog_test.cpp` (suite `A720SogTest`) pins the values of the items below. The per-instruction
+data (latency per def, uops, resource cycles, read advances) come from `sogDesc()`, the cycles per
+iteration of small loops from `sogFacile()`, the Facile prediction as `mca_tool --facile` computes
+it (both in `tests/sog_test_support.h`). `AArch64TestContext("cortex-a720")` (`tests/test_support.h`) installs the local scheduling model.
+`A720SogTest.Dump` prints `sogDesc()` of the instructions listed in `$A720_DUMP` (`sogDump()`).
 
 ### 2.4 Code tags and the items of this document
 
@@ -182,7 +176,7 @@ latency 3) were corrected to the SOG values ([C-4](#c-4)).
 | `[a720_from_a55_store_data]` | [B-1](#b-1) |
 | `[a720_fusion_simd]` (`src/facile/fusion.cpp`) | [C-5](#c-5), [D-11](#d-11) |
 
-The rows without a tag are those of the 2026-10-30 rewrite, with the SOG line numbers as comments.
+The rows without a tag are transcriptions of the SOG rows, with the SOG line numbers as comments.
 
 ---
 
@@ -191,8 +185,7 @@ The rows without a tag are those of the 2026-10-30 rewrite, with the SOG line nu
 Values are "latency / throughput / pipelines" as printed. "Model" values were read with
 `mca-insts-info --mtriple=aarch64 --mcpu=cortex-a720` and the unit tests (`tests/a720_sog_test.cpp`,
 suite `A720SogTest`). Cycles per iteration are Facile estimates of small loops that include the loop
-branch ([section 10](#10-reproducing-the-cycle-counts-quoted-here)); "before" is the model before this
-audit. Instruction counts "in the research binaries" are explained in section 10.
+branch ([section 10](#10-reproducing-the-cycle-counts-quoted-here)). Values marked "(test)" are those of the unit tests, whose bodies have no loop branch.
 
 ### 3.1 Dispatch, pipelines and forwarding
 
@@ -216,17 +209,18 @@ Branch 0, 1, Integer Single-Cycle 0, 1, Integer Single/Multi-Cycle 0, 1, FP/ASIM
 the resources of [section 2.1](#21-machine-model-cortexa720model); the groups I, M, S, B, L01, L and V
 are those of Table 3-1, as `ProcResGroup`s, so a group's bound counts the uses of its members.
 "ALU, basic, flagset ... 1 4 I" (l.639-641): unlike the Cortex-A78 (3 per cycle), the flag-setting
-ALU operations run at the full I rate. Measured (test): eight independent `adds` 2.0 per iteration;
-two `str` and four `add` 1.2 (the Mop bound). Test: `DispatchAndPipelines`.
+ALU operations run at the full I rate. Measured (test, without the loop branch): eight independent
+`adds` 2.0 per iteration; two `str` and four `add` 1.2 (the Mop bound, 6 / 5); with the loop branch
+1.4 (7 / 5). Test: `DispatchAndPipelines`.
 
 <a id="c-3"></a>
 **C-3. NOP takes no execution resource.**
-*Fixed 2026-11-01* (`[a720_nop]`).
+`[a720_nop]`.
 The SOG has no row for NOP or the other hints (BTI); unlike the Cortex-A78 it has no "NOP + Any
 instruction" fusion (sec. 4.11, l.3153-3167). Implementation: `WriteHint` has no resource; a NOP
 counts as one Mop and one µOP. This is the decision made for the Cortex-A55, A520, A76 and A78
-([a78-sog.md](a78-sog.md) C-3). Before: S0 for one cycle. The research binaries contain 348,224 NOPs
-and 99 BTI. Measured: five `nop` and an `add` + branch 6.0 -> 1.6. Test: `DispatchAndPipelines`.
+([a78-sog.md](a78-sog.md) C-3). Measured: five `nop` and an `add` + branch 1.4 (the Mop bound, 7 / 5). Test:
+`DispatchAndPipelines`.
 
 <a id="c-4"></a>
 **C-4. Zero-latency instructions.**
@@ -234,19 +228,16 @@ SOG sec. 4.12 (p.65, l.3183-3227): "MOV Xd, #{12{1'b0},imm[3:0]} / MOV Xd, XZR /
 #{12{1'b0},imm[3:0]} / MOV Wd, WZR / MOV Hd, WZR / MOV Hd, XZR / MOV Sd, WZR / MOV Dd, XZR / MOVI Dd,
 #0 / MOVI Vd.2D, #0 / MOV Wd, Wn / MOV Xd, Xn / FMOV Sd, Sn / FMOV Dd, Dn / MOV Vd, Vn (vector) / MOV
 Zd.D, Zn.D / PTRUE / PFALSE / SETFFR ... are executed with zero latency. These instructions do not
-utilize the scheduling and execution resources of the machine." Implementation (the 2026-10-30
-rewrite, [docs.md](docs.md) 4.B): the predicate `A720ZeroMove` selects `A720Write_0c` (latency 0, no
+utilize the scheduling and execution resources of the machine." Implementation ([docs.md](docs.md)
+4.B): the predicate `A720ZeroMove` selects `A720Write_0c` (latency 0, no
 resource) on MOVZ[WX]i, ORR[WX]rs, FMOV[WX][HSD]r from a zero register, MOVID / MOVIv2d_ns #0,
 ORRv16i8 / ORRv8i8 with Rn == Rm, FMOVSr, FMOVDr; `CpuTraits::ZeroLatencyMov` lets Facile use the
 latency 0. FMOV Hd, Hn is not listed and keeps "FP move, register 2 2 V" (l.1040); MOVI Vd.16B, #0
 keeps "ASIMD move, integer immed 2 2 V" (l.1546). The SVE forms are outside the model ([D-8](#d-8)).
 The immediate range and the caveat "may not be executed with zero latency under certain conditions"
-(l.3226-3227): [D-9](#d-9), [D-1](#d-1). Two tests of `tests/facile_test.cpp`
-(`A720ZeroLatencyFmovFpToFp`, `A720FmovHalfPrecisionIsNotZeroLatency`) expected `fadd` latency 3, the
-value of the committed model, which no A720 row supports ("FP arithmetic FADD, FSUB 2 2 V", l.964);
-they now expect fadd + eliminated FMOV = 2.0 and fadd + FMOV H = 2 + 2 = 4.0. The research binaries
-contain 1,758,840 `mov` between GPRs, 313,684 `mov #0` / `mov ZR`, 305,408 `mov #1..#15`, 58,004
-FMOV S/D register copies, 7,942 vector `mov` and 16,642 `movi d/2d, #0`. Test:
+(l.3226-3227): [D-9](#d-9), [D-1](#d-1). With `fadd` at its row's latency 2 ("FP arithmetic FADD,
+FSUB 2 2 V", l.964), the tests `A720ZeroLatencyFmovFpToFp` and `A720FmovHalfPrecisionIsNotZeroLatency`
+of `tests/facile_test.cpp` expect fadd + eliminated FMOV = 2.0 and fadd + FMOV H = 2 + 2 = 4.0. Test:
 `ZeroLatencyInstructions`, `FacileTest.A720*`.
 
 <a id="c-5"></a>
@@ -265,15 +256,14 @@ comparison with the A78 table is [docs.md](docs.md) 4.C):
 | CMP (immediate), (register) + CSEL | SUBS with a ZR destination, then CSEL (not CMN) |
 | CMP (immediate), (register) + CSET | SUBS with a ZR destination, then CSINC Rd, ZR, ZR (CSET; not CSETM) |
 | BTI + Integer DP/BR/BLR/RET/B uncond/CBZ/TBZ | not in the mask ([U-11](#u-11)) |
-| **SHL + SRI (both scalar or both vector)** | SHLd then SRId, or SHLv*_shift then SRIv*_shift (*fixed 2026-11-01*, `[a720_fusion_simd]`; was not modelled) |
-| **FCMP + AXFLAG** | any FCMP/FCMPE, then AXFLAG (*fixed*, `[a720_fusion_simd]`) |
+| **SHL + SRI (both scalar or both vector)** | SHLd then SRId, or SHLv*_shift then SRIv*_shift (`[a720_fusion_simd]`) |
+| **FCMP + AXFLAG** | any FCMP/FCMPE, then AXFLAG (`[a720_fusion_simd]`) |
 | MOVPRFX + supported SVE instruction | outside the model ([D-8](#d-8)) |
 
 "For CMP, CMN, TST fusion is allowed for shifted and/or extended register forms" (l.3169-3170):
 these forms fuse. Pairs must be adjacent (l.3169); pairing is greedy and non-overlapping. The
 restrictions on immediates (l.3170-3171): [U-10](#u-10); accounting of a fused pair: [D-11](#d-11).
-The research binaries contain about 710,000 CMP/CMN/TST directly followed by a B.cond and no SHL +
-SRI or FCMP + AXFLAG pair. Measured: two SHL + SRI pairs + branch 4.0 -> 2.0. Test: `Fusion`,
+Measured: two SHL + SRI pairs + branch 2.0. Test: `Fusion`,
 `FacileTest.A720*`.
 
 <a id="c-6"></a>
@@ -283,24 +273,23 @@ consumer reads (so the base update of a post-index load has 1, not the load's 4)
 consumer's `ReadAdvance` (the accumulator paths of [C-10](#c-10), [C-15](#c-15), [C-19](#c-19) to
 [C-21](#c-21), [C-26](#c-26)), with a floor of 1 cycle except for the zero-latency instructions. The
 address operands have `ReadAdrBase` advance 0: an ALU result is used as an address after its own
-latency, no extra cycle (the decision of the Cortex-A55, A520, A76 and A78 audits). Test:
+latency, no extra cycle (the decision taken for the Cortex-A55, A520, A76 and A78). Test:
 `ZeroLatencyInstructions`, `DivideAndMultiply`.
 
 <a id="c-7"></a>
 **C-7. Stores are split into address and data µOPs; store-to-load forwarding.**
-*Fixed 2026-11-01* (`[a720_store_uops]`).
+`[a720_store_uops]`.
 SOG sec. 3.9 (p.23, l.867-868): "Stores µOPs are split into address and data µOPs"; sec. 3.15 and
 3.21 (l.1110, l.1740): "Stores MOPs are split into store address and store data µOPs"; sec. 4.5
 (p.60, l.2925-2934): forwarding needs the load to start at the start or the middle of the older
 store, loads larger than 8 bytes from at most two stores, loads of up to 4 bytes from one.
 Implementation: every store write has two µOPs (address on L01, data on ID or V), three where the row
 adds an I (STR Q scaled, [C-18](#c-18)); a pre/post-index store adds the base update (`WriteAdr`).
-Before: one µOP. The µOP count acts on the issue bound (only when the average exceeds two µOPs per
+The µOP count acts on the issue bound (only when the average exceeds two µOPs per
 instruction) and on the MLP window ([U-1](#u-1)). Shared Facile code ([docs.md](docs.md) 4.F, 4.G):
 the base update of a store is a node of its own that does not wait for the data, and a store -> load
 edge is left out when the two register-offset accesses are provably disjoint. The size rules are not
-checked; the latency of the forwarding is not stated ([D-7](#d-7)). The research binaries contain
-2,273,412 store instructions. Test: `Stores`, `FpLoadsAndStores`, `AsimdLoadsAndStores`.
+checked; the latency of the forwarding is not stated ([D-7](#d-7)). Test: `Stores`, `FpLoadsAndStores`, `AsimdLoadsAndStores`.
 
 ### 3.2 Instruction tables, integer
 
@@ -321,49 +310,45 @@ floors the edge to 1. Test: `Branches`.
 | SOG group | SOG | Model |
 |---|---|---|
 | ALU, basic; basic, flagset | 1 / 4 / I | `WriteI`, `WriteISReg` = 1, I |
-| **ALU, extend and shift: ADD{S}, SUB{S}** | 2 / 2 / M | `A720Wr_2c_M` for every extended-register form (*fixed 2026-11-01*, `[a720_ext]`: the variant on `RegExtendedPred` gave UXTB, whose extend operand is 0, the basic row 1 I; [U-4](#u-4)) |
+| **ALU, extend and shift: ADD{S}, SUB{S}** | 2 / 2 / M | `A720Wr_2c_M` for every extended-register form, UXTB (extend operand 0) included (`[a720_ext]`, [U-4](#u-4)) |
 | Arithmetic, LSL shift <= 4 (flagset or not) | 1 / 4 / I | `A720Wr_ArithShift`, `IsCheapLSL` -> `A720Wr_1c_I` |
 | Arithmetic, LSR/ASR/ROR shift or LSL > 4 | 2 / 2 / M | the same variant otherwise -> `A720Wr_2c_M` |
 | Conditional compare; select; AXFLAG, XAFLAG; SETF8, SETF16, RMIF, CFINV | 1 / 4 / I | `WriteI`; `A720Wr_1c_I` |
 | Logical, shift, no flagset | 1 / 4 / I | `WriteISReg` (ORR: zero-move variant, [C-4](#c-4)) |
 | Logical, shift, flagset: ANDS, BICS | 2 / 2 / M | `A720Wr_LogicSFlag`: `RegShiftedPred` -> 2 M, unshifted -> 1 I ("ALU, basic, flagset") |
-| ADDG, SUBG; GMI; IRG; SUBP, SUBPS | 1 / 4 / I; 1 / 4 / I; 2 / 1 / M0; 1 / 4, 1 / 3 / I | MTE: outside the model ([D-8](#d-8)) |
+| ADDG, SUBG | 1 / 4 / I | `WriteI` (MTE, [D-8](#d-8)) |
+| GMI; IRG; SUBP, SUBPS | 1 / 4 / I; 2 / 1 / M0; 1 / 4, 1 / 3 / I | MTE: no scheduling data, dropped ([D-8](#d-8)) |
 
-Measured: `add x1, x1, w2, uxtb` + branch 1.0 -> 2.0. The research binaries contain 921 ADD/SUB/CMP
-with a UXTB or SXTB extend and 53,753 with any written extend. Test: `ArithmeticAndLogical`.
+Measured: `add x1, x1, w2, uxtb` + branch 2.0. Test: `ArithmeticAndLogical`.
 
 <a id="c-10"></a>
 **C-10. Sec. 3.5, divide and multiply (p.19, l.679-699).**
 
 | SOG group | SOG | Model |
 |---|---|---|
-| **Divide, W-form; X-form: SDIV, UDIV** | 5 to 12; 5 to 20 / 1/12 to 1/5; 1/20 to 1/5 / M0 (note 1) | latency 5, M0 1 cycle, divider 5 cycles (*fixed 2026-11-01*, `[a720_div_best]`, [D-1](#d-1), [D-3](#d-3); was 8 / 12 with M0 held 8 / 12 cycles) |
+| **Divide, W-form; X-form: SDIV, UDIV** | 5 to 12; 5 to 20 / 1/12 to 1/5; 1/20 to 1/5 / M0 (note 1) | latency 5, M0 1 cycle, divider 5 cycles (`[a720_div_best]`, [D-1](#d-1), [D-3](#d-3)) |
 | Multiply accumulate, W-form; X-form; long: MADD, MSUB, SMADDL, SMSUBL, UMADDL, UMSUBL | 2(1) / 1 / M0 (notes 2, 3) | `A720Wr_MAC` -> `A720Wr_MAC_M0` 2, M0 + `A720Rd_MAcc` (advance 1) |
 | MUL, MNEG, SMULL, SMNEGL, UMULL, UMNEGL (Ra = ZR, note 3) | 2 / 2 / M | `IsReg3ZeroPred` -> `A720Wr_MUL_M` 2, M |
 | Multiply high: SMULH, UMULH | 3 / 2 / M | `A720Wr_3c_M` |
 
 Note 2 (l.695-697), "Accumulator forwarding is not supported for consumers of 64 bit multiply high
 operations": `A720Rd_MAcc` names only the multiply writes. Forwarding between forms and from a MUL:
-[U-5](#u-5). Measured: `sdiv w1, w1, w2` + branch 8.0 -> 5.0; `udiv x1, x2, x3` + two `madd` +
-branch 14.0 -> 5.0; `madd x1, x2, x3, x1` + branch 1.0. The research binaries contain 8,803
-SDIV/UDIV and 461 SMULH/UMULH. Test: `DivideAndMultiply`.
+[U-5](#u-5). Measured: `sdiv w1, w1, w2` + branch 5.0; `udiv x1, x2, x3` + two `madd` +
+branch 5.0; `madd x1, x2, x3, x1` + branch 1.0. Test: `DivideAndMultiply`.
 
 <a id="c-11"></a>
 **C-11. Sec. 3.6, pointer authentication (p.20, l.712-750).**
-*Fixed 2026-11-01* (`[a720_pac]`).
+`[a720_pac]`.
 
 | SOG group | SOG | Model |
 |---|---|---|
 | Authenticate data address; instruction address: AUTDA, ..., AUTIASP, AUTIAZ, ... | 1 / 2 / M | `A720Wr_1c_M` |
-| Branch and link, register; branch, register; return, with PA: BLRAA, ..., BRAA, ..., RETAA, RETAB | 2 / 2 / M, B | `A720Wr_2c_M_B` |
+| Branch and link, register; branch, register; return, with PA: BLRAA, ..., BRAA, ..., RETAA, RETAB (printed "RETA, RETB", [I-5](#i-5)) | 2 / 2 / M, B | `A720Wr_2c_M_B` |
 | Compute PAC for data address; generic key; instruction address: PACDA, ..., PACGA, PACIA, ..., PACIASP, ... | 4 / 2 / M | `A720Wr_4c_M` |
 | Load register, with PA: LDRAA, LDRAB | 5 / 2 / M, L, I (note 2: I only for the pre-index writeback) | `A720Wr_5c_M_L`; writeback form + `WriteAdr` |
 | Strip PAC: XPACD, XPACI, XPACLRI | 1 / 2 / M | `A720Wr_1c_M` |
 
-Before: the hint-space forms (PACIASP, AUTIASP, XPACLRI, ...) took the hint row (S0, latency 1),
-PACIA/AUTIA took `WriteI`, and BLRAA, BRAA, RETAA, LDRAA, XPACD and XPACI had no scheduling data and
-were dropped. Note 1 (AUTH fail): [D-1](#d-1). The research binaries contain 143 PACIASP and 147
-AUTIASP (no other PAC instruction). Measured: `paciasp; autiasp` + branch 2.0 -> 5.0 (the LR
+The hint-space forms (PACIASP, AUTIASP, XPACLRI, ...) take these rows, not the hint row. Note 1 (AUTH fail): [D-1](#d-1). Measured: `paciasp; autiasp` + branch 5.0 (the LR
 recurrence 4 + 1). Test: `PointerAuthentication`.
 
 <a id="c-12"></a>
@@ -384,9 +369,8 @@ MOVK, MOVZ, RBIT, REV*, ASRV, LSLV, LSRV, RORV 1 / 4 / I: `WriteExtr`, `WriteIS`
 | Load pair, signed words: LDPSW | 4 / 3/2 / I, L | `A720Wr_LDPSW` (L 2 cycles, I 1) |
 | Load pair, post-index or pre-index, W; X; LDPSW | 4 / 3; 3/2; 3/2 / L, I | `WriteAdr` + the offset-form writes ([I-4](#i-4)) |
 
-"Level-1 Cache Hit 4 core cycles" (Table 4-4, l.3259): the model's `LoadLatency` is now 4 (was 3;
-not read by the A720 path). Acquire and exclusive loads: [U-7](#u-7). The research binaries contain
-748,300 LDP/LDNP and 758 LDPSW. Test: `Loads`.
+"Level-1 Cache Hit 4 core cycles" (Table 4-4, l.3259): the model's `LoadLatency` is 4 (not read by
+the A720 path). Acquire and exclusive loads: [U-7](#u-7). Test: `Loads`.
 
 <a id="c-14"></a>
 **C-14. Sec. 3.9, stores (p.23, l.866-895).**
@@ -411,8 +395,7 @@ and exclusive stores: [U-7](#u-7). Measured (test): four `str` 2.0 per iteration
 
 Note 2 (l.1002-1003): an FP multiply-accumulate "can potentially be issued 1 cycle after the FP
 multiply µOP has been issued", i.e. FMUL -> accumulator 1 ([docs.md](docs.md) 4.H). Measured (test):
-`fmadd d0, d1, d2, d0` 2.0; `fmul; fmadd (accumulator); fmov` 5.0 (1 + 4 + 0). The research binaries
-contain 43,309 FDIV and 6,366 FSQRT, 100,469 FMADD-family instructions. Test: `FpScalar`.
+`fmadd d0, d1, d2, d0` 2.0; `fmul; fmadd (accumulator); fmov` 5.0 (1 + 4 + 0). Test: `FpScalar`.
 
 <a id="c-16"></a>
 **C-16. Sec. 3.13, FP miscellaneous (p.25-26, l.1009-1048).**
@@ -445,16 +428,15 @@ results to FP/ASIMD pipelines" (l.1054-1055). Test: `FpLoadsAndStores`.
 | SOG group | SOG | Model |
 |---|---|---|
 | Store vector reg, unscaled; unsigned immed; register offset basic, extend; scale H, S/D; extend, scale H, S/D (B/H/S/D/Q) | 2 / 2 / L01, V | `A720Wr_FST` (two µOPs) |
-| **Store vector reg, register offset, scale, Q; extend, scale, Q** | 2 / 2 / I, L01, V | `A720Wr_STRQro`: `A720IsMemScaled` -> `A720Wr_FST_I`, else `A720Wr_FST` (*fixed 2026-11-01*, `[a720_strq_ro]`: the variant used `ScaledIdxPred`, which is true for every register-offset form, so the unscaled Q stores had an I µOP) |
+| **Store vector reg, register offset, scale, Q; extend, scale, Q** | 2 / 2 / I, L01, V | `A720Wr_STRQro`: `A720IsMemScaled` -> `A720Wr_FST_I`, else `A720Wr_FST` (`[a720_strq_ro]`: `ScaledIdxPred` is true for every register-offset form and would give the unscaled Q stores an I µOP) |
 | Store vector reg, post-index (B/H/S/D/Q); pre-index Q | 2 / 2 / L01, V, I | `WriteAdr` + `A720Wr_FST` |
-| **Store vector reg, pre-index, B/H/S/D** | **3** / 2 / L01, V, I | `WriteAdr` + `A720Wr_FST3` (*fixed*, `[a720_str_pre]`, [I-3](#i-3); was 2) |
+| **Store vector reg, pre-index, B/H/S/D** | **3** / 2 / L01, V, I | `WriteAdr` + `A720Wr_FST3` (`[a720_str_pre]`, [I-3](#i-3)) |
 | Store vector pair, immed offset, S; D; Q: STP, STNP | 2 / 2 / L01, V | `A720Wr_FST` |
 | Store vector pair, post/pre-index, S; D; Q | 2 / 2 / I, L01, V | `WriteAdr` + `A720Wr_FST` |
 
 "Scaled" is the S bit of the addressing mode (`AArch64_AM::getMemDoShift`), as for the Cortex-A76
-and A78. The data operands read `ReadST` ([B-1](#b-1)). The research binaries contain 2,428 STR Q
-with a register offset (none scaled) and 206 FP STR pre-index. Measured: three `str q, [xN, x2]` and
-an `add` + branch 1.5 before and after (the L01 bound). Test: `FpLoadsAndStores`.
+and A78. The data operands read `ReadST` ([B-1](#b-1)). Measured: three `str q, [xN, x2]` and
+an `add` + branch 1.5 (the L01 bound). Test: `FpLoadsAndStores`.
 
 <a id="c-19"></a>
 **C-19. Sec. 3.16, ASIMD integer (p.28-31, l.1185-1337).**
@@ -497,8 +479,7 @@ chain 2.0. Test: `Asimd`.
 <a id="c-21"></a>
 **C-21. Sec. 3.18, ASIMD BF16 (p.34, l.1499-1516).**
 BFCVTN 4 / 1/2 / V0: `A720Wr_4c_V0r2`; BFDOT 4(2), BFMLALB/T 4(2), BFMMLA 5(3) / 2 / V: `A720Wr_BF42`,
-`A720Wr_BF53` + `A720Rd_BF` (advance 2); BFCVT 3 / 1 / V0: `A720Wr_3c_V0`. Measured (test): `bfmmla`
-chain 3.0. None in the research binaries. Test: `Asimd`.
+`A720Wr_BF53` + `A720Rd_BF` (advance 2); BFCVT 3 / 1 / V0: `A720Wr_3c_V0`. Measured (test): `bfmmla` chain 3.0. Test: `Asimd`.
 
 <a id="c-22"></a>
 **C-22. Sec. 3.19, ASIMD miscellaneous (p.35-36, l.1529-1599).**
@@ -509,14 +490,13 @@ chain 3.0. None in the research binaries. Test: `Asimd`.
 | DUP gen reg | 3 / 1 / M0 | `A720Wr_3c_M0` |
 | SQXTN(2), SQXTUN(2), UQXTN(2) | 4 / 1 / V1 | `A720Wr_4c_V1` |
 | URECPE, URSQRTE D; Q | 3 / 1; 4 / 1/2 / V0 | `A720Wr_3c_V0`; `A720Wr_4c_V0r2` |
-| **FRECPE, FRSQRTE: D F32 and scalar forms**; D F16 and Q F32; Q F16 | 3 / 1; 4 / 1/2; 6 / 1/4 / V0 | `A720Wr_3c_V0` (also the scalar H forms, *fixed 2026-11-01*, `[a720_frecpe_scalar]`; they were 4, V0 2 cycles); `A720Wr_4c_V0r2`; `A720Wr_6c_V0r4` ([U-8](#u-8)) |
+| **FRECPE, FRSQRTE: D F32 and scalar forms**; D F16 and Q F32; Q F16 | 3 / 1; 4 / 1/2; 6 / 1/4 / V0 | `A720Wr_3c_V0` (also the scalar H forms, `[a720_frecpe_scalar]`); `A720Wr_4c_V0r2`; `A720Wr_6c_V0r4` ([U-8](#u-8)) |
 | FRECPX; FRECPS, FRSQRTS | 3 / 1 / V0; 4 / 2 / V | `A720Wr_3c_V0`; `A720Wr_4c_V` |
 | TBL 3; 4 regs; TBX 2; 3; 4 regs | 4 / 1; 4 / 2/3; 4 / 1; 6 / 2/3; 6 / 1/2 / V | V held 2, 3, 2, 3, 4 cycles |
 | UMOV, SMOV | 2 / 1 / V | `A720Wr_2c_Vt1` (V 2 cycles) |
 | INS gen reg | 5 / 1 / M0, V | `A720Wr_5c_M0V_INS` |
 
-Measured: `frecpe h0, h0` + branch 4.0 -> 3.0. The research binaries contain 79 TBL and no FRECPE.
-Test: `Asimd`.
+Measured: `frecpe h0, h0` + branch 3.0. Test: `Asimd`.
 
 <a id="c-23"></a>
 **C-23. Sec. 3.20, ASIMD loads (p.37-39, l.1612-1735).**
@@ -524,9 +504,9 @@ One `InstRW` per SOG row, one µOP whose L (and, where the row names V, V) cycle
 throughput; the writeback forms add `WriteAdr` ("(ASIMD load, writeback form) I", l.1729-1735).
 Checked by script: all 202 LD1-LD4 opcodes (with their post-index forms) have the latency and the
 throughput of their row in `mca-insts-info`. Examples: LD1 one register 6 / 3 / L; LD1 four registers 7 / 3/4 (L 4 cycles);
-LD1 one lane, LD1R... 8 / 2 / L, V; LD3 Q 10 / 2/3 (V 3 cycles); LD4 multiple 8 / 1/2 (L 6 cycles).
-[D-6](#d-6), [U-2](#u-2). The research binaries contain 415 LD1, 124 LD1R, 12 LD2, 7 LD3 and 10 LD4.
-Test: `AsimdLoadsAndStores`.
+LD1 one lane 8 / 2 / L, V; LD1R 6 / 3 / L; LD3 Q 10 / 2/3 (V 3 cycles); LD4 multiple 8 / 1/2 (L 6
+cycles).
+[D-6](#d-6), [U-2](#u-2). Test: `AsimdLoadsAndStores`.
 
 <a id="c-24"></a>
 **C-24. Sec. 3.21, ASIMD stores (p.39-40, l.1739-1816).**
@@ -534,7 +514,7 @@ One `InstRW` per SOG row, L01 held `2 / T` cycles and V one cycle; all 138 ST1-S
 by script as for [C-23](#c-23). Examples: ST1 one or two registers 2 / 2; ST1 three or four registers 2
 / 1 (L01 2 cycles); ST3 Q B/H/S 4 / 2/3 (3 cycles); ST4 Q B/H/S 4 / 1/2 (4 cycles); ST4 Q D 2 / 1.
 Writeback: `WriteAdr`. Every store write has two µOPs ([C-7](#c-7)); the data operands read `ReadST`
-([B-1](#b-1)). The research binaries contain 272 ST1, 15 ST2, 10 ST3 and 4 ST4. Test:
+([B-1](#b-1)). Test:
 `AsimdLoadsAndStores`.
 
 <a id="c-25"></a>
@@ -544,24 +524,22 @@ SHA1SU0/1, SHA256SU0/1, SHA512H/H2/SU0/SU1, SM3* 2 / 1 / V0: `A720Wr_2c_V0r1`; S
 SHA256H/H2, SM4E, SM4EKEY 4 / 1 / V0: `A720Wr_4c_V0r1`; BCAX, EOR3, RAX1, XAR 2 / 2 / V ("executed
 from the ALU pipeline", note 2): default 2, V. Sec. 4.6 (p.60, l.2939-2940): "two
 AESE/AESMC/AESD/AESIMC instruction every cycle (fully pipelined) with an execution latency of two
-cycles". AES pairs: [U-6](#u-6). Decoding: [X-1](#x-1). None in the research binaries. Test:
+cycles". AES pairs: [U-6](#u-6). Decoding: [X-1](#x-1). Test:
 `CryptoAndCrc`.
 
 <a id="c-26"></a>
 **C-26. Sec. 3.23, CRC (p.41, l.1871-1878).**
-*Fixed 2026-11-01* (`[a720_crc]`).
+`[a720_crc]`.
 CRC32, CRC32C 2 / 1 / M0, note 1: "late forwarding of the result from a producer µOP to a consumer µOP.
 This results in a 1 cycle reduction in latency as seen by the consumer": `A720Wr_CRC` 2, M0 +
-`A720Rd_CRC` (advance 1 on the accumulated CRC, Rn). Before: `WriteISReg`, 1 on I. Measured (test):
-`crc32x w1, w1, x3` 1.0 per iteration (2 - 1), two independent chains 2.0 (M0). None in the research
-binaries. Test: `CryptoAndCrc`.
+`A720Rd_CRC` (advance 1 on the accumulated CRC, Rn). Measured (test):
+`crc32x w1, w1, x3` 1.0 per iteration (2 - 1), two independent chains 2.0 (M0). Test: `CryptoAndCrc`.
 
 ---
 
 ## 4. Not compatible with the SOG (N)
 
-None open. The differences found by this audit where the SOG states a value unambiguously were
-fixed; they are the C items marked *fixed 2026-11-01*.
+None open. Where the SOG states a value unambiguously, the model follows it (section 3).
 
 ---
 
@@ -589,39 +567,35 @@ may use the other unit meanwhile, which the SOG neither states nor excludes.
 
 <a id="d-3"></a>
 **D-3. The integer divider is a resource of its own.**
-*Introduced 2026-11-01* (`[a720_dividers]`).
+`[a720_dividers]`.
 SOG: "Integer divides are performed using an iterative algorithm and block any subsequent divide
 operations until complete" (sec. 3.5 note 1, l.693); "Each issue pipeline can accept one µOP per
 cycle" (l.477). Implementation: a divide takes M0 for one cycle and holds `A720UnitIDiv` for its
-occupancy; before, it held M0 itself for 8 / 12 cycles, blocking every other M0 µOP (MADD, SCVTF,
-FMOV and DUP from a GPR, CRC). Reason: the SOG names what a divide blocks (later divides); the lower
-estimate is preferred (project policy); the decision of the Cortex-A76 and A78 audits
-([a78-sog.md](a78-sog.md) D-3). FP divide and square root are "fully pipelined" (l.1001, l.1495) and
-need no such resource. Measured: `udiv` + two `madd` + branch 14.0 -> 5.0 (with the latency of D-1).
+occupancy, so that it does not block the other M0 µOPs (MADD, SCVTF, FMOV and DUP from a GPR, CRC).
+Reason: the SOG names what a divide blocks (later divides); the lower estimate is preferred (project
+policy); the decision taken for the Cortex-A76 and A78 ([a78-sog.md](a78-sog.md) D-3). FP divide and square root are "fully pipelined" (l.1001, l.1495) and
+need no such resource. Measured: `udiv` + two `madd` + branch 5.0 (with the latency of D-1).
 Test: `DivideAndMultiply`.
 
 <a id="d-4"></a>
 **D-4. FP conversions with operand and result in FP registers: 3 / 1 / V0.**
-*H forms introduced 2026-11-01* (`[a720_fp_cvt_scalar]`).
+`[a720_fp_cvt_scalar]` (H forms).
 SOG: no row names the scalar forms of FCVT[AMNPZ][SU], SCVTF, UCVTF whose operand and result are FP
 registers (`scvtf d0, d1`, `fcvtzs h0, h1`, also with `#fbits`). The rows of these mnemonics give 3 /
 1 (V0 from a vector register, M0 from a GPR, l.1013-1023), the ASIMD rows 3 / 1 / V0 for the D-form
 F32 and Q-form F64, 4 / 1/2 for D-form F16 and Q-form F32, 6 / 1/4 for Q-form F16 (l.1373-1405).
 Implementation: every scalar form takes the 3 / 1 / V0 row, the lowest the SOG gives for these
-mnemonics, as for the Cortex-A76 and A78 (D-4 there). The S/D forms already did; the H forms were 4 /
-V0 two cycles (FCVT*, `#fbits` forms) or 2 on V (SCVTF/UCVTF H, no row). The research binaries
-contain 10,434 such conversions, none in H. Measured: `scvtf h0, h0` + branch 2.0 -> 3.0. Test:
+mnemonics, as for the Cortex-A76 and A78 (D-4 there); the tag marks the H forms (FCVT*, `#fbits`
+forms, SCVTF/UCVTF H), which would otherwise take an ASIMD F16 row or no row. Measured: `scvtf h0, h0` + branch 3.0. Test:
 `FpScalar`.
 
 <a id="d-5"></a>
 **D-5. Scalar ASIMD forms take the row of their mnemonic.**
-*Introduced 2026-11-01* (`[a720_asimd_scalar]`).
+`[a720_asimd_scalar]`.
 SOG: the ASIMD rows list mnemonics (SHL, SSHR, USHR, SLI, SRI, SRSHR, URSHR, SSRA, USRA, SRSRA,
 URSRA, SQSHL, UQSHL, SQSHLU, SQSHRN, ..., SQDMLAL, SQDMLSL, SQDMULL, FMULX), without saying whether
 the scalar forms (`shl d0, d1, #3`, `sqdmlal s0, h1, h2`, `fmulx d0, d1, d2`) belong to them.
-Implementation: they take the row of their mnemonic, as for the Cortex-A76 and A78 (D-5 there).
-Before: the default 2 on V (the scalar by-register shifts and SQDMULH already took their rows). The
-research binaries contain 64 scalar shifts by immediate. Measured (test): `ssra d0, d1, #3` chain
+Implementation: they take the row of their mnemonic, as for the Cortex-A76 and A78 (D-5 there). Measured (test): `ssra d0, d1, #3` chain
 1.0. Test: `Asimd`.
 
 <a id="d-6"></a>
@@ -652,29 +626,28 @@ so these instructions have no scheduling data. MTE (Table 3-3 ADDG/SUBG/IRG/GMI/
 sec. 3.10, 3.11, l.900-954; sec. 4.16, 4.17, l.3302-3362): `HasMTE` is unsupported; ADDG/SUBG take
 `WriteI` (1, I, as printed), STGPi, STGPpre and STGPpost have scheduling data (the store-pair class;
 they match the rows of l.942-948: 1 / 2 / L01, ID, plus I for the write-back forms, two or three
-µOPs), the others (IRG, GMI, SUBP(S), LDG, STG, ST2G, STZG, STZ2G, STGM, STZGM) are dropped. The research binaries contain no SVE, SME or MTE
-instruction (no Z or P register operand, no IRG/STG/LDG). Sec. 4.2, 4.3, 4.8 (aligned 32-byte
+µOPs), the others (IRG, GMI, SUBP(S), LDG, LDGM, STG, ST2G, STZG, STZ2G, STGM, STZGM) are dropped. Sec. 4.2, 4.3, 4.8 (aligned 32-byte
 regions, l.3045-3060), 4.9, 4.15 give advice without a cost; sec. 4.13, 4.14 give TLB and L2/L3
 latencies, which the load rows (L1 hit, [D-1](#d-1)) do not use. Not modelled.
 
 <a id="d-9"></a>
 **D-9. MOV Xd, #{12{1'b0},imm[3:0]}: immediates 0 to 15, unshifted.**
 SOG l.3188, l.3192: the immediate form is written as a 16-bit field whose upper 12 bits are zero.
-Implementation (the 2026-10-30 rewrite): `A720ZeroMove` accepts MOVZ[WX]i with an immediate 0 to 15
+Implementation: `A720ZeroMove` accepts MOVZ[WX]i with an immediate 0 to 15
 and shift 0; a shifted MOVZ (`movz x0, #1, lsl #16`) and MOVN are not zero latency. Every
-zero-latency form still takes one Mop and one µOP (dispatch), no pipeline. The research binaries
-contain 305,408 `mov #1..#15`. Test: `ZeroLatencyInstructions`, `FacileTest.A720MovzZeroLatencyImmediateRange`.
+zero-latency form still takes one Mop and one µOP (dispatch), no pipeline. Test: `ZeroLatencyInstructions`, `FacileTest.A720MovzZeroLatencyImmediateRange`.
 
 <a id="d-10"></a>
 **D-10. Load pair: the second register has the row's latency and no µOP.**
-*Introduced 2026-11-01* (`[a720_ldp_hi]`).
+`[a720_ldp_hi]`.
 SOG: the load latencies "represent the maximum latency to load all the registers written by the
 instruction" (l.783-784, l.1053-1054); the µOP count is not printed. Implementation: the second
 destination of LDP W/X, LDPSW and the FP pairs (`A720Wr_LDHi_0`, 4; `A720Wr_FLDHi`, 6) and the
-generic `WriteLDHi` (4, no pipeline) take no µOP; the row's pipelines are those of the first write.
-Before: one µOP each, and `WriteLDHi` (LDXP, LDAXP) held L one more cycle. As for the Cortex-A76 and
-A78 (D-10 there). Effect: one µOP less per LDP in the issue bound and the MLP window (748,300 LDP/LDNP
-in the research binaries). Test: `Loads`, `FpLoadsAndStores`.
+generic `WriteLDHi` (LDXP, LDAXP; 4, no pipeline) take no µOP; the row's pipelines are those of the
+first write. The Cortex-A78 does the
+same ([a78-sog.md](a78-sog.md) D-10); the Cortex-A76 also gives the second register the row's
+latency, with no µOP for LDP W and LDPSW but an L µOP for LDP X and the FP pairs ([a76-sog.md](a76-sog.md)
+C-11, C-15); the Cortex-X1 keeps the L µOP of LDP X ([x1-sog.md](x1-sog.md) D-10). Effect: one µOP less per LDP in the issue bound and the MLP window. Test: `Loads`, `FpLoadsAndStores`.
 
 <a id="d-11"></a>
 **D-11. Fused pairs: the second instruction takes nothing; AES pairs are not masked.**
@@ -688,13 +661,11 @@ is left to [U-6](#u-6). Test: `Fusion`.
 
 <a id="d-12"></a>
 **D-12. System instructions: latency 1, no pipeline.**
-*Introduced 2026-11-01* (`[a720_sys]`).
+`[a720_sys]`.
 SOG: no row for MRS, MSR, DMB, DSB, ISB or other system instructions; sec. 4.10 (p.63-64,
 l.3080-3145) lists non-speculative, in-order and flush constraints without cycle counts
 ([U-9](#u-9)). Implementation: `WriteSys` and `WriteBarrier` latency 1, no pipeline, the lower
-estimate (project policy), as the Cortex-A78 model. Before: latency 10 on S0 (`WriteSys`) and on L
-(`WriteBarrier`), a value without a source. The research binaries contain 10 MRS and no barrier.
-Test: `SystemInstructions`.
+estimate (project policy), as the Cortex-A78 model. Test: `SystemInstructions`.
 
 ---
 
@@ -740,8 +711,7 @@ measurement.
 **U-4. ADD/SUB (extended register) with an identity extend.**
 SOG "ALU, extend and shift ADD{S}, SUB{S} 2 2 M" (l.642). Unclear: whether the extended-register form
 with a zero shift and a full-width extend (UXTX for X, UXTW for W), which assemblers write as `add
-x0, sp, x1`, counts as "extend". Current handling: 2 on M (all extended forms, [C-9](#c-9)). Impact:
-the research binaries contain 25,199 such instructions; at 1 / 4 / I they would be cheaper. How to
+x0, sp, x1`, counts as "extend". Current handling: 2 on M (all extended forms, [C-9](#c-9)). Impact: at 1 / 4 / I such instructions would be cheaper. How to
 settle: hardware measurement or an owner decision (the same question is U-4 of the A78 document).
 
 <a id="u-5"></a>
@@ -750,41 +720,40 @@ SOG sec. 3.5 note 2 (l.695-696) and sec. 3.16 note 1 (l.1332-1334): "late-forwar
 operands from similar µOPs"; sec. 4.7 Table 4-1 note 2 (l.2994): "ASIM/SVE INT multiply accumulate
 only fast forward to accumulation source". Unclear: whether a MUL (Ra = ZR, on M) or SMULL counts as a
 similar µOP for a MADD accumulator, and whether an ASIMD MUL forwards to an MLA accumulator. Current
-handling (the 2026-10-30 rewrite): `A720Rd_MAcc` (advance 1) from `A720Wr_MAC_M0` and `A720Wr_MUL_M`,
-`A720Rd_VAcc1` / `A720Rd_VAcc2` from `A720Wr_VMUL` (ASIMD MUL and MLA alike), i.e. the lower
-estimate; the A78 model does not forward from a MUL (its U-5). How to settle: hardware measurement.
-Test: `DivideAndMultiply`.
+handling: `A720Rd_MAcc` (advance 1) from `A720Wr_MAC_M0` and `A720Wr_MUL_M`,
+`A720Rd_VAcc1` / `A720Rd_VAcc2` from `A720Wr_VMUL` (ASIMD MUL, SQDMULH, SMULL, UMULL, SQDMULL and the
+multiply-accumulates alike), i.e. any to any, the lower estimate; SMULH/UMULH are not forwarded
+(note 2). Measured (test): `mul x1, x1, x2; madd x1, x3, x4, x1` 3.0 (1 + 2), `smulh` instead of
+`mul` 5.0; `mul v0.4s, v0.4s, v1.4s; mla v0.4s, v2.4s, v3.4s` 5.0 (4 + 1); `mla; smlal` on one
+accumulator 2.0. The Cortex-X1 takes the same reading ([x1-sog.md](x1-sog.md) U-5). How to settle:
+hardware measurement. Test: `DivideAndMultiply`, `Asimd`.
 
 <a id="u-6"></a>
 **U-6. AESE/AESMC and AESD/AESIMC pairs.**
 SOG sec. 4.11 (l.3153-3154) lists them as fused; sec. 4.6 (l.2939-2955): two AES instructions per
 cycle with latency 2, dependent pairs "are higher performance when they are adjacent ... since they
 are fused", "virtually 4 instructions issue rate" with four interleaved chunks; no latency for the
-pair. Current handling: no fusion and no forwarding; each AES instruction 2 / 2 / V. None in the
-research binaries. How to settle: hardware measurement.
+pair. Current handling: no fusion and no forwarding; each AES instruction 2 / 2 / V. How to settle: hardware measurement.
 
 <a id="u-7"></a>
 **U-7. Exclusives, acquire/release, LSE atomics.**
 The SOG has no rows for LDAR/LDAPR, STLR, LDXR/LDAXR/LDXP, STXR/STLXR/STXP or the LSE atomics.
 Current handling: stock classes (LDAR, LDAPR, LDXR 4 on L; STLR as a store with `ReadST`; STXR/STLXR
 latency 5); `WriteAtomic` is `Unsupported`, so InstrBuilder drops every LSE atomic with a `[WARN]`
-([docs.md](docs.md) section 2.F). The research binaries contain 139 LDAR and no other such
-instruction; the only dropped opcode in the A720 runs is UDF. How to settle: a project decision or
+([docs.md](docs.md) section 2.F). How to settle: a project decision or
 hardware measurement (as for the Cortex-A76 and A78, U-7 there).
 
 <a id="u-8"></a>
 **U-8. FRECPE, FRSQRTE, Q-form F64.**
 SOG sec. 3.19 (l.1551-1558): rows for D-form F32 and scalar forms, D-form F16 and Q-form F32, Q-form
-F16; none for Q-form F64 (`frecpe v0.2d`). Current handling: 3 / 1 / V0 (the lowest row). None in the
-research binaries.
+F16; none for Q-form F64 (`frecpe v0.2d`). Current handling: 3 / 1 / V0 (the lowest row).
 
 <a id="u-9"></a>
 **U-9. Special-register access.**
 SOG sec. 4.10 (p.63-64, l.3080-3145): reads and writes of most special registers are non-speculative
 and/or in order, an FPCR write may act as a barrier or flush, FPSR writes stall at dispatch while
 another is pending, FPSR reads wait for prior flag updates to retire; no cycle counts. NZCV and SP
-"are fully renamed" (l.3110, l.3141), which matches. Current handling: [D-12](#d-12); no
-serialisation. The research binaries contain 10 MRS.
+"are fully renamed" (l.3110, l.3141), which matches. Current handling: [D-12](#d-12); no serialisation.
 
 <a id="u-10"></a>
 **U-10. Fusion: immediate restrictions and other restrictions.**
@@ -792,16 +761,14 @@ SOG sec. 4.11 (l.3170-3171): "For CMP, CMN, TST and BICS, there are restrictions
 for both instructions of the pair for which fusion is supported. Other particular restrictions apply
 on instruction fusion." The restrictions are not given. Also unclear: whether "Rn != ZR" (printed on
 the B.cond row only, l.3156) applies to the CSEL/CSET rows. Current handling: no immediate
-restriction; Rn != ZR only on the B.cond row ([docs.md](docs.md) 4.C), i.e. the lower estimate.
-Impact: about 710,000 compare + B.cond pairs in the research binaries. How to settle: hardware
+restriction; Rn != ZR only on the B.cond row ([docs.md](docs.md) 4.C), i.e. the lower estimate. Impact: every compare directly followed by a B.cond. How to settle: hardware
 measurement.
 
 <a id="u-11"></a>
 **U-11. Fusion: BTI + "Integer DP/BR/BLR/RET/B uncond/CBZ/TBZ".**
 SOG sec. 4.11 (l.3164). Unclear: which instructions "Integer DP" covers, and whether the BTI or the
 second instruction is absorbed. Current handling: not fused; a BTI takes a Mop and a µOP but no
-pipeline ([C-3](#c-3)). Impact: 99 BTI in the research binaries, at function entries and branch
-targets. How to settle: an owner decision.
+pipeline ([C-3](#c-3)). Impact: BTI occurs at function entries and branch targets. How to settle: an owner decision.
 
 <a id="u-12"></a>
 **U-12. Integer loads, note 2: "Execution Latency is 5 ... when scale with aligned offset of 128 bits".**
@@ -832,8 +799,7 @@ throughput column (V0 held 4, 2, 8, 4, 2 cycles) ([docs.md](docs.md) 4.I).
 **I-3. FP store, pre-index, B/H/S/D: latency 3.**
 Sec. 3.15 (p.27, l.1124-1125, checked in the PDF): "Store vector reg, immed pre-index, B/H/S/D-form
 STR 3 2 L01, V, I", against 2 for the post-index forms and the Q-form pre-index (l.1120-1127).
-Implementation: as printed (C-18). Effect: only on store -> load edges; 206 such stores in the
-research binaries.
+Implementation: as printed (C-18). Effect: only on store -> load edges.
 
 <a id="i-4"></a>
 **I-4. LDPSW post/pre-index: "I, L" like the offset form.**
@@ -847,8 +813,8 @@ there).
 "VCVTAU" in AArch64 rows (l.1385, l.1396; FCVTAU meant); "SM3PARTW2SM 3SS1" (l.1858-1859;
 SM3PARTW2, SM3SS1 meant); "Table 4-3" for both the read and the write table (l.3094, l.3125);
 "Table A-8" twice (l.3678, l.3687); "ASIM/SVE" (l.2994); the second example of sec. 4.7 (l.3038-3040)
-gives the code but not its effect; Table 2-1 "AES µOPs." (l.552). Implementation: the evident
-meaning.
+gives the code but not its effect; Table 2-1 "AES µOPs." (l.552); "RETA, RETB" for RETAA, RETAB
+(l.730, [C-11](#c-11)). Implementation: the evident meaning.
 
 ---
 
@@ -861,8 +827,7 @@ optional, l.426): `aese v0.16b, v1.16b` fails to assemble in the unit tests ("in
 aes") unless `.arch_extension aes` is given. For a binary, `mca_tool` does not decode them
 for `cortex-a720` either: a loop of `aese`, `pmull v.1q`, `sha256h` or `eor3` is analysed as the loop
 branch alone, and `sm4e` is decoded as the SVE gather `GLD1B_S_IMM`, which has no scheduling data and
-is dropped with a `[WARN]`. The crypto rows of the instruction tables are therefore checked through
-the assembler path only. None occurs in the research binaries. Not changed.
+is dropped with a `[WARN]`. The crypto rows of the instruction tables are therefore checked through the assembler path only. Outside the A720 model.
 
 <a id="x-2"></a>
 **X-2. MCA gives every call latency 0.**
@@ -883,28 +848,27 @@ operands ([B-1](#b-1)) therefore shows only in the model data.
 
 <a id="b-1"></a>
 **B-1. Store data is read one cycle late.**
-*Introduced 2026-11-01* (`[a720_from_a55_store_data]`). **Not SOG-based.**
+`[a720_from_a55_store_data]`. **Not SOG-based.**
 A720 SOG: stores are split into address and data µOPs (l.867-868, l.1110, l.1740); no statement on
 when the data operand is needed. The project decided for the Cortex-A55 (SOG-based there) and the
 Cortex-A520 (borrowed) that store data is read one cycle late, and applied it to the Cortex-A76 and
 A78 for consistency ([a78-sog.md](a78-sog.md) B-1); it is applied to the A720 likewise.
-Implementation: `ReadAdvance<ReadST, 1>` (was 0), and `ReadST` on the data operands of every store
+Implementation: `ReadAdvance<ReadST, 1>`, and `ReadST` on the data operands of every store
 form (integer STR/STUR/STTR/STLR/STLLR, register offset, pre/post, STP/STNP; FP STR/STUR/STP of every
 addressing mode; the `Vt` of ST1-ST4, with the lane index of the one-lane forms reading `ReadDefault`
-in between); STXR/STXP and their release forms have none. Effect: only Facile's store -> load memory
+in between); STXR/STXP have none; the release forms STLXR/STLXP read `ReadST` on the data (with their stock
+writes), as the other cores do. Effect: only Facile's store -> load memory
 edges, and only for producers of latency 2 or more. Measured: `ldr x1, [x0]; str x1, [x0]` + branch
-5.0 -> 4.0; with Q registers 8.0 -> 7.0. To be revisited when an A720 statement or measurement
+4.0; with Q registers 7.0. To be revisited when an A720 statement or measurement
 appears. Test: `BorrowedStoreDataNeededLater`.
 
 ---
 
 ## 10. Reproducing the cycle counts quoted here
 
-The cycles/iteration figures that are not from `tests/a720_sog_test.cpp` were measured by the author
-on 2026-11-01 with private builds (CMake, Release; not `build/`): "before" is the working tree before
-this audit, "after" the working tree with its changes. Each loop is assembled, linked and analysed
-with the invocation of the research for the A720, plus `--fractional-cycles` (the unrounded Facile
-estimate) and `--facile-reason`:
+The cycles/iteration figures that are not from `tests/a720_sog_test.cpp` are Facile estimates of
+`mca_tool`. Each loop is assembled, linked and analysed with the A720 invocation, plus
+`--fractional-cycles` (the unrounded Facile estimate) and `--facile-reason`:
 
 ```sh
 # body: the instructions of one iteration, e.g. "sdiv w1, w1, w2"
@@ -916,10 +880,8 @@ mca_tool --mcpu=cortex-a720 --mtriple=aarch64 --dependency ooo --facile --fracti
 # which bound decided it (inst, exec, prec)
 ```
 
-The loop branch `b 1b` is part of every body. The research invocation (without the last two flags)
-is `mca_tool --merge-same-header --dependency ooo --mcpu cortex-a720 --facile <binary>`. Instruction
-counts "in the research binaries" are mnemonic/operand counts of `aarch64-linux-gnu-objdump -d` over
-the 46 binaries. Per-instruction values: `mca-insts-info --mtriple=aarch64 --mcpu=cortex-a720`, or the
+The loop branch `b 1b` is part of every body. The invocation for a binary (without the last two
+flags) is `mca_tool --merge-same-header --dependency ooo --mcpu cortex-a720 --facile <binary>`. Per-instruction values: `mca-insts-info --mtriple=aarch64 --mcpu=cortex-a720`, or the
 `A720SogTest.Dump` test, which prints opcode, latencies, µOPs, resource cycles and ReadAdvance entries
 for the instructions in `$A720_DUMP` (separated by `;`). Re-measure before quoting a number.
 
@@ -928,7 +890,7 @@ for the instructions in `$A720_DUMP` (separated by `;`). Re-measure before quoti
 ## 11. Maintaining this document
 
 * Update an item when the SOG reading or the implementation changes. IDs run from 1 without gaps
-  within each category, in the order of the items; an item whose difference has been fixed becomes a
+  within each category, in the order of the items; an item whose difference is resolved becomes a
   C item, and the code, tests and other documents that name an ID are updated with it.
 * When a deviation is introduced on purpose, add a D item, and tag the code with a comment that names
   the ID.
@@ -939,5 +901,5 @@ for the instructions in `$A720_DUMP` (separated by `;`). Re-measure before quoti
 * Evaluation results (accuracy metrics, totals over benchmark sets) are not recorded in this
   document; cycles/iteration only when reproduced with `mca_tool` as in section 10.
 * [docs.md](docs.md) holds the rest of the technical documentation; [a55-sog.md](a55-sog.md),
-  [a520-sog.md](a520-sog.md), [a76-sog.md](a76-sog.md) and [a78-sog.md](a78-sog.md) are the
-  counterparts of this document for the other cores. [README.md](README.md) lists the documents.
+  [a520-sog.md](a520-sog.md), [a76-sog.md](a76-sog.md), [a78-sog.md](a78-sog.md) and
+  [x1-sog.md](x1-sog.md) are the counterparts of this document for the other cores. [README.md](README.md) lists the documents.

@@ -24,28 +24,11 @@ void applyA55InstructionAdaptations(llvm::mca::Instruction &Inst, const llvm::MC
             MutableDesc.MaxLatency = 1;
         }
     }
-    if (false && (opc == llvm::AArch64::Bcc || opc == llvm::AArch64::B)) {  // [a55_td_fix U] disabled: no SOG basis (SOG 4.2: B 1, 1/cycle)
-        llvm::mca::InstrDesc &MutableDesc = const_cast<llvm::mca::InstrDesc &>(Inst.getDesc());
-        for (auto &W : MutableDesc.Writes) {
-            W.Latency = 0;
-        }
-        MutableDesc.MaxLatency = 0;
-        MutableDesc.Resources.clear();
-        MutableDesc.UsedProcResUnits = 0;
-        MutableDesc.UsedProcResGroups = 0;
-        MutableDesc.UsedBuffers = 0;
-    }
+    // [a55_td_fix U] Branches (B, B.cond) keep the latency and resources the model
+    // gives them: the SOG gives them no special treatment (SOG 4.2: B 1, 1/cycle).
 }
 
-uint64_t applyA55BranchOverlapCorrection(uint64_t Cycles, uint64_t SteadyRetired, size_t RegionInstrs) {
-    return Cycles;  // [a55_td_fix U] -0.5 cycle/iteration correction disabled (no SOG basis)
-    if (RegionInstrs == 0)
-        return Cycles;
-    unsigned NumSteadyIterations = SteadyRetired / RegionInstrs;
-    if (NumSteadyIterations > 0) {
-        double correctedCycles = static_cast<double>(Cycles) - (static_cast<double>(NumSteadyIterations) * 0.5);
-        if (correctedCycles < 1.0) correctedCycles = 1.0;
-        return static_cast<unsigned>(correctedCycles + 0.5);
-    }
-    return Cycles;
+uint64_t applyA55BranchOverlapCorrection(uint64_t Cycles, uint64_t /*SteadyRetired*/,
+                                         size_t /*RegionInstrs*/) {
+    return Cycles;  // [a55_td_fix U] no -0.5 cycle/iteration correction (no SOG basis)
 }

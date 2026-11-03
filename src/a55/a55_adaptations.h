@@ -11,13 +11,12 @@
 
 // Adjusts the instruction descriptor built from `MCI`: shift-less register-shifted
 // ALU ops take one cycle (redundant with the WriteISReg variant of
-// AArch64SchedA55.td, kept as a no-op safety net).  The former "branches are free"
-// override (zero latency, no resources for B/B.cc) is disabled: no SOG basis
-// (SOG 4.2: B 1, throughput 1).
+// AArch64SchedA55.td, kept as a no-op safety net).  Branches are left as the
+// model gives them (SOG 4.2: B 1, throughput 1; docs/a55-sog.md C-12).
 void applyA55InstructionAdaptations(llvm::mca::Instruction &Inst, const llvm::MCInst &MCI);
 
-// Formerly subtracted 0.5 cycle per steady-state iteration for an assumed
-// branch-predictor overlap.  Disabled (no SOG basis): returns `Cycles` unchanged.
+// Returns `Cycles` unchanged: no branch-overlap correction is applied (the SOG
+// gives none; docs/a55-sog.md C-12).
 uint64_t applyA55BranchOverlapCorrection(uint64_t Cycles, uint64_t SteadyRetired, size_t RegionInstrs);
 
 #endif // A55_A55_ADAPTATIONS_H

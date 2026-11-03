@@ -3,11 +3,10 @@
 
 #include "llvm/ADT/StringRef.h"
 
-// Per-CPU knowledge that LLVM's scheduling model cannot express and that used
-// to be spread over `CPU == "cortex-a78" || CPU == "cortex-a78ae" || ...`
-// ladders in the frontend, the Facile predictor, the sched-model installer, the
-// MCA driver and a test tool.  The table lives in cpu_traits.cpp; adding a CPU or a
-// CPU variant (e.g. cortex-a78c) is one line there.
+// Per-CPU knowledge that LLVM's scheduling model cannot express, used by the
+// frontend, the Facile predictor, the sched-model installer and the MCA driver
+// instead of comparing CPU names.  The table lives in cpu_traits.cpp; adding a
+// CPU or a CPU variant (e.g. cortex-a78c) is one line there.
 
 // Which locally generated sched model (ModifiedTarget/AArch64/*.td) is
 // installed for a CPU.  None = libLLVM's own stock model is left in place.

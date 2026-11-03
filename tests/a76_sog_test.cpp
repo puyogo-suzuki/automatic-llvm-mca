@@ -1,5 +1,5 @@
 // Cortex-A76: values pinned to the Arm Cortex-A76 Software Optimization Guide
-// (PJDOC-466751330-7215, Version 10.0, "SOG" below; text copy in tmp/a76sog.txt, "l.N" = line N).
+// (PJDOC-466751330-7215, Version 10.0, "SOG" below; "l.N" = line N of a text extraction of the guide).
 // The items (C-n, D-n, ...) are those of docs/a76-sog.md.
 //
 // Two kinds of checks:
@@ -10,101 +10,23 @@
 //    cpu_traits.cpp, store -> load memory edges on), with the expected value worked out by hand
 //    from the SOG in each comment.
 //
-// The context is built here rather than with AArch64TestContext("cortex-a76") alone: that
-// constructor leaves cortex-a76 on libLLVM's stock NeoverseN1Model (tests/test_support.h,
-// docs/a76-sog.md X-1), while mca_tool installs the local model.
+// The context is a LocalModelContext (tests/sog_test_support.h), not
+// AArch64TestContext("cortex-a76") alone: that constructor leaves cortex-a76 on libLLVM's stock
+// NeoverseN1Model (tests/test_support.h, docs/a76-sog.md X-1), while mca_tool installs the local model.
 
-#include "test_support.h"
-
-#include <map>
-#include <string>
-#include <vector>
+#include "sog_test_support.h"
 
 namespace {
 
-// AArch64TestContext with the scheduling model mca_tool installs for cortex-a76
-// (what frontend.cpp's initTarget() does: remap, install, wrap).
-struct A76Context : AArch64TestContext {
-    A76Context() : AArch64TestContext("cortex-a76") {
-        llvm::remapSchedClassIndices(*MCII, "cortex-a76");
-        llvm::installLocalSchedModel(*STI, "cortex-a76");
-        STI = llvm::wrapCustomSubtargetInfo(std::move(STI), "cortex-a76");
-    }
-};
+constexpr const char *kCpu = "cortex-a76";
 
-struct A76InstInfo {
-    unsigned MaxLatency = 0;
-    unsigned NumMicroOps = 0;
-    std::vector<unsigned> WriteLatencies;  // per def, in operand order (implicit defs last)
-    // Total resource cycles per resource name, as the scheduling tables list them (a use of a
-    // pipeline also appears under every group that contains it, e.g. M under I and D).
-    std::map<std::string, unsigned> ResourceCycles;
-    bool Valid = false;
-};
+using A76InstInfo = SogInstInfo;
 
-A76InstInfo a76Desc(const std::string &AsmLine) {
-    initLLVMAArch64();
-    A76Context TC;
-    auto Instrs = parseAsm(TC, AsmLine);
-    A76InstInfo Info;
-    if (Instrs.size() != 1)
-        return Info;
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    auto ExpectedInst = IB.createInstruction(Instrs[0].Inst, {});
-    if (!ExpectedInst) {
-        consumeError(ExpectedInst.takeError());
-        return Info;
-    }
-    const mca::Instruction &IS = **ExpectedInst;
-    Info.MaxLatency = IS.getLatency();
-    Info.NumMicroOps = IS.getNumMicroOps();
-    for (const mca::WriteState &WS : IS.getDefs())
-        Info.WriteLatencies.push_back(WS.getLatency());
-    const MCSchedModel &SM = TC.STI->getSchedModel();
-    const MCSchedClassDesc *SCD = SM.getSchedClassDesc(IS.getDesc().SchedClassID);
-    if (SCD) {
-        for (const MCWriteProcResEntry *E = TC.STI->getWriteProcResBegin(SCD),
-                                       *End = TC.STI->getWriteProcResEnd(SCD);
-             E != End; ++E)
-            Info.ResourceCycles[SM.getProcResource(E->ProcResourceIdx)->Name] +=
-                E->ReleaseAtCycle - E->AcquireAtCycle;
-    }
-    Info.Valid = true;
-    return Info;
-}
-
-// Facile prediction for the loop body `Body` (one instruction per line, no loop branch), with the
-// widths and the memory edges of `mca_tool --mcpu cortex-a76 --dependency ooo --facile`.
-facile::FacileResult a76Facile(const std::string &Body) {
-    initLLVMAArch64();
-    A76Context TC;
-    auto Instrs = parseAsm(TC, Body);
-    auto Analyzer = MLPAnalyzer::create(*TC.STI);
-    mca::InstrumentManager IM(*TC.STI, *TC.MCII);
-    mca::InstrBuilder IB(*TC.STI, *TC.MCII, *TC.MRI, TC.MCIA.get(), IM, 0);
-    std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
-    std::vector<const MCInst *> MCInsts;
-    std::vector<MemAccessInfo> MemInfos;
-    for (const auto &I : Instrs) {
-        auto ExpectedInst = IB.createInstruction(I.Inst, {});
-        if (!ExpectedInst) {
-            consumeError(ExpectedInst.takeError());
-            continue;
-        }
-        SimInstrs.push_back(std::move(*ExpectedInst));
-        MCInsts.push_back(&I.Inst);
-        MemInfos.push_back(Analyzer->getMemAccessInfo(I.Inst, TC.MCII->get(I.Inst.getOpcode()),
-                                                      *TC.MRI, *TC.MCII));
-    }
-    const CpuTraits &T = getCpuTraits("cortex-a76");
-    return facile::computeFacilePrediction(*TC.STI, *TC.MCII, *TC.MRI, SimInstrs, MCInsts,
-                                           T.UopDispatchWidth, MemInfos, T.MopDispatchWidth);
-}
-
+A76InstInfo a76Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
+facile::FacileResult a76Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
 double a76Cycles(const std::string &Body) { return a76Facile(Body).EstimatedCycles; }
 
-constexpr double kTol = 0.01;
+constexpr double kTol = kSogFacileTol;
 
 } // namespace
 
@@ -119,7 +41,7 @@ TEST(A76SogTest, DispatchAndPipelines) {
     EXPECT_FALSE(T.ZeroLatencyMov);           // the SOG has no zero-latency MOV section (C-4)
     EXPECT_EQ(T.Fusion, FusionTable::None);   // nor an instruction-fusion section (C-4)
     initLLVMAArch64();
-    A76Context TC;
+    LocalModelContext TC(kCpu);
     EXPECT_EQ(TC.STI->getSchedModel().MicroOpBufferSize, 128u);  // U-1
     // Eight independent ADDs on three integer pipelines: 8/3 (the Mop bound would be 2).
     auto R = a76Facile("add x1, x1, #1\nadd x2, x2, #1\nadd x3, x3, #1\nadd x4, x4, #1\n"
@@ -144,7 +66,7 @@ TEST(A76SogTest, Branches) {
     // InstrBuilder gives every call latency 0 whatever the model says (X-2), so the class latency is
     // read with MCSchedModel::computeInstrLatency.
     initLLVMAArch64();
-    A76Context TC;
+    LocalModelContext TC(kCpu);
     auto Blr = parseAsm(TC, "blr x1\nblr x30");
     ASSERT_EQ(Blr.size(), 2u);
     auto classLatency = [&](const MCInst &MI) {
@@ -182,7 +104,7 @@ TEST(A76SogTest, ArithmeticAndLogical) {
     A76InstInfo AndsSh = a76Desc("ands x1, x2, x3, lsl #2");
     EXPECT_EQ(AndsSh.MaxLatency, 2u);
     EXPECT_EQ(AndsSh.ResourceCycles["N1UnitM"], 1u);
-    // TST + CSEL through NZCV and x1: 1 + 1 (it was 2 + 1).
+    // TST + CSEL through NZCV and x1: 1 + 1.
     EXPECT_NEAR(a76Cycles("tst x1, x2\ncsel x1, x1, x3, eq"), 2.0, kTol);
     EXPECT_NEAR(a76Cycles("tst x1, x2, lsl #2\ncsel x1, x1, x3, eq"), 3.0, kTol);
 }
@@ -228,6 +150,11 @@ TEST(A76SogTest, MiscDataProcessing) {
     EXPECT_EQ(a76Desc("bfi x1, x2, #3, #4").MaxLatency, 2u);
     EXPECT_EQ(a76Desc("lsl x1, x2, x3").MaxLatency, 1u);
     EXPECT_EQ(a76Desc("rbit x1, x2").MaxLatency, 1u);
+    // U-13 [a76_extr]: EXTR with imm == 0 counts as one register (the A78/X1 definition).
+    A76InstInfo Extr0 = a76Desc("extr x1, x2, x3, #0");
+    EXPECT_EQ(Extr0.MaxLatency, 1u);
+    EXPECT_EQ(Extr0.NumMicroOps, 1u);
+    EXPECT_NEAR(a76Cycles("extr x1, x1, x2, #0"), 1.0, kTol);
     EXPECT_EQ(a76Desc("crc32x w1, w2, x3").MaxLatency, 2u);
     EXPECT_NEAR(a76Cycles("crc32x w1, w1, x3"), 1.0, kTol);  // CRC note 1 (l.2023-2024)
 }
@@ -249,7 +176,7 @@ TEST(A76SogTest, Loads) {
     EXPECT_EQ(Ldrh.ResourceCycles.count("N1UnitI"), 0u);
     EXPECT_EQ(a76Desc("ldrsh x1, [x2, w3, sxtw #1]").MaxLatency, 5u);
     EXPECT_EQ(a76Desc("ldr x1, [x2, x3, lsl #3]").MaxLatency, 4u);
-    // Load pair W: both registers 4 (the second used to be 0, seen as 1 by Facile).
+    // Load pair W: both registers 4.
     EXPECT_EQ(a76Desc("ldp w1, w2, [x0]").WriteLatencies, (std::vector<unsigned>{4, 4}));
     EXPECT_NEAR(a76Cycles("ldp w1, w2, [x0]\nadd x0, x0, x2"), 5.0, kTol);
     A76InstInfo Ldpsw = a76Desc("ldpsw x1, x2, [x0]");
@@ -268,7 +195,7 @@ TEST(A76SogTest, Stores) {
     EXPECT_EQ(Str.ResourceCycles["N1UnitL"], 1u);
     EXPECT_EQ(Str.ResourceCycles["N1UnitD"], 1u);
     EXPECT_EQ(Str.ResourceCycles["N1UnitI"], 1u);   // D is part of the integer pipes
-    // Two ADDs and two STRs: four integer-pipe uops on S0, S1, M (it was 2/3 + L).
+    // Two ADDs and two STRs: four integer-pipe uops on S0, S1, M.
     EXPECT_NEAR(a76Cycles("add x1, x1, #1\nadd x2, x2, #1\nstr x4, [x0]\nstr x5, [x0, #8]"), 4.0 / 3.0, kTol);
     // Integer STR post-index "1 2 L, D": no I uop for the base update (I-3), two per cycle.
     A76InstInfo StrPost = a76Desc("str x1, [x2], #8");
@@ -304,12 +231,12 @@ TEST(A76SogTest, FpScalar) {
     EXPECT_EQ(a76Desc("fdiv s0, s1, s2").ResourceCycles["N1UnitFDiv"], 2u);  // 4/7
     EXPECT_EQ(a76Desc("fsqrt d0, d1").ResourceCycles["N1UnitFDiv"], 4u);
     // A divide does not block the other V0 uops (D-3): FDIV D (4 on the divider) with FCVTZS (V0 + V1)
-    // and FRINTA (V0): 4 (it was 4 + 1 + 1 = 6 cycles of V0).
+    // and FRINTA (V0): 4, not 4 + 1 + 1 = 6 cycles of V0.
     EXPECT_NEAR(a76Cycles("fdiv d0, d2, d1\nfcvtzs w1, d3\nfrinta d4, d5"), 4.0, kTol);
     // FMA accumulator 4(2); FMUL -> FMA accumulator 1 (notes 2, 3).
     EXPECT_NEAR(a76Cycles("fmadd d0, d1, d2, d0"), 2.0, kTol);
-    // fmul (-> accumulator 3 - 2 = 1) + fmadd (4) + fmov (2) around the loop: 7 (the accumulator edge
-    // used to keep 3: 9).  The vector forms likewise (FMUL 3 -> FMLA 1, FMLA 4, MOV 2).
+    // fmul (-> accumulator 3 - 2 = 1) + fmadd (4) + fmov (2) around the loop: 7.  The vector forms
+    // likewise (FMUL 3 -> FMLA 1, FMLA 4, MOV 2).
     EXPECT_NEAR(a76Cycles("fmul d0, d1, d2\nfmadd d3, d4, d5, d0\nfmov d1, d3"), 7.0, kTol);
     EXPECT_NEAR(a76Cycles("fmul v0.4s, v1.4s, v2.4s\nfmla v0.4s, v4.4s, v5.4s\nmov v1.16b, v0.16b"), 7.0, kTol);
     // FP convert vec to vec "3 1 V0" (l.936).
@@ -342,6 +269,31 @@ TEST(A76SogTest, FpScalar) {
 TEST(A76SogTest, FpLoadsAndStores) {
     EXPECT_EQ(a76Desc("ldr d0, [x1, #8]").MaxLatency, 5u);
     EXPECT_EQ(a76Desc("ldp d0, d1, [x0]").WriteLatencies, (std::vector<unsigned>{5, 5}));
+    // I-9 [a76_fp_ls_no_i]: no I uop on FP LDR (unsigned immed), LDP/LDNP S/D (offset) and STUR, whose
+    // data uop is on V as for every other FP store.
+    for (const char *Asm : {"ldr d0, [x1, #8]", "ldr q0, [x1, #16]", "ldr s0, [x1]"}) {
+        A76InstInfo I = a76Desc(Asm);
+        EXPECT_EQ(I.ResourceCycles.count("N1UnitI"), 0u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["N1UnitL"], 1u) << Asm;
+        EXPECT_EQ(I.NumMicroOps, 1u) << Asm;
+    }
+    for (const char *Asm : {"ldp d0, d1, [x0]", "ldnp s0, s1, [x0]"}) {
+        A76InstInfo I = a76Desc(Asm);
+        EXPECT_EQ(I.ResourceCycles.count("N1UnitI"), 0u) << Asm;
+        EXPECT_EQ(I.ResourceCycles["N1UnitL"], 2u) << Asm;    // throughput 1
+    }
+    A76InstInfo SturD = a76Desc("stur d0, [x1, #1]");
+    EXPECT_EQ(SturD.MaxLatency, 2u);
+    EXPECT_EQ(SturD.ResourceCycles.count("N1UnitI"), 0u);
+    EXPECT_EQ(SturD.ResourceCycles["N1UnitV"], 1u);
+    A76InstInfo SturQ = a76Desc("stur q0, [x1, #1]");
+    EXPECT_EQ(SturQ.ResourceCycles.count("N1UnitI"), 0u);
+    EXPECT_EQ(SturQ.ResourceCycles["N1UnitL"], 2u);         // 2 1
+    // Three FP LDR with an immediate and three ADDs: 7 Mops / 4.
+    EXPECT_NEAR(a76Cycles("ldr d0, [x0, #8]\nldr d1, [x0, #16]\nldr d2, [x0, #24]\n"
+                          "add x1, x1, #1\nadd x2, x2, #1\nadd x3, x3, #1"), 1.5, kTol);
+    // The register-offset rows keep their printed I (consistent within the A76 guide).
+    EXPECT_EQ(a76Desc("ldr d0, [x1, x2]").ResourceCycles["N1UnitI"], 1u);
     A76InstInfo LdpQ = a76Desc("ldp q0, q1, [x0]");
     EXPECT_EQ(LdpQ.WriteLatencies, (std::vector<unsigned>{7, 7}));
     EXPECT_EQ(LdpQ.ResourceCycles.count("N1UnitI"), 0u);
@@ -377,6 +329,17 @@ TEST(A76SogTest, Asimd) {
     EXPECT_NEAR(a76Cycles("mla v0.4h, v1.4h, v2.h[1]"), 1.0, kTol);
     EXPECT_EQ(a76Desc("mla v0.4h, v1.4h, v2.h[1]").ResourceCycles["N1UnitV0"], 1u);
     EXPECT_NEAR(a76Cycles("mla v0.4s, v1.4s, v2.4s"), 2.0, kTol);
+    // U-5 [a76_mul_acc_fwd]: MUL -> MLA and SMULL -> SMLAL accumulator forwarding (note 1, l.1350).
+    // Q: MUL 5 - 3 = 2 to the accumulator, MLA 5 back to the MUL source: 7.
+    EXPECT_NEAR(a76Cycles("mul v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 7.0, kTol);
+    EXPECT_NEAR(a76Cycles("mul v0.2s, v0.2s, v1.2s\nmla v0.2s, v2.2s, v3.2s"), 5.0, kTol);   // 1 + 4
+    EXPECT_NEAR(a76Cycles("smull v0.2d, v0.2s, v1.2s\nsmlal v0.2d, v2.2s, v3.2s"), 5.0, kTol);  // 1 + 4
+    EXPECT_EQ(a76Desc("mul v0.4s, v1.4s, v2.4s").ResourceCycles["N1UnitV0"], 2u);  // unchanged 5 1/2
+    EXPECT_EQ(a76Desc("smull v0.2d, v1.2s, v2.2s").MaxLatency, 4u);
+    // MLA and MLAL forward to each other (as MADD and SMADDL do): MLA Q 5(2) + SMLAL 4(1) = 2 + 1.
+    EXPECT_NEAR(a76Cycles("mla v0.4s, v1.4s, v2.4s\nsmlal v0.4s, v3.4h, v4.4h"), 3.0, kTol);
+    // SQDMULH does not forward to the accumulator.
+    EXPECT_NEAR(a76Cycles("sqdmulh v0.4s, v0.4s, v1.4s\nmla v0.4s, v2.4s, v3.4s"), 10.0, kTol);
     A76InstInfo Sqshrun = a76Desc("sqshrun v0.8b, v1.8h, #3");
     EXPECT_EQ(Sqshrun.MaxLatency, 4u);
     EXPECT_EQ(Sqshrun.ResourceCycles["N1UnitV1"], 1u);
@@ -421,6 +384,8 @@ TEST(A76SogTest, CryptoAndCrc) {
     A76InstInfo Aese = a76Desc("aese v0.16b, v1.16b");
     EXPECT_EQ(Aese.MaxLatency, 2u);
     EXPECT_EQ(Aese.ResourceCycles["N1UnitV0"], 1u);
+    // U-6 [a76_aes]: no forwarding between an AES pair (2 + 2).
+    EXPECT_NEAR(a76Cycles("aese v0.16b, v1.16b\naesmc v0.16b, v0.16b"), 4.0, kTol);
     EXPECT_EQ(a76Desc("pmull v0.1q, v1.1d, v2.1d").MaxLatency, 2u);
     EXPECT_EQ(a76Desc("sha1c q0, s1, v2.4s").MaxLatency, 4u);
     EXPECT_EQ(a76Desc("sha256su1 v0.4s, v1.4s, v2.4s").MaxLatency, 2u);
@@ -454,3 +419,15 @@ TEST(A76SogTest, PointerAuthenticationHints) {
     // They still read and write LR with latency 1 (LLVM's implicit operands): a chain of 1 each.
     EXPECT_NEAR(a76Cycles("paciasp\nautiasp\npaciasp\nautiasp"), 4.0, kTol);
 }
+
+// The multiply -> multiply-accumulate chain through the accumulator, whichever instruction comes first
+// (ZeroAwareInstrBuilder, docs/docs.md 4.K): W form 2 (mul) + 1 (madd, accumulator advance 1) ... 3 per
+// iteration, X form 4 + 3 = 7, also when the multiply (MADD with the zero register) comes first.
+TEST(A76SogTest, MultiplyThenMultiplyAccumulateKeepsTheChain) {
+    EXPECT_NEAR(a76Cycles("mul w1, w1, w2\nmadd w1, w3, w4, w1"), 3.0, kTol);
+    EXPECT_NEAR(a76Cycles("madd w1, w3, w4, w1\nmul w1, w1, w2"), 3.0, kTol);
+    EXPECT_NEAR(a76Cycles("mul x1, x1, x2\nmadd x1, x3, x4, x1"), 7.0, kTol);
+    EXPECT_NEAR(a76Cycles("madd x1, x3, x4, x1\nmul x1, x1, x2"), 7.0, kTol);
+    EXPECT_NEAR(a76Cycles("smull x1, w1, w2\nsmaddl x1, w3, w4, x1"), 3.0, kTol);
+}
+

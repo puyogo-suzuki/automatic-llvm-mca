@@ -27,8 +27,8 @@ Contents
 |---|---|
 | C, compatible | [C-1](#c-1) to [C-28](#c-28) |
 | N, not compatible | [N-1](#n-1) |
-| D, deliberate deviation or interpretation | [D-1](#d-1) to [D-14](#d-14) |
-| U, unclear in the SOG | [U-1](#u-1) to [U-9](#u-9) |
+| D, deliberate deviation or interpretation | [D-1](#d-1) to [D-16](#d-16) |
+| U, unclear in the SOG | [U-1](#u-1) to [U-10](#u-10) |
 | I, inconsistent within the SOG | [I-1](#i-1) to [I-7](#i-7) |
 | X, outside the A520 path | [X-1](#x-1) |
 | B, borrowed from the Cortex-A55 (not SOG-based) | [B-1](#b-1) to [B-4](#b-4) |
@@ -42,32 +42,33 @@ Contents
 * **Guide**: "Arm® Cortex®-A520 Core Software Optimization Guide", Revision r0p1, document number
   **PJDOC-1505342170-671342**, **Issue 1.2** (29 May 2023, "Second release for r0p1"), Copyright ©
   2023 Arm Limited (or its affiliates), **Non-Confidential** (title page and "Release information",
-  p.1-2). Called "the SOG" below.
+  p.1-2). Called "the SOG" below. "l.N" is line N of the text extraction of the guide (not
+  tracked).
 
 ### 1.2 What "the implementation" is
 
-The state of the working tree on 2026-10-31 (last commit `7e98c91`, plus uncommitted changes):
+The implementation consists of:
 
 * `ModifiedTarget/AArch64/AArch64SchedA520.td`: the TableGen model `CortexA520Model`, compiled into
-  the tool's own scheduling tables (see [docs.md](docs.md) section 5). The file had been rewritten
-  by another session on 2026-10-30 (uncommitted); this audit edited it in place.
+  the tool's own scheduling tables (see [docs.md](docs.md) section 5).
 * `src/a520/a520_issue_stage.{h,cpp}`: `A520InOrderIssueStage`, a copy of LLVM 22.1.8's
-  `llvm::mca::InOrderIssueStage` with three changes ([section 2.2](#22-issue-stage-srca520a520_issue_stagecpp)),
-  added by this audit and by the borrowing of [chapter 9](#9-borrowed-from-the-cortex-a55-b).
+  `llvm::mca::InOrderIssueStage` with three changes ([section 2.2](#22-issue-stage-srca520a520_issue_stagecpp)).
+  The stock file's file-local helpers (`hasResourceHazard`, `findFirstWriteBackCycle`,
+  `addRegisterReadWrite`) are shared with the Cortex-A55 issue stage in
+  `src/mca/in_order_issue_helpers.h` (namespace `in_order_issue`), unchanged.
 * `src/mca/mca_simulation.cpp` (`analyzeMcaRegion`): selects that stage when the CPU's `CpuModel` is
   `A520` (`src/cpu/cpu_traits.cpp`: `cortex-a520`, `cortex-a520ae`).
 * `src/cpu/sched_model.cpp` (`installLocalSchedModel`): installs `CortexA520Model`.
-* `tests/a520_sog_test.cpp`: unit tests that pin the values below (added by this audit, not yet
-  committed). `tests/test_support.h` gives `AArch64TestContext("cortex-a520")` the local model.
+* `tests/a520_sog_test.cpp`: unit tests that pin the values below.
+  `tests/test_support.h` gives `AArch64TestContext("cortex-a520")` the local model.
 
 The Cortex-A520 uses no A55 code (`src/a55/*`) except the flag-bypass helper `a55IsFlagBypassEligible`
-of `src/a55/a55_bypass.h` ([B-4](#b-4)), and no Facile (`src/facile/*`: the research
-script runs it with `--dependency dependency` and without `--facile`, like the A55;
-`/home/go/Workspace/research/analyze.bash`). `cpu_traits.cpp` gives it no dispatch width, fusion
-table or MLP window of its own (all defaults).
+of `src/a55/a55_bypass.h` ([B-4](#b-4)), and no Facile (`src/facile/*`): its cycle counts come from
+the MCA simulation (`mca_tool` without `--facile`), like the A55's. `cpu_traits.cpp` gives it no
+dispatch width, fusion table or MLP window of its own (all defaults).
 
 Implementation facts are given by file and identifier (TableGen `def` names, C++ function names),
-not by line number. The code marks the changes of this audit with tags; [section 2.3](#23-code-tags-and-the-items-of-this-document)
+not by line number. The code marks the A520-specific changes with tags; [section 2.3](#23-code-tags-and-the-items-of-this-document)
 maps them to the items.
 
 ### 1.3 Categories
@@ -79,8 +80,8 @@ maps them to the items.
 | **D-n** | deliberate deviation or interpretation | The implementation knowingly departs from the literal SOG, or fills a gap with an interpretation. Each item gives the SOG text, the implementation and the reason. |
 | **U-n** | unclear | The SOG does not decide the question; the implementation makes an assumption or leaves it open. Each item gives the SOG text, what is unclear, the current handling, the expected impact, and how to settle it. |
 | **I-n** | inconsistent | Two places of the SOG disagree, or the SOG contradicts itself or has a misprint. Each item says which reading the implementation follows. |
-| **X-n** | outside the A520 path | Problems in shared code, found during this audit. |
-| **B-n** | borrowed from the Cortex-A55 | The A520 SOG says nothing (or nothing usable) on the question, and the project owner decided to give the A520 the Cortex-A55 model's treatment, whose basis is the A55 SOG ([a55-sog.md](a55-sog.md)). **Not SOG-based.** Each item gives what the A520 SOG says, what the A55 does and why, what is implemented, the measured effect and the tests; it is to be revisited when an A520 measurement or SOG statement appears. |
+| **X-n** | outside the A520 path | Problems in shared code that affect the A520. |
+| **B-n** | borrowed from the Cortex-A55 | The A520 SOG says nothing (or nothing usable) on the question, and the project owner decided to give the A520 the Cortex-A55 model's treatment, whose basis is the A55 SOG ([a55-sog.md](a55-sog.md)). **Not SOG-based.** Each item gives what the A520 SOG says, what the A55 does and why, what is implemented, the effect and the tests; it is to be revisited when an A520 measurement or SOG statement appears. |
 
 ### 1.4 Reading the SOG instruction tables
 
@@ -122,7 +123,7 @@ default buffer (in-order, so no reservation station).
 | `A520UnitLdSt` | 1 | Load/Store pipe (the only store pipe); an LSE atomic holds it with `A520UnitLd` ([B-1](#b-1)) |
 | `A520UnitLd` | 1 | Load pipe |
 | `A520UnitLoad` | group of LdSt + Ld | loads ("Load/Store, Load") |
-| `A520UnitPAC` | 1 | PAC (added by this audit, [C-13](#c-13)) |
+| `A520UnitPAC` | 1 | PAC ([C-13](#c-13)) |
 | `A520UnitVALU0`, `A520UnitVALU1`, group `A520UnitVALU` | 1, 1 | VALU0, VALU1 |
 | `A520UnitVMAC` | 2 | VMAC0, VMAC1 |
 | `A520UnitVMC` | 2 | VMC, as two units ([D-5](#d-5)) |
@@ -141,15 +142,15 @@ libLLVM is 22.1.8 and its header is identical) function by function, with three 
    (`LastWriteBackCycle`) is applied only when the constructor argument `EnforceWriteBackOrder` is
    true; the pipeline is built with `false`.
 2. **A hook before the register hazard check** (`[a520_lc_hook]`). With `--ignore-loop-carried`,
-   `LoopCarriedIgnoreSteadyStateTracker` forgot the previous iteration's producers on the
-   Dispatched event, which the stock stage raises after its hazard check, so the first instruction
-   of every basic block still waited for the previous iteration (issue #12, [docs.md](docs.md)
-   section 2.C). `analyzeMcaRegion` now wires
+   `LoopCarriedIgnoreSteadyStateTracker` must forget the previous iteration's producers before the
+   first instruction of an iteration is checked for its register operands; the stock stage raises
+   the Dispatched event only after its hazard check, which is too late (`#12`, [docs.md](docs.md)
+   section 2.C). `analyzeMcaRegion` wires
    `LoopCarriedIgnoreSteadyStateTracker::beforeRegisterHazardCheck()` into the A520 stage
-   (`setBeforeRegisterHazardCheckHook`), as for the A55. This is a tool fix, not an SOG item.
-   Measured (section 10, basic block `fadd d0, d0, d1; fadd d2, d3, d1; ret`): 4.0 cycles/iteration
-   before, 1.0 after (3.0 -> 1.0 with the two FADDs swapped); with
-   `--ignore-loop-carried=disable` 4.0 (unchanged). Test:
+   (`setBeforeRegisterHazardCheckHook`, via `installLoopCarriedHook`), as for the A55. This is tool
+   behaviour, not an SOG item. Measured (section 10, basic block `fadd d0, d0, d1; fadd d2, d3, d1;
+   ret`): 1.0 cycle/iteration (also with the two FADDs swapped); with
+   `--ignore-loop-carried=disable` 4.0. Test:
    `A520SogTest.IgnoreLoopCarriedAppliesToFirstInstruction`.
 3. **The Cortex-A55's flag bypass** (`[a520_from_a55_flags]`, [B-4](#b-4)). `checkRegisterHazard`
    skips an NZCV read when `a55IsFlagBypassEligible` (`src/a55/a55_bypass.h`) allows it, as the A55
@@ -159,12 +160,13 @@ libLLVM is 22.1.8 and its header is identical) function by function, with three 
 Everything else is the stock behaviour: the issue width (3) is counted in `NumMicroOps`
 ([C-2](#c-2)); an instruction that does not fit in the rest of the cycle waits for the next one;
 a stalled instruction stops all younger ones ([C-3](#c-3)); the resources, the LSU and
-`CustomBehaviour` are checked as before.
+`CustomBehaviour` are checked as in the stock stage.
 
-**Faithfulness check.** A build with `EnforceWriteBackOrder = true` and the hook disconnected gave
-byte-identical CSV output to the stock `InOrderIssueStage` (A520, 2026-10-31). The flag bypass came later; with no `MCInstrInfo` (the default argument) the hazard
-check is the stock one again, so the check still applies to that configuration (not re-run). Other cores are not affected: the A55 keeps its own stage, the out-of-order cores the
-stock default pipeline, and every other in-order CPU the stock `InOrderIssueStage`.
+**Faithfulness.** With `EnforceWriteBackOrder = true`, the hook disconnected and no `MCInstrInfo`
+(the default argument, which turns the flag bypass off), the stage behaves as the stock
+`InOrderIssueStage` (identical CSV output for the A520). Other cores are not affected: the A55 keeps
+its own stage, the out-of-order cores the stock default pipeline, and every other in-order CPU the
+stock `InOrderIssueStage`.
 
 ### 2.3 Code tags and the items of this document
 
@@ -172,17 +174,21 @@ stock default pipeline, and every other in-order CPU the stock `InOrderIssueStag
 |---|---|
 | `[a520_sog_fix]` (`.td`) | [C-14](#c-14) variable shifts, [C-21](#c-21) ADDV and SMMLA/UMMLA/USMMLA, [C-23](#c-23) BFMMLA, [C-27](#c-27) XAR, [C-28](#c-28) CRC |
 | `[a520_pac]` (`.td`) | [C-13](#c-13), [C-7](#c-7), [D-11](#d-11) |
-| `[a520_no_wb_order]` (`src/a520`) | [D-9](#d-9) |
+| `[a520_no_wb_order]` (`src/a520`, `mca_simulation.cpp`) | [D-9](#d-9) |
 | `[a520_nop]`, `[a520_mul_zr]` (`.td`) | [D-14](#d-14), [D-15](#d-15) |
+| `[a520_sys]` (`.td`) | [D-16](#d-16) |
+| `[a520_store_zr]` (`.td`) | [D-15](#d-15), [C-2](#c-2), [C-16](#c-16) |
+| `[a520_stx]` (`.td`) | [N-1](#n-1), [U-6](#u-6), [D-15](#d-15) |
+| `[a520_ext]` (`.td`) | [D-6](#d-6), [U-10](#u-10) |
+| `[a520_mac_fwd]` (`.td`) | [C-5](#c-5), [U-7](#u-7) |
 | `[a520_lc_hook]` (`src/a520`, `mca_simulation.cpp`) | [section 2.2](#22-issue-stage-srca520a520_issue_stagecpp) |
 | `[a520_from_a55_atomics]` (`.td`) | [B-1](#b-1) |
 | `[a520_from_a55_store_data]` (`.td`) | [B-2](#b-2) |
 | `[a520_from_a55_base_update]` (`.td`) | [B-3](#b-3) |
 | `[a520_from_a55_flags]` (`src/a520`, `mca_simulation.cpp`) | [B-4](#b-4) |
-| "docs/a520-sog.md ..." in the `.td` header | [D-1](#d-1), [D-9](#d-9), [D-13](#d-13), [D-14](#d-14), [D-15](#d-15), [U-2](#u-2), [U-3](#u-3), [U-4](#u-4), [C-2](#c-2), [C-25](#c-25), [C-26](#c-26) |
+| "docs/a520-sog.md ..." in the `.td` header | [D-1](#d-1), [D-9](#d-9), [D-13](#d-13), [U-2](#u-2), [U-3](#u-3), [U-4](#u-4), [C-2](#c-2), [C-25](#c-25), [C-26](#c-26) |
 
-The rest of the `.td` cites the SOG by line ("l.N" = line N of `tmp/a520sog.txt`); those comments
-were written by the session that rewrote the file on 2026-10-30.
+The rest of the `.td` cites the SOG by line ("l.N" = line N of the text extraction of the guide).
 
 ---
 
@@ -213,12 +219,12 @@ or more general purpose destination registers / Three or more general purpose so
 `A520Wr_IMW`, `A520Wr_IMX`, `A520Wr_IML` (MADD, MSUB, SMADDL, SMSUBL, UMADDL, UMSUBL with a real
 accumulator; with the zero register as accumulator, i.e. MUL, MNEG, SMULL, UMULL, ..., one entry,
 `A520Wr_IMW1`, `A520Wr_IMX1`, `A520Wr_IML1`, [D-15](#d-15)), `A520Wr_ST_2e` (STR register offset of a GPR, STP/STNP of
-GPRs, incl. pre/post-index) and `A520Wr_LD_t1_2e` (LDP/LDPSW pre/post-index: Rt, Rt2 and the base);
+GPRs, incl. pre/post-index, and STXP/STLXP, [N-1](#n-1); with the zero register as data or index, one entry,
+[D-15](#d-15)) and `A520Wr_LD_t1_2e` (LDP/LDPSW pre/post-index: Rt, Rt2 and the base);
 the writeback and second-register writes have `NumMicroOps = 0`. Measured: `madd w1, w2, w3, w4;
-add; add` + branch 3.0 cycles/iteration before the audit, 2.0 after (the change comes from
-[D-9](#d-9)); without the branch 1.5 (test `IssueWidthAndEntries`, which also checks that an FP
-`str d1, [x2, x3]` takes one entry). The zero register does not count as a source for MUL, MNEG, SMULL, UMULL, SMNEGL, UMNEGL, which take one entry ([D-15](#d-15)).
-Missing for instructions without an SOG row: [N-1](#n-1). The queue capacity ("Four general purpose
+add; add` + branch 2.0 cycles/iteration ([D-9](#d-9)); without the branch 1.5 (test `IssueWidthAndEntries`, which also checks that an FP
+`str d1, [x2, x3]` takes one entry). The zero register does not count as a source: MUL, MNEG, SMULL, UMULL, SMNEGL, UMNEGL and the GPR stores
+of WZR/XZR take one entry ([D-15](#d-15)). Instructions without an SOG row: [N-1](#n-1). The queue capacity ("Four general purpose
 destination registers / Six general purpose source registers", l.3570-3572) is not modelled beyond
 this (not stated in the SOG how it limits issue).
 
@@ -252,9 +258,11 @@ instructions can issue one every 2 cycles). Accumulator forwarding is not suppor
 64 bit multiply high operations." Implementation: `A520Rd_MAccW` (`SchedReadAdvance<1,
 [A520Wr_IMW]>`) and `A520Rd_MAccX` (`SchedReadAdvance<2, [A520Wr_IMX]>`) on the accumulator of
 MADD/MSUB W and X: a chain through the accumulator costs 2 (3 - 1, 4 - 2); SMADDL & co. have
-latency 2 and no advance; SMULH is not a producer. Measured: `madd w1, w2, w3, w1` + branch 2.0;
-`madd x1, x2, x3, x1` + branch 2.0 (3.0 before the audit, [D-9](#d-9)). Test: `DivideAndMultiply`.
-Forwarding between different forms (MADD X -> SMADDL accumulator): [U-7](#u-7).
+latency 2 and no advance; SMULH is not a producer. Every MAC write (W, X, long, also with the zero
+accumulator) is a producer for both advances (`[a520_mac_fwd]`): the note speaks of
+"one MAC operation" and "a following MAC operation" without restricting the form ([U-7](#u-7)).
+Measured: `madd w1, w2, w3, w1` + branch 2.0; `madd x1, x2, x3, x1` + branch 2.0 ([D-9](#d-9));
+`madd x4, x2, x3, x1; madd w1, w5, w6, w4` + branch 4.0. Tests: `DivideAndMultiply`, `MacAccumulatorForwardingAcrossForms`.
 
 <a id="c-6"></a>
 **C-6. ADRP -> load pointer forwarding.**
@@ -264,15 +272,15 @@ sequence to be executed without incurring a dependency-based stall". Implementat
 (ADRP only; ADR has the same row but is not named in sec. 4.5) and `A520Rd_PtrFwd`
 (`SchedReadAdvance<1, [A520Wr_ADRP]>`) on the base of `LDR*ui` (GPR and FP/SIMD) and of `STR*ui`
 ([D-7](#d-7)). Measured (section 10): `adrp x1, 0; ldr x2, [x1, #8]` + branch 1.0 cycle/iteration;
-`ldr x2, [x5, x1]` 1.0 (2.0 before the audit; the register-offset form waits 1 cycle for the ADRP,
-which the branch hides). Test: `AdrpPointerForwarding` (4/3 and 2.0 without a branch). The
+`ldr x2, [x5, x1]` 1.0 (the register-offset form waits 1 cycle for the ADRP, which the branch
+hides). Test: `AdrpPointerForwarding` (4/3 and 2.0 without a branch). The
 `#lo12` relation between the two instructions is not checked.
 
 <a id="c-7"></a>
 **C-7. AUT* -> RET forwarding.**
 SOG sec. 4.6 (p.74, l.3686-3689): "any variant of the AUT instruction will be dual issued with the
 directly following RET instruction. The latency of the AUT instruction for the dependency of the LR
-does not apply for these cases." Implementation (`[a520_pac]`, added by this audit): `A520Wr_AUT` on
+does not apply for these cases." Implementation (`[a520_pac]`): `A520Wr_AUT` on
 the AUTI* instructions and `A520Rd_AutRet` (`SchedReadAdvance<5, [A520Wr_AUT]>`) on the register
 operand of `RET`, so RET sees the AUT result at 0. Test: `PointerAuthentication`
 (`paciasp; autiasp; ret`: 10 = 5 + 5 + 0). "directly following": [D-11](#d-11).
@@ -284,7 +292,7 @@ SDOT, "the latency between the above instructions will be 1 cycle" when two cons
 use the same destination/accumulator register, element size and register size. Implementation:
 `A520Wr_VMUL` (latency 4, VMAC) for all of them and `A520Rd_VMACFwd` (`SchedReadAdvance<3,
 [A520Wr_VMUL]>`) on the accumulator of MLA/MLS (incl. by element), [SU]MLAL/[SU]MLSL, SDOT/UDOT (incl.
-by element). Measured: `mla v0.4s, v1.4s, v2.4s` + branch 1.0 (3.0 before the audit, [D-9](#d-9)).
+by element). Measured: `mla v0.4s, v1.4s, v2.4s` + branch 1.0 ([D-9](#d-9)).
 Test: `SimdMacForwarding`. Conditions not checked: [D-8](#d-8). FMLA has no such path (4 per step).
 
 <a id="c-9"></a>
@@ -314,7 +322,7 @@ B.cond is not listed; it takes `WriteBr` like B. The second table on p.13 has AA
 |---|---|---|
 | Arithmetic, basic: ADD, ADC, SUB, SBC | 1 / 2 / ALU | `WriteI` 1, one ALU |
 | Arithmetic, basic, flagset: ADDS, SUBS; ADCS, SBCS | 1 / 2; 1 / 1 / ALU | `WriteI`; ADCS/SBCS `A520Wr_1c_ALU_t1` (one ALU 2 cycles = throughput 1) |
-| Arithmetic, extend and shift: ADD{S}, SUB{S} | 1 (note 1: 2 on Rm) / 2 / ALU | `A520Wr_1c_ALU` + `A520Rd_ShiftedRm` / `A520Rd_ExtendedRm` ([D-6](#d-6)); shift amount 0: basic |
+| Arithmetic, extend and shift: ADD{S}, SUB{S} | 1 (note 1: 2 on Rm) / 2 / ALU | `A520Wr_1c_ALU` + `A520Rd_ShiftedRm` / `A520Rd_RmLate` ([D-6](#d-6)); shift amount 0: basic |
 | Conditional compare: CCMN, CCMP | 1 / 1 / ALU | `A520Wr_1c_ALU_t1` |
 | Conditional select: CSEL, CSINC, CSINV, CSNEG | 1 / 2 / ALU | stock class, latency 1 |
 | Logical, basic; logical, shift | 1 / 2 / ALU | latency 1 (no Rm note) |
@@ -337,22 +345,21 @@ Accumulator: [C-5](#c-5). Test: `DivideAndMultiply`.
 
 <a id="c-13"></a>
 **C-13. Sec. 3.5, pointer authentication (Table 3-4, p.16-17, l.702-773).**
-*Fixed 2026-10-31* (`[a520_pac]`); before, the stock classes gave these instructions latency 1 on an
-ALU (PACIASP, AUTIASP, PACIA, ...) or no data at all (BRAA, BLRAA, RETAA, PACDZA, AUTIZA, ...).
+`[a520_pac]`: the rows below replace the stock classes, which give these instructions latency 1 on
+an ALU (PACIASP, AUTIASP, PACIA, ...) or no data at all (BRAA, BLRAA, RETAA, PACDZA, AUTIZA, ...).
 
 | SOG group | SOG | Model |
 |---|---|---|
-| Authenticate instruction address: AUTIA, AUTIB, AUTIA1716, AUTIB1716, AUTIASP, AUTIBSP, AUTIAZ, AUTIBZ, AUTIZA, AUTIZB | 5 / 1 / PAC | `A520Wr_AUT` 5 on the new one-unit `A520UnitPAC` |
+| Authenticate instruction address: AUTIA, AUTIB, AUTIA1716, AUTIB1716, AUTIASP, AUTIBSP, AUTIAZ, AUTIBZ, AUTIZA, AUTIZB | 5 / 1 / PAC | `A520Wr_AUT` 5 on the one-unit `A520UnitPAC` |
 | Compute PAC, data / generic / instruction: PACDA, PACDB, PACDZA, PACDZB, PACGA, PACIA, PACIB, PACIZA, PACIZB, PACIA1716, PACIB1716, PACIASP, PACIBSP, PACIAZ, PACIBZ | 5 / 1 / PAC | `A520Wr_PAC` 5 |
 | Strip PAC: XPACD, XPACI, XPACLRI | 5 / 1/5 / PAC | `A520Wr_XPAC` 5, PAC 5 cycles |
 | Branch, register, with PAC: BRAA, BRAAZ, BRAB, BRABZ | - / 1 / Branch, PAC | `A520Wr_BPAC` 1 on Branch + PAC |
 | Branch and link, register, with PAC: BLRAA, BLRAAZ, BLRAB, BLRABZ | 1 / 1 / Branch, PAC | `A520Wr_BPAC` |
-| Branch, return, with PAC: RETAA, RETAB | - / 1 / Branch | `A520Wr_1c_B` |
+| Branch, return, with PAC: RETAA, RETAB (printed "RETA, RETB", [I-7](#i-7)) | - / 1 / Branch | `A520Wr_1c_B` |
 
-Not changed: AUTDA/AUTDB/AUTDZA/AUTDZB ([U-8](#u-8)) and LDRAA/LDRAB ([U-9](#u-9)). Measured
-(section 10): `paciasp; autiasp` + branch 2.0 -> 10.0 cycles/iteration (a chain through LR, 5 + 5).
-The 46 research binaries contain 143 PACIASP and 147 AUTIASP (in total; mnemonic count of
-`objdump -d`; no BRAA/BLRAA/RETAA/LDRAA). Test: `PointerAuthentication`.
+Not covered by these rows: AUTDA/AUTDB/AUTDZA/AUTDZB ([U-8](#u-8)) and LDRAA/LDRAB ([U-9](#u-9)).
+Measured (section 10): `paciasp; autiasp` + branch 10.0 cycles/iteration (a chain through LR, 5 + 5).
+Test: `PointerAuthentication`.
 
 <a id="c-14"></a>
 **C-14. Sec. 3.6, miscellaneous data processing (Table 3-5, p.17-18, l.777-833).**
@@ -367,11 +374,11 @@ The 46 research binaries contain 143 PACIASP and 147 AUTIASP (in total; mnemonic
 | Count leading: CLS, CLZ | 1 / 2 / ALU | stock, latency 1 |
 | Move immed: MOVN, MOVK, MOVZ | 1 / 2 / ALU | `WriteImm` / `WriteI` 1 |
 | Reverse: REV, REV16, REV32; RBIT | 1 / 2; 2 / 2 / ALU | stock 1; `A520Wr_2c_ALU` |
-| **Variable shift: ASRV, LSLV, LSRV, RORV** | 1 / 2 / ALU | `A520Wr_1c_ALU` (*fixed 2026-10-31*, `[a520_sog_fix]`) |
+| **Variable shift: ASRV, LSLV, LSRV, RORV** | 1 / 2 / ALU | `A520Wr_1c_ALU` (`[a520_sog_fix]`) |
 
-Variable shifts: they used to take the stock `WriteIS`, which the model maps to Bitfield move (2).
-The research binaries contain 12,367 register-form LSL/LSR/ASR/ROR. Measured (section 10): `lsl x1,
-x1, x2` twice + branch 4.0 -> 2.0 cycles/iteration. Test: `MiscDataProcessing`.
+Variable shifts: an `InstRW` of their own, since the stock `WriteIS` they would otherwise take is
+mapped to Bitfield move (2). Measured (section 10): `lsl x1, x1, x2` twice + branch 2.0
+cycles/iteration. Test: `MiscDataProcessing`.
 
 <a id="c-15"></a>
 **C-15. Sec. 3.7, loads (Table 3-6, p.18-20, l.837-947).**
@@ -390,10 +397,11 @@ signed offset four per two cycles, post-index one per cycle). Acquire and exclus
 **C-16. Sec. 3.8, stores (Table 3-7, p.21, l.965-1003).** Every row (STUR, STR pre/post,
 STTR, STR unsigned immediate, STR register offset, STP/STNP all addressing modes) "- / 1 /
 Load/Store": `WriteST`/`WriteSTP`/`WriteSTIdx` 1 on `A520UnitLdSt`; STR register offset and STP of
-GPRs `A520Wr_ST_2e` (2 entries, [C-2](#c-2)); writeback 1 ([B-3](#b-3): T = 1). The data operands
+GPRs `A520Wr_ST_2e` (2 entries, [C-2](#c-2); 1 entry with WZR/XZR as data or index, [D-15](#d-15));
+writeback 1 ([B-3](#b-3): T = 1). The data operands
 read `ReadST`, one cycle late ([B-2](#b-2), borrowed from the A55; the SOG gives no operand timing).
-Release and exclusive stores have no row ([U-6](#u-6)). Test: `LoadsAndStores` (one store per
-cycle).
+Release and exclusive stores have no row ([U-6](#u-6), [N-1](#n-1)). Tests: `LoadsAndStores` (one
+store per cycle), `StoreOfZeroRegisterTakesOneEntry`.
 
 ### 3.3 Instruction tables, FP and ASIMD
 
@@ -451,12 +459,12 @@ Multicycle co-issue rule for stores of more than 128 bits: [U-2](#u-2).
 | ADDHN(2), RSUBHN(2), SQABS, SQADD, SQNEG, SQSUB, SUBHN(2), SUQADD, UQADD, UQSUB, USQADD | 4 / 2 | `A520Wr_VALU_4` |
 | RADDHN(2) | 8 / 2/5 | `A520Wr_VALU_8r5` |
 | ADDV, SADDLV, UADDLV, 4H/4S | 4 / 1 | `A520Wr_VALU0_4` |
-| **ADDV (8B, 16B, 8H)** | 3 / 1 | `A520Wr_VALU0_3` (*fixed 2026-10-31*, was 4) |
+| **ADDV (8B, 16B, 8H)** | 3 / 1 | `A520Wr_VALU0_3` (`[a520_sog_fix]`) |
 | SADDLV, UADDLV (other) | 4 / 1 | `A520Wr_VALU0_4` |
 | CMEQ, CMGE, CMGT, CMHI, CMHS, CMLE, CMLT; CMTST | 3; 4 / 2 | default; `A520Wr_VALU_4` |
 | SDOT, UDOT; SUDOT, USDOT | 4 / 2 / VMAC | `A520Wr_VMUL` ([C-8](#c-8)); `A520Wr_VMAC_4` |
 | AND, BIC, EOR, MOV, MVN, NOT, ORN, ORR | 3 / 2 | default |
-| **SMMLA, UMMLA, USMMLA** | 4 / 2 / VALU | `A520Wr_VALU_4` (*fixed 2026-10-31*, was the default 3) |
+| **SMMLA, UMMLA, USMMLA** | 4 / 2 / VALU | `A520Wr_VALU_4` (`[a520_sog_fix]`) |
 | [SU]MAX(P), [SU]MIN(P); [SU]MAXV, [SU]MINV (4H/4S, 8B/8H, 16B) | 3 / 2; 4 / 1 | default; `A520Wr_VALU0_4` |
 | MUL, SQDMULH, SQRDMULH; MLA, MLS | 4 / 2 / VMAC | `A520Wr_VMUL` (MUL, MLA, MLS), `A520Wr_VMAC_4` |
 | SQRDMLAH, SQRDMLSH (D, Q) | 4 / 1 / VMAC | `A520Wr_VMAC_4t1` (VMAC 2 cycles) |
@@ -471,8 +479,9 @@ Multicycle co-issue rule for stores of more than 128 bits: [U-2](#u-2).
 | SQRSHL, SQSHL, UQRSHL, UQSHL (register) | 4 / 2 | `A520Wr_VALU_4` (the SOG prints "VALUE", [I-7](#i-7)) |
 
 ADDV: the SOG has three rows, "ASIMD arith, reduce, 4H/4S ADDV, SADDLV, UADDLV 4 1", "ASIMD arith,
-reduce ADDV 3 1" and "ASIMD arith, reduce SADDLV, UADDLV 4 1" (p.31, checked in the PDF); every ADDV
-used to have 4. Measured: `addv b0, v0.16b` twice + branch 8.0 -> 6.0 cycles/iteration. Test:
+reduce ADDV 3 1" and "ASIMD arith, reduce SADDLV, UADDLV 4 1" (p.31, checked in the PDF); the
+model gives the 4H/4S ADDV 4 and the other ADDV forms 3. Measured: `addv b0, v0.16b` twice + branch
+6.0 cycles/iteration. Test:
 `AsimdFixedRows`, `AsimdSpotChecks`.
 
 <a id="c-22"></a>
@@ -494,7 +503,7 @@ Scalar and vector square roots differ ([I-3](#i-3)).
 **C-23. Sec. 3.18, BF16 (Table 3-17, p.37-38, l.1817-1842).** BFCVTN(2), BFCVT "4 / 2 / VALU":
 `A520Wr_VALU_4`. BFDOT "10 / 2 / VMAC, VALU": `A520Wr_BFDOT` (10, one VMAC + one VALU unit).
 BFMLALB/T "4 / 2 / VMAC": `A520Wr_VMAC_4`. **BFMMLA "14, 15 / 1, 1/2 / VMAC, VALU"**:
-`A520Wr_BFMMLA` (14, VMAC 2 cycles, VALU 2 cycles; *fixed 2026-10-31*, was the default 3). Test:
+`A520Wr_BFMMLA` (14, VMAC 2 cycles, VALU 2 cycles; `[a520_sog_fix]`). Test:
 `AsimdFixedRows`.
 
 <a id="c-24"></a>
@@ -511,7 +520,7 @@ BFMLALB/T "4 / 2 / VMAC": `A520Wr_VMAC_4`. **BFMMLA "14, 15 / 1, 1/2 / VMAC, VAL
 
 <a id="c-25"></a>
 **C-25. Sec. 3.20, ASIMD loads (Table 3-19, p.40-43, l.1950-2111).** Every row has its own
-`InstRW` (generated from the text by the 2026-10-30 session, `A520Wr_VLS_<lat>_<pipe><cycles>`;
+`InstRW` (`A520Wr_VLS_<lat>_<pipe><cycles>`;
 writeback forms add `A520Wr_WB`, latency 1, or `A520Wr_WBn<1/T>` where the row's throughput T is
 below 1, [B-3](#b-3)). Checked row by row against l.1959-2111 for this document: LD1 1-4
 registers D/Q (3 / 2, 3 / 2, 3 / 1, 3 / 1, 4 / 1/2 x 4), LD1 one lane and LD1R (3 / 2), LD2 multiple
@@ -539,16 +548,16 @@ ST3 (1/4, 1/6, 1/3, one lane 1/2), ST4 (1/4, 1/8, 1/4, one lane 1/2). Writeback 
 | SHA1C, SHA1M, SHA1P; SHA1SU0, SHA1SU1 | 4 / 2; 3 / 2 / VMC | `A520Wr_VMC4`; `A520Wr_VMC3` |
 | SHA256H, SHA256H2, SHA256SU0, SHA256SU1 | 4 / 2 / VMC | `A520Wr_VMC4` |
 | SHA512*, RAX1, SM3*, SM4E, SM4EKEY | 9 / 1/9 / VMC | `A520Wr_VMC9` (VMC 18 cycles on two units) |
-| BCAX, EOR3; **XAR** | 3; **4** / 2 / VALU | default; `A520Wr_VALU_4` (*fixed 2026-10-31*, was 3; checked in the PDF, p.46) |
+| BCAX, EOR3; **XAR** | 3; **4** / 2 / VALU | default; `A520Wr_VALU_4` (`[a520_sog_fix]`; checked in the PDF, p.46) |
 
 AES fusion: [U-4](#u-4). None of these instructions can be decoded by `mca_tool --mcpu cortex-a520`
-at present ([X-1](#x-1)); the values were read with `mca-insts-info`.
+([X-1](#x-1)); the values were read with `mca-insts-info`.
 
 <a id="c-28"></a>
 **C-28. Sec. 3.23, CRC (Table 3-22, p.46, l.2278-2284).** "CRC checksum ops CRC32, CRC32C 2 / 1 /
-MAC" (checked in the PDF): `A520Wr_CRC` 2 on `A520UnitMAC` (*fixed 2026-10-31*, `[a520_sog_fix]`;
-was the stock class, latency 1 on an ALU). Measured: `crc32x w1, w1, x2` twice + branch 2.0 -> 4.0
-cycles/iteration. Test: `CrcOnMac`.
+MAC" (checked in the PDF): `A520Wr_CRC` 2 on `A520UnitMAC` (`[a520_sog_fix]`; the stock class
+would give latency 1 on an ALU). Measured: `crc32x w1, w1, x2` twice + branch 4.0 cycles/iteration.
+Test: `CrcOnMac`.
 
 Tables 3-8 to 3-10 (MTE) and 3-23 to the end of chapter 3 (SVE, p.47-71) are not compared
 ([D-10](#d-10)).
@@ -561,11 +570,15 @@ Tables 3-8 to 3-10 (MTE) and 3-23 to the end of chapter 3 (SVE, p.47-71) are not
 **N-1. Instructions with three or more GPR sources that have no SOG row take one entry.**
 SOG sec. 4.1 (p.72, l.3574-3578): the two-entry rule is stated for every instruction. Implementation:
 `NumMicroOps = 2` only on the classes of [C-2](#c-2). Other A64 instructions with three GPR sources
-or destinations keep one entry, e.g. STXP/STLXP (Rt, Rt2, Rn; status Ws). Why open: these
-instructions have no row in the A520 SOG, so giving them a write of their own would also mean
-choosing a latency and pipe the SOG does not give; they are rare in the research binaries (not
-counted). The LSE atomics CAS and CASP, which have rows borrowed from the A55 ([B-1](#b-1)), take
-two entries by this rule.
+or destinations and no SOG row may keep one entry (not enumerated). Why open: giving such an
+instruction a write of its own also means choosing a latency and pipe the SOG does not give; such
+instructions are rare (not counted). Covered by the rule: the LSE atomics CAS and CASP,
+which have rows borrowed from the A55 ([B-1](#b-1)), and the exclusive stores (`[a520_stx]`):
+STXR/STLXR (Rt, Rn) take one entry, STXP/STLXP (Rt, Rt2, Rn) two, one when Rt or Rt2 is
+the zero register ([D-15](#d-15)); their latency and pipe are those of [U-6](#u-6). They need
+`InstRW`s of their own because the stock `WriteSTX` is a `WriteSequence` of `WriteST` and `WriteLD`,
+which the model's `WriteRes<WriteSTX>` cannot override and which would give all four two entries.
+Test: `ExclusiveStoresFollowTheEntryRule`.
 
 ---
 
@@ -617,12 +630,15 @@ reading under which "2/N" is reachable with one VMC pipeline is two 64-bit opera
 **D-6. "Latency=2 when the dependency is on Rm" (Table 3-2 note 1).**
 SOG p.14 (l.616, l.639, checked in the PDF): "Arithmetic, extend and shift ADD{S}, SUB{S} 1[1]";
 note 1 "Latency=2 when the dependency is on Rm". Implementation: the Rm read of `(ADD|SUB)S?[WX]rs`
-with a non-zero shift (`RegShiftedPred`) and of `(ADD|SUB)S?[WX]rx(64)?` with an extend
-(`RegExtendedPred`) is `A520Rd_RmLate` (`SchedReadAdvance<-1>`): a producer is seen one cycle later
+with a non-zero shift (`RegShiftedPred`) and of every `(ADD|SUB)S?[WX]rx(64)?` (every extend, UXTB
+included; the identity extend: [U-10](#u-10)) is `A520Rd_RmLate` (`SchedReadAdvance<-1>`): a producer is seen one cycle later
 through Rm; Rn and the result keep latency 1. Reading: the note qualifies this instruction's latency
 from its Rm input (the operand that goes through the shifter). Not applied to the logical shifted
-forms (no note in that row) or to "Arithmetic, basic, flagset" ([I-1](#i-1)). Test:
-`ArithmeticAndLogical` (chain through Rm 2 per step, through Rn 1).
+forms (no note in that row) or to "Arithmetic, basic, flagset" ([I-1](#i-1)). The extended forms
+are selected by opcode, not by `RegExtendedPred` ("extend operand != 0"), which would leave out UXTB,
+whose extend operand is 0 (`[a520_ext]`); measured `add x1, x2, w1, uxtb` + branch 2.0.
+Tests: `ArithmeticAndLogical` (chain through Rm 2 per step, through Rn 1),
+`ExtendedRmNoteIncludesUxtb`.
 
 <a id="d-7"></a>
 **D-7. Scope of the ADRP forwarding.**
@@ -641,7 +657,7 @@ Effect: optimistic (by up to 3 cycles per step) for mixed sequences.
 
 <a id="d-9"></a>
 **D-9. No general write-back ordering.**
-*Introduced 2026-10-31* (`[a520_no_wb_order]`).
+(`[a520_no_wb_order]`)
 SOG: the A520 SOG states no completion-order constraint on issue. The only issue constraints are
 those of sec. 4.1 (co-issue limits "ignoring hazards", the two-entry rule, multicycle entries) and
 the hazards; the instruction tables give pipelined throughputs (e.g. FADD 2 per cycle, loads 2 per
@@ -649,20 +665,19 @@ cycle) that the pipelines of fig. 1 (p.10: integer EX1-EX3 then WR; VPU V0-V5 th
 without an ordering stall. Implementation: `A520InOrderIssueStage` does not apply the stock
 `InOrderIssueStage` rule that a younger instruction may not write back before an older one
 ([section 2.2](#22-issue-stage-srca520a520_issue_stagecpp)). Reason: that rule is an LLVM default
-for in-order models, not a statement of the SOG, and it turned e.g. an FADD (4) followed by an
-independent ADD (1) into a 3-cycle stall. Measured (section 10, + branch, before -> after): `fadd d0;
-add; fadd d2; add` 6.0 -> 1.68; `ldr; add; ldr; add` 2.0 -> 1.67; `mul x3; add; mul x4; add` 7.0 ->
-4.01; `madd w1, w2, w3, w4; add; add` 3.0 -> 2.0. Whether the
-core limits the number of instructions in flight (a retire buffer) is not stated; none is modelled.
+for in-order models, not a statement of the SOG, and it would turn e.g. an FADD (4) followed by an
+independent ADD (1) into a 3-cycle stall. Measured (section 10, + branch): `fadd d0; add; fadd d2;
+add` 1.68; `ldr; add; ldr; add` 1.67; `mul x3; add; mul x4; add` 4.01; `madd w1, w2, w3, w4; add;
+add` 2.0. Whether the core limits the number of
+instructions in flight (a retire buffer) is not stated; none is modelled.
 Test: `NoWriteBackOrderStall`.
-Decision of the project owner: follow the SOG, which has no such rule, and keep the change.
+Decision of the project owner: follow the SOG, which has no such rule.
 
 <a id="d-10"></a>
 **D-10. SVE, SME, MTE and the PAuth feature predicate are outside the model.**
 `UnsupportedFeatures` lists SVE, PAuth, SME, MTE and CSSC; the SVE tables (sec. 3.24-3.31,
 p.47-71), the MOVPRFX fusion (sec. 4.2), the tag tables (sec. 3.9-3.11) and RDFFRS (sec. 4.1) are
-not compared. The research binaries were checked to contain no MOVPRFX (mnemonic count); SVE in
-general was not checked (not verified). The PAuth instructions that do occur are modelled anyway
+not compared. The PAuth instructions that occur in non-SVE code are modelled anyway
 ([C-13](#c-13)).
 
 <a id="d-11"></a>
@@ -688,23 +703,22 @@ subsequent divide operations until complete", [C-9](#c-9)), so the occupancy is 
 (`A520Wr_UDIV`, `A520Wr_SDIV`). The SOG does not say what "bits" counts, so this is the lower
 bound of the formula, not a value the SOG states for any operand; with the operand width the formula
 gives UDIV 11 / 19 and SDIV 12 / 20 ([I-2](#i-2)). Effect: optimistic for divide-heavy code (a divide can
-take up to 12 or 20 cycles). The research binaries contain 5,499 UDIV and 3,304 SDIV. Test:
-`DivideAndMultiply`.
+take up to 12 or 20 cycles). Test: `DivideAndMultiply`.
 
 <a id="d-14"></a>
 **D-14. NOP takes no execution resource.**
 The SOG has no row for NOP (nor for the other hints, MRS/MSR, barriers). Implementation
 (`[a520_nop]`): the `NOP` opcode (`nop`, 0xd503201f) has a write with latency 1 and no resource
-(`A520Wr_Nop`); it still takes one issue entry. The other hints (`HINT`: YIELD, BTI, ...) keep
-`WriteHint` on an ALU, as do the system instructions and barriers (their rows are not in the SOG). Reason: a NOP
-does no work, and the SOG gives no pipe for it; modelling it on an ALU (as before) limited four NOPs
+(`A520Wr_Nop`); it still takes one issue entry. The other hints (`HINT`: YIELD, BTI, ...), the
+system instructions and the barriers have no resource either ([D-16](#d-16)). Reason: a NOP
+does no work, and the SOG gives no pipe for it; modelling it on an ALU would limit four NOPs
 plus the loop branch to 2.0 cycles/iteration, with no basis in the guide (same choice as for the A55,
-[a55-sog.md](a55-sog.md) C-3 and U-13). Measured (section 10): six `nop` 2.0 cycles per iteration, three entries per
-cycle. The research binaries contain 348,224 NOPs (mostly alignment padding; not verified). Test:
+[a55-sog.md](a55-sog.md) C-3 and U-13). Measured (section 10): six `nop` + branch 2.33 cycles per
+iteration (seven entries, three per cycle); without the branch 2.0 (test). Test:
 `NopHasNoResourceAndMulTakesOneEntry`.
 
 <a id="d-15"></a>
-**D-15. The zero register is not a GPR source: MUL, MNEG, SMULL, UMULL take one issue entry.**
+**D-15. The zero register is not a GPR source: MUL, MNEG, SMULL, UMULL and stores of WZR/XZR take one issue entry.**
 SOG sec. 4.1 (p.72, l.3574-3578): an instruction takes two issue entries with three or more general
 purpose source registers; the SOG does not say whether the zero register WZR/XZR is a "general purpose
 source register". Implementation (`[a520_mul_zr]`): MADD, MSUB, SMADDL, UMADDL, SMSUBL, UMSUBL whose
@@ -713,9 +727,25 @@ UMNEGL, take one entry (`A520Wr_IMW1`, `A520Wr_IMX1`, `A520Wr_IML1`: the latency
 occupancy of the MADD rows, [C-12](#c-12)); with a real accumulator they take two ([C-2](#c-2)). The
 accumulator-forwarding advance of [C-5](#c-5) applies to the results of both. Reason: a register that
 holds no value takes no read port, and underestimation is preferred over an unexplained
-overestimation (project policy). MUL is common: 97,837 in the research binaries. Measured (section 10): `mul w1, w2, w3; add;
-add` + branch 1.34 cycles/iteration (`madd w1, w2, w3, w4`: 2.0). The queue capacity of four GPR
-destinations / six sources is still not modelled. Test: `NopHasNoResourceAndMulTakesOneEntry`.
+overestimation (project policy). MUL is common. Measured (section 10): `mul w1, w2, w3; add;
+add` + branch 1.34 cycles/iteration (`madd w1, w2, w3, w4`: 2.0).
+The same policy applies to the stores (`[a520_store_zr]`, `[a520_stx]`): STR register
+offset whose data Rt or index Rm is WZR/XZR, STP/STNP (offset, pre/post-index) whose Rt or Rt2 is
+WZR/XZR, and STXP/STLXP whose Rt or Rt2 is WZR/XZR take one entry (`A520Wr_ST`). Measured (section
+10, + branch): `stp xzr, xzr, [x0]; add; add` 1.33, `str wzr, [x0, x1, lsl #2]; add; add` 1.33
+(`stp x1, x2, [x0]; add; add` 2.0). The queue capacity of four GPR destinations / six sources is
+not modelled. Tests:
+`NopHasNoResourceAndMulTakesOneEntry`, `StoreOfZeroRegisterTakesOneEntry`,
+`ExclusiveStoresFollowTheEntryRule`.
+
+<a id="d-16"></a>
+**D-16. System instructions, barriers and hints: latency 1, no pipeline.**
+(`[a520_sys]`; the project owner's decision, the same as the Cortex-A720's,
+[a720-sog.md](a720-sog.md) D-12.)
+SOG: no row for MRS, MSR, DMB, DSB, ISB or the hint instructions other than the pointer-authentication
+ones ([C-13](#c-13)). Implementation: `WriteSys`, `WriteBarrier` and `WriteHint` have latency 1 and no
+resource; they still take one issue entry. Reason: the SOG gives no value, and the lower estimate is
+taken (project policy), as on the A720 and the A78. Test: `SystemInstructionsAndHints`.
 
 ---
 
@@ -738,7 +768,7 @@ of more than 128 bits, stores with release, RDFFRS. Unclear: how many cycles "th
 all), and whether co-issue with older instructions of the same cycle is also blocked. Current
 handling: not modelled; e.g. STP Q (256 bits, 1/2) holds the store pipe 2 cycles but ALU and load
 instructions issue with it. The LSE atomics carry the A55's group bits instead ([B-1](#b-1): first
-instruction of its cycle; CASP alone), which is not this rule. Expected impact: small (memcpy-like Q-register loops). How to settle:
+instruction of its cycle; CASP alone), which is not this rule. Expected impact: small (copy loops on Q registers). How to settle:
 hardware measurement of `stp q0, q1; add; add` loops.
 
 <a id="u-3"></a>
@@ -754,8 +784,8 @@ instruction stops every younger instruction ([C-3](#c-3)). How to settle: hardwa
 SOG sec. 4.2 (p.73, l.3626) and 4.13 (p.77, l.3858-3870): AESE + AESMC and AESD + AESIMC pairs are
 fused; sec. 4.1 (l.3582-3583): "AES instructions will stall until there is at least one other
 instruction available to be issued". Unclear: the latency and throughput of a fused pair. Current
-handling: not modelled (each instruction 3, Crypto). Expected impact: none on the research binaries
-(no AES instruction found, and AES cannot be decoded at present, [X-1](#x-1)).
+handling: not modelled (each instruction 3, Crypto). Expected impact: none at present (AES cannot be
+decoded for `cortex-a520`, [X-1](#x-1)).
 
 <a id="u-5"></a>
 **U-5. Branches: alignment, taken branches, prediction.**
@@ -772,37 +802,60 @@ LSE atomics (sec. 4.1 only mentions atomics and release stores as multicycle, [U
 atomics have the A55's rows by a project decision ([B-1](#b-1)); the newer CAST/CASPT (LSUI) and
 LDCLRP/LDSETP/SWPP (LSE128), which the A55 model does not cover either, are still `WriteAtomic`
 `Unsupported` and dropped by InstrBuilder (`[WARN]`). Current handling of the others (as found):
-stock classes, e.g. LDAR 2 on the load group, STLR 1 on the store pipe, STLXR latency 3 (as reported
-by `mca-insts-info`); the data of STLR/STLLR/STLXR/STLXP reads `ReadST` ([B-2](#b-2)). The A55's rows
+stock classes, e.g. LDAR 2 on the load group, STLR 1 on the store pipe; the exclusive stores
+STXR/STXP/STLXR/STLXP take the store row of Table 3-7 ("- / 1 / Load/Store": status result latency 1,
+`A520UnitLdSt` one cycle) with the entries of [N-1](#n-1) (`[a520_stx]`; the stock `WriteSTX` would
+give latency 3, the store pipe and a load-pipe slot, two entries); the data of
+STLR/STLLR/STLXR/STLXP reads `ReadST` ([B-2](#b-2)). Measured (section 10, + branch): `ldxr x1, [x0];
+add x1, x1, #1; stxr w2, x1, [x0]; cbnz w2, 1b` 4.0. The A55's rows
 for these opcodes (A55 SOG sec. 4.8/4.9: LDAR/LDAXR "3 (2)", STLR 2 at 1/2, STLXR 4 at 1/2) were not
 taken over: the A55's acquire load costs what its ordinary load costs, which the A520 model already
-does (2, its own load latency), and STLR/STLXR were not part of the decision of [chapter 9](#9-borrowed-from-the-cortex-a55-b).
-None of these occur in the research binaries except 139 LDAR (mnemonic count; no LSE atomic). How to
-settle: hardware measurement, or adopt the A55's rows by a further project decision.
+does (2, its own load latency), and STLR/STLXR are not part of the decision of [chapter 9](#9-borrowed-from-the-cortex-a55-b).
+How to settle: hardware measurement, or adopt the A55's rows by a further project decision.
 
 <a id="u-7"></a>
 **U-7. MAC accumulator forwarding between different forms.**
 SOG Table 3-3 note 1: "the result of one MAC operation ... as the accumulate operand of a following
-MAC operation". Unclear: whether this includes a W producer into an X consumer, an X MADD into an
-SMADDL accumulator, or SMADDL into MADD X. Current handling: only within the W forms and within
-the X MADD/MSUB forms ([C-5](#c-5)); `madd x1, x2, x3, x4; smaddl x4, w2, w3, x1` + branch 6.0
-cycles/iteration (4 + 2, no forwarding). How to settle: hardware measurement.
+MAC operation" and "a typical sequence of multiply-accumulate instructions can issue one every 2
+cycles". Unclear: how many cycles a chain between different forms takes (W into X, X into SMADDL,
+SMADDL into MADD, ...); the note does not restrict the forms, and its wording is the one under which
+the Cortex-A55, A76 and A720 models forward from every multiply (incl. the zero-accumulator MUL) to
+every multiply-accumulate. Current handling (`[a520_mac_fwd]`): every MAC write is a producer, and the advance is the
+consumer's, taken from the same-form rate of the note (MADD W 1, MADD X 2, SMADDL & co. 0, since
+their own chain is already 2): X into W 4 - 1 = 3, W into X 3 - 2 = 1, SMADDL into X 0, any into
+SMADDL its full latency. A scheduling model cannot make the advance depend on both producer and
+consumer, so a uniform 2 for every pair is not expressible. Measured (section 10, + branch):
+`madd x1, x2, x3, x4; smaddl x4, w2, w3, x1` 5.0; `madd w1, w2, w3, w4; smaddl x4, w2, w3, x1` 4.0;
+`madd x4, x2, x3, x1; madd w1, w5, w6, w4` 4.0. Test:
+`MacAccumulatorForwardingAcrossForms`. How to settle: hardware measurement.
 
 <a id="u-8"></a>
 **U-8. Latency of AUTDA, AUTDB, AUTDZA, AUTDZB.**
 SOG Table 3-4 (p.16, l.707-710): "Authenticate data address ... - 1 PAC": no latency, although the
-instructions write a register. Current handling: unchanged (stock class: latency 1 on an ALU for
+instructions write a register. Current handling: the stock class (latency 1 on an ALU for
 AUTDA/AUTDB; AUTDZA/AUTDZB have no scheduling data and are dropped by InstrBuilder, with the
-`[WARN]` report of [docs.md](docs.md) section 2.F; checked 2026-10-31). How to settle: adopt the 5 of the other PAC rows (a
+`[WARN]` report of [docs.md](docs.md) section 2.F). How to settle: adopt the 5 of the other PAC rows (a
 project decision) or hardware measurement.
 
 <a id="u-9"></a>
 **U-9. LDRAA, LDRAB.**
 SOG Table 3-4 (p.17, l.763-770): offset "2 2 PAC", pre-indexed "2 1 PAC": a load whose only
 pipeline is PAC (one pipe, yet throughput 2). Unclear: whether it also uses a load pipe, and how
-throughput 2 is reached on one PAC pipe. Current handling: unchanged (no scheduling data: LDRAA is
-dropped by InstrBuilder and reported with `[WARN]`, checked 2026-10-31). None occur in the research
-binaries (mnemonic count).
+throughput 2 is reached on one PAC pipe. Current handling: no scheduling data (LDRAA is
+dropped by InstrBuilder and reported with `[WARN]`).
+
+<a id="u-10"></a>
+**U-10. ADD/SUB (extended register) with an identity extend.**
+SOG Table 3-2 (p.14, l.616, l.639): "Arithmetic, extend and shift ADD{S}, SUB{S} 1[1]", note 1
+"Latency=2 when the dependency is on Rm". Unclear: whether the extended-register form with a zero
+shift and a full-width extend (UXTX/SXTX for X, UXTW/SXTW for W), which assemblers write as `add x1,
+sp, x3` (the register form with SP needs the extended encoding), counts as "extend and shift" or as
+"Arithmetic, basic" (1, no note). Current handling (`[a520_ext]`): an extend, so Rm is read with the
+one-cycle delay of [D-6](#d-6) (`add x1, sp, x1` chain 2.0 per step). This is the reading of the
+Cortex-A78 document (a78-sog.md U-4; also A76, X1, A720), which counts it as an extend. Expected
+impact: small (one cycle on an Rm dependency; Rn and the result keep latency 1). How to settle:
+hardware measurement of an `add x1, sp, x1` chain, or an owner decision. Test:
+`ExtendedRmNoteIncludesUxtb`.
 
 ---
 
@@ -848,7 +901,7 @@ Table 3-1.
 **I-7. Misprints.**
 "ldrp x0, [x0, #lo12 <const>]" (sec. 4.5, l.3678; LDR meant). Pipeline "VALUE" (l.1615, l.1661;
 VALU meant). "VCVTAU" (l.1698; FCVTAU). "PACIA171" (l.757; PACIA1716). Sec. 4.7 lists "SMLAL2"
-twice and no SMLSL2 (l.3697). "Store register, register offset, extend, scale by 1 STRH" (l.995-997;
+twice and no SMLSL2 (l.3697). "RETA, RETB" (Table 3-4, l.729; RETAA, RETAB meant). "Store register, register offset, extend, scale by 1 STRH" (l.995-997;
 scale by 2 meant, as in the row for the non-extended form, l.986-988). Implementation: the evident
 meaning.
 
@@ -858,36 +911,34 @@ meaning.
 
 <a id="x-1"></a>
 **X-1. Cryptographic instructions are not decoded for `cortex-a520`.**
-`initTarget` (`src/frontend/frontend.cpp`) creates the subtarget with an empty feature string.
+`initializeFrontend` (`src/frontend/frontend.cpp`) creates the subtarget with an empty feature string.
 LLVM 22's `cortex-a520` (and `cortex-a720`) has no AES/SHA2/SHA3 feature (the Cryptographic
 Extension is optional on these cores, SOG sec. 2, l.376), so `llvm-mc --disassemble
 -mcpu=cortex-a520` rejects AESE, XAR and SHA256H while it accepts them with `-mcpu=cortex-a55` or
-`cortex-a78` (checked 2026-10-31). The rows of [C-27](#c-27) therefore never apply to binaries; the
-undecodable words are skipped by the frontend (behaviour not examined further). The research
-binaries contain no such instruction (mnemonic count), so the research results are not affected.
-Fixing it means passing a feature string (e.g. `+aes,+sha2,+sha3`) for these CPUs in shared frontend
-code; not done.
+`cortex-a78`. The rows of [C-27](#c-27) therefore never apply to binaries; the
+undecodable words are skipped by the frontend (behaviour not examined further). Fixing it means
+passing a feature string (e.g. `+aes,+sha2,+sha3`) for these CPUs in shared frontend code.
 
 ---
 
 ## 9. Borrowed from the Cortex-A55 (B)
 
-These items have no basis in the A520 SOG. The project owner decided on 2026-10-31 to give the
+These items have no basis in the A520 SOG. The project owner decided to give the
 Cortex-A520 the treatment of the Cortex-A55 model ([a55-sog.md](a55-sog.md)) in four places where the
 A520 SOG says nothing usable. The A55's values come from the A55 SOG; for the A520 they are an
 assumption. **None of them is SOG-based**; each is to be revisited as soon as an A520 measurement or
 an A520 SOG statement on the question appears. The code marks them with `[a520_from_a55_*]` tags
 ([section 2.3](#23-code-tags-and-the-items-of-this-document)). Tests: `A520SogTest.Borrowed*`.
 
-Decision of the project owner: all four (B-1 to B-4) are kept.
+Decision of the project owner: all four (B-1 to B-4) apply.
 
 <a id="b-1"></a>
 **B-1. LSE atomics: the A55's rows.**
 A520 SOG: no instruction table has a row for an atomic (loads sec. 3.7, p.18-20, l.837-947; stores
 sec. 3.8, p.20-21, l.952-1003). Sec. 4.1 (p.72, l.3596-3600) names "Atomic instructions with Acquire
 or Release semantics" among the multicycle entries ([U-2](#u-2)), and its two-entry rule (l.3574-3578)
-applies to every instruction. Before: `WriteAtomic` `Unsupported`, so InstrBuilder dropped every LSE
-atomic (reported with `[WARN]`). A55: [a55-sog.md](a55-sog.md) C-19 (A55 SOG sec. 4.10 gives latency,
+applies to every instruction. Without these rows `WriteAtomic` is `Unsupported`, and InstrBuilder
+drops every LSE atomic (reported with `[WARN]`). A55: [a55-sog.md](a55-sog.md) C-19 (A55 SOG sec. 4.10 gives latency,
 throughput and dual issue per group) and U-5 (no pipeline is given; the A55 model holds its load and
 its store pipe for `1/T` cycles each, since an atomic is a load and a store); dual issue "01"
 (`BeginGroup`), CASP "00" (`SingleIssue`); ST&lt;OP&gt; is LD&lt;OP&gt; with Rt = WZR/XZR.
@@ -910,19 +961,16 @@ CAS and CASP read three or more GPRs (Rs, Rt, Rn), LD&lt;OP&gt; and SWP two. The
 A55's absolute values, not scaled to the A520 (whose ordinary load is 2 where the A55's is 3); there is
 no basis for a scaling. Not covered, still dropped (as on the A55): CAST/CASPT (FEAT_LSUI),
 LDCLRP/LDSETP/SWPP (FEAT_LSE128), RCW*. LDAR/STLR and the exclusives keep the stock classes
-([U-6](#u-6)). Measured (section 10, + branch; before: dropped): `ldadd x1, x2, [x0]` 2.0
+([U-6](#u-6)). Measured (section 10, + branch): `ldadd x1, x2, [x0]` 2.0
 cycles/iteration, `ldaddal` 3.0, `stadd x1, [x0]` 1.0, `cas x1, x2, [x0]` 4.0, `casp x2, x3, x4, x5,
-[x0]` 5.0, `ldadd x1, x2, [x0]; ldr x5, [x6]` 3.0. The research binaries contain no LSE atomic
-(mnemonic count). Test: `BorrowedAtomicsFromA55`.
+[x0]` 5.0, `ldadd x1, x2, [x0]; ldr x5, [x6]` 3.0. Test: `BorrowedAtomicsFromA55`.
 
 <a id="b-2"></a>
 **B-2. Store data is read one cycle late.**
-A520 SOG: the store tables print no latency ("-", sec. 3.8 Table 3-7, p.20-21, l.965-1003; sec. 3.15;
+A520 SOG: the store tables print no latency ("-", sec. 3.8 Table 3-7, p.21, l.965-1003; sec. 3.15;
 sec. 3.21) and say nothing about when the data operand of a store is needed; the latency is "the
 minimum latency seen by an operation dependent on" the producer (sec. 3.1, p.12, l.531-535), and the
-only forwarding paths described are those of sec. 4.5-4.7 ([C-4](#c-4)). Before: `ReadAdvance<ReadST,
-0>`, and `ReadST` only on the FP register-offset stores (stock `Sched` lists; the GPR register-offset
-rows of the model named no read). A55: [a55-sog.md](a55-sog.md) C-18 and U-9 (A55 SOG sec. 4.9
+only forwarding paths described are those of sec. 4.5-4.7 ([C-4](#c-4)). A55: [a55-sog.md](a55-sog.md) C-18 and U-9 (A55 SOG sec. 4.9
 "do not need to wait for data operands (which are required at wr)", sec. 3.1.1 the ALU0 ex2 -> store
 ex2 path, sec. 4.14 FP data "required at f2"): `ReadAdvance<ReadST, 1>` from every producer, on the
 data of every store form with an A55 SOG row. Implementation (`[a520_from_a55_store_data]`): the same
@@ -931,26 +979,25 @@ FP; the unsigned-offset forms keep the ADRP forwarding on the base, [C-6](#c-6))
 every addressing mode, STLR/STLLR/STLXR/STLXP (with their stock writes) and the `Vt` of every ASIMD
 ST1-ST4 row; reads in operand order (data, then the lane index of the one-lane forms, then the base).
 As on the A55, STXR/STXP and the atomics have no `ReadST`. The writes (latency, resources, entries)
-are unchanged (`mca-insts-info` identical). Measured (section 10, + branch, before -> after): `mul x1,
-x2, x3; str x1, [x0]` 4.0 -> 3.0 (register offset `str x1, [x0, x4]` 5.0 -> 4.0); `ldr x1, [x0]; str
-x1, [x5]` 2.0 -> 1.0 (the same for `stur`, `str ..., #8` post-index and `stlr`); `ldr x1, [x0]; stp
-x1, x2, [x5]` 3.0 -> 2.0; two load -> store pairs 4.0 -> 2.0; `fadd d0, d2, d2; str d0, [x5]` 4.0 ->
-3.0 (also `stp d1, d0` and `stp q1, q0`); `add v0.8b, ...; st1 {v0.8b}, [x5]` 3.0 -> 2.0 (also the
-one-lane post-index form); `ld1 {v0.8b}, [x0]; st1 {v0.8b}, [x5]` 3.0 -> 2.0. Test: `BorrowedStoreDataNeededLater`.
+are not affected. Measured (section 10, + branch): `mul x1, x2, x3; str x1, [x0]` 3.0 (register
+offset `str x1, [x0, x4]` 4.0); `ldr x1, [x0]; str x1, [x5]` 1.0 (the same for `stur`, `str ..., #8`
+post-index and `stlr`); `ldr x1, [x0]; stp x1, x2, [x5]` 2.0; two load -> store pairs 2.0; `fadd d0,
+d2, d2; str d0, [x5]` 3.0 (also `stp d1, d0` and `stp q1, q0`); `add v0.8b, ...; st1 {v0.8b}, [x5]`
+2.0 (also the one-lane post-index form); `ld1 {v0.8b}, [x0]; st1 {v0.8b}, [x5]` 2.0. Test: `BorrowedStoreDataNeededLater`.
 
 <a id="b-3"></a>
 **B-3. Base-register update latency 1/T.**
 A520 SOG: "Base register updates are done in parallel to the operation" (sec. 3.7, p.18, l.840; sec.
 3.8, p.20, l.953; sec. 3.14, p.26, l.1222; sec. 3.15, p.27, l.1291; sec. 3.20, p.40, l.1953; sec.
-3.21, p.43, l.2115); no latency is given. Before: latency 1 for every writeback form (`WriteAdr`,
-`A520Wr_WB`: the update is an address addition, taken to be available like an ALU result). A55:
+3.21, p.43, l.2115); no latency is given. A literal reading would give every writeback form latency
+1 (the update is an address addition, available like an ALU result). A55:
 [a55-sog.md](a55-sog.md) U-11: the A55 SOG prints "(1/T)" as the update latency of writeback stores
 and of the ASIMD loads and stores (A55 SOG sec. 4.9 note 3, 4.14, 4.18, 4.19), read as the reciprocal
 of the row's throughput; the A55 model has `WriteAdr` 1, 2 for STP Q (T = 1/2) and
 `CortexA55WriteVAdr<1/T>` on the ASIMD rows. Implementation (`[a520_from_a55_base_update]`): the
 update latency is `1/T` of the A520 row's own throughput, rounded up, and 1 when T >= 1
 (`A520Wr_WBn<N>`, no resource, no entry). Rows with T >= 1 keep 1: LDR/STR pre/post (all sizes),
-LDP/STP W/X/S/D pre/post, LDP Q pre/post, and the ASIMD rows with T = 1 or 2. Changed (1 -> N):
+LDP/STP W/X/S/D pre/post, LDP Q pre/post, and the ASIMD rows with T = 1 or 2. Rows with N > 1:
 
 | Rows (writeback forms) | A520 T | N |
 |---|---|---|
@@ -965,14 +1012,14 @@ LDP/STP W/X/S/D pre/post, LDP Q pre/post, and the ASIMD rows with T = 1 or 2. Ch
 | ST4 multiple Q B/H/S | 1/8 | 8 |
 
 For the loads N does not exceed the data latency, so only a consumer of the base that is not
-waiting for the data sees the change. A chain of the same instruction through its base is bounded by
-its occupancy (N cycles) anyway; the change shows when another instruction uses the updated base.
-Measured (section 10, + branch, before -> after): `stp q0, q1, [x0], #32` + three dependent ADDs from
-x0 3.0 -> 4.0; `st4 {v0.16b-v3.16b}, [x0], #64; ldr x2, [x0]; add x3, x2, #1` 8.0 -> 10.0; `ld4
-{v0.16b-v3.16b}, [x0], #64; ldr x2, [x0]` + two dependent ADDs 4.0 -> 6.0; `st1 {v0.16b-v2.16b},
-[x0], #48; ldr x2, [x0]; ldr x2, [x2]` 3.5 -> 5.5; `stp q0, q1, [x0], #32` twice unchanged (4.0).
+waiting for the data sees the difference from latency 1. A chain of the same instruction through its
+base is bounded by its occupancy (N cycles) anyway; N shows when another instruction uses the updated
+base. Measured (section 10, + branch): `stp q0, q1, [x0], #32` + three dependent ADDs from x0 4.0;
+`st4 {v0.16b-v3.16b}, [x0], #64; ldr x2, [x0]; add x3, x2, #1` 10.0; `ld4 {v0.16b-v3.16b}, [x0],
+#64; ldr x2, [x0]` + two dependent ADDs 6.0; `st1 {v0.16b-v2.16b}, [x0], #48; ldr x2, [x0]; ldr x2,
+[x2]` 5.5; `stp q0, q1, [x0], #32` twice 4.0.
 This is the one borrowed item
-that makes the model slower, against the A520 SOG's "in parallel" read literally; it is kept by the
+that makes the model slower, against the A520 SOG's "in parallel" read literally; it applies by the
 owner's decision. Test: `BorrowedBaseUpdateLatency`.
 
 <a id="b-4"></a>
@@ -981,35 +1028,31 @@ A520 SOG: no statement on flag forwarding. Flag-setting instructions have latenc
 ADCS/SBCS, CCMN/CCMP, Table 3-2, p.13-14, l.597-624; SETF8/SETF16 2, Table 3-5), the latency is
 the one "seen by an operation dependent on" the instruction (sec. 3.1, l.531-535), and the forwarding
 sections (4.5-4.7) do not mention the flags; there is no dual-issue table like the A55 SOG's Table 2.
-Before: a conditional instruction (B.cond, CSEL, CCMP, ...) issued one cycle after its flag setter.
-A55: [a55-sog.md](a55-sog.md) C-4 (A55 SOG Table 2 "Conditional": a conditional instruction-1 can be
+Without the bypass a conditional instruction (B.cond, CSEL, CCMP, ...) issues one cycle after its
+flag setter. A55: [a55-sog.md](a55-sog.md) C-4 (A55 SOG Table 2 "Conditional": a conditional instruction-1 can be
 dual-issued with a flag-setting instruction-0, except arithmetic-with-carry instructions and other
 AArch32-only cases) and D-8 (FCMP/FCCMP are FP flag producers, A55 SOG sec. 5.11: the transfer from
 the FP flags takes a cycle); open points U-2 (FCCMP/FCSEL as consumers) and U-10 (2-cycle flag
 setters). The A55 stage skips such an NZCV read in `A55DecoupledIssueStage::checkRegisterHazard`
 through `a55IsFlagBypassEligible` (`src/a55/a55_bypass.h`). Implementation
 (`[a520_from_a55_flags]`, [section 2.2](#22-issue-stage-srca520a520_issue_stagecpp)):
-`A520InOrderIssueStage::checkRegisterHazard` calls the same `a55IsFlagBypassEligible` (the A55 code
-is unchanged) before the RAW check of each NZCV read, so the eligibility is exactly the A55's: every
+`A520InOrderIssueStage::checkRegisterHazard` calls the same `a55IsFlagBypassEligible` before the RAW check of each NZCV read, so the eligibility is exactly the A55's: every
 consumer except ADC/ADCS/SBC/SBCS (and NGC/NGCS), every producer except FCMP{E}/FCCMP{E} (and the
 AArch32 VMRS/VMSR); the producer's latency is ignored (A55 U-10, e.g. SETF8). Adapted to the A520
 pipeline only in what follows from it: the A55 pairs the two instructions of a dual-issue pair, the
 A520 issues up to three entries per cycle, so a setter and up to two consumers (or a chain `cmp;
 csel; ...` limited by the two ALUs) can issue in one cycle; the bypass does not depend on the slot.
-Measured (section 10, + branch, before -> after): `cmp x1, x2; csel; csel` 2.0 -> 1.5; `cmp x0, x1;
-csel x0, x4, x0, eq` 2.0 -> 1.0; `cmp; ccmp; csel` 3.0 -> 2.0; `cmp x1, x2; csel x3, ...; cmp x3, x6;
-csel` 3.0 -> 2.0; `ldr x1, [x0]; cmp x1, #0; b.eq` 4.0 -> 2.67; unchanged: `cmp; adc; adc` 2.0,
-`fcmp s0, s1; csel w3, ...; fmov s0, w3` 5.0. Test: `BorrowedFlagBypass`.
+Measured (section 10, + branch): `cmp x1, x2; csel; csel` 1.5; `cmp x0, x1; csel x0, x4, x0, eq`
+1.0; `cmp; ccmp; csel` 2.0; `cmp x1, x2; csel x3, ...; cmp x3, x6; csel` 2.0; `ldr x1, [x0]; cmp x1, #0; b.eq 1b` 2.0 (with a
+forward `b.eq` the loop takes 3.0); not bypassed: `cmp; adc; adc` 2.0, `fcmp s0, s1; csel w3, ...;
+fmov s0, w3` 5.0. Test: `BorrowedFlagBypass`.
 
 ---
 
 ## 10. Reproducing the cycle counts quoted here
 
-The cycles/iteration figures that are not from `tests/a520_sog_test.cpp` were measured by the author
-on 2026-10-31 with private builds (CMake, Release; not `build/`): "before" is a snapshot of the
-working tree before this audit, "after" the working tree with the changes of this audit. For the
-B items ([chapter 9](#9-borrowed-from-the-cortex-a55-b)) the builds were made one item after the
-other, in the order B-1 to B-4, and "before" is the build with the preceding items only:
+The cycles/iteration figures that are not from `tests/a520_sog_test.cpp` are `mca_tool` outputs of
+the model described here (a Release build):
 
 ```sh
 # body: the instructions of one iteration, e.g. "lsl x1, x1, x2" "lsl x1, x1, x2"
@@ -1030,16 +1073,19 @@ ignores loop-carried dependencies there). Re-measure before quoting a number.
 ## 11. Maintaining this document
 
 * Update an item when the SOG reading or the implementation changes. IDs run from 1 without gaps
-  within each category, in the order of the items; an item whose difference has been fixed becomes a
-  C item, and the code, tests and other documents that name an ID are updated with it.
+  within each category, in the order of the items; an item whose difference is resolved becomes a
+  C item, and the code, tests and other documents that name an ID are updated with it. The document
+  states what the model is and why; it records no change history (that is in git).
 * When a deviation is introduced on purpose, add a D item, and tag the code with a comment that names
   the ID.
 * When a behaviour is taken over from another core's model by a project decision, without an A520
   SOG statement, add a B item (chapter 9: what the A520 SOG says, what the other core does and why,
-  what is implemented, the measured effect, the tests) and tag the code `[a520_from_<core>_<topic>]`.
+  what is implemented, the effect, the tests) and tag the code `[a520_from_<core>_<topic>]`.
   When an A520 measurement or SOG statement appears, the item is revisited and becomes a C, D or N
   item (or is removed with its code).
 * Evaluation results (accuracy metrics, totals over benchmark sets) are not recorded in this document;
   cycles/iteration only when reproduced with `mca_tool` as in section 10.
-* [docs.md](docs.md) holds the rest of the technical documentation; [a55-sog.md](a55-sog.md) is the
-  Cortex-A55 counterpart of this document. [README.md](README.md) lists the documents.
+* [docs.md](docs.md) holds the rest of the technical documentation; [a55-sog.md](a55-sog.md),
+  [a76-sog.md](a76-sog.md), [a78-sog.md](a78-sog.md), [x1-sog.md](x1-sog.md) and
+  [a720-sog.md](a720-sog.md) are the counterparts of this document for the other cores.
+  [README.md](README.md) lists the documents.

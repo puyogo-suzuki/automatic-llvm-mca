@@ -25,7 +25,6 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "facile/facile.h"
-#include "cpu/sched_model.h"
 #include "llvm/MCA/InstrBuilder.h"
 #include "llvm/MCA/CustomBehaviour.h"
 
@@ -66,7 +65,7 @@ template <typename T>
 inline std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
     SourceMgr SrcMgr;
     SrcMgr.AddNewSourceBuffer(MemoryBuffer::getMemBuffer(asm_code), SMLoc());
-    
+
     MCContext Ctx(TC.TT, TC.MAI.get(), TC.MRI.get(), TC.STI.get(), &SrcMgr);
     MCObjectFileInfo MOFI;
     MOFI.initMCObjectFileInfo(Ctx, /*PIC=*/false);
@@ -77,7 +76,7 @@ inline std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
         std::vector<Instr>& out;
         const MCInstrInfo &MCII;
         TestStreamer(MCContext& ctx, std::vector<Instr>& o, const MCInstrInfo &mcii) : MCStreamer(ctx), out(o), MCII(mcii) {}
-        void emitInstruction(const MCInst& Inst, const MCSubtargetInfo& STI) override {
+        void emitInstruction(const MCInst& Inst, const MCSubtargetInfo&) override {
             Instr I;
             I.Inst = Inst;
             I.Addr = out.size() * 4;
@@ -92,7 +91,7 @@ inline std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
         bool emitSymbolAttribute(MCSymbol*, MCSymbolAttr) override { return true; }
         void emitCommonSymbol(MCSymbol*, uint64_t, Align) override {}
         void emitZerofill(MCSection*, MCSymbol*, uint64_t, Align, SMLoc) override {}
-        void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {}
+        void emitLabel(MCSymbol *, SMLoc = SMLoc()) override {}
     };
 
     TestStreamer streamer(Ctx, instrs, *TC.MCII);
@@ -101,6 +100,24 @@ inline std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
     parser->setTargetParser(*tap);
     parser->Run(false);
     return instrs;
+}
+
+// The CPUs for which AArch64TestContext installs the scheduling model mca_tool uses (what
+// initializeFrontend() in frontend.cpp does for every CPU: install the sched-class tables generated from
+// ModifiedTarget/AArch64/*.td, remap MCInstrDesc::SchedClass onto their numbering, and wrap the STI
+// so that resolveVariantSchedClass() reaches the local resolver).  Stock LLVM maps cortex-a720 to
+// NeoverseN2Model and cortex-x1 to its own NeoverseV1Model, and its CortexA55Model lacks the SOG
+// values, so these CPUs need the local model to be tested at all; the two MLPTest.A55* tests that
+// want the stock A55 model reset TC.STI explicitly.
+// The other CPUs (cortex-a76, the default, and cortex-a78) stay on libLLVM's stock tables here:
+// moving them changes results this suite pins (MLPTest.AArch64IndexRegisterExclusion, on the
+// default cortex-a76, computes MLP 4.0 rather than 2.0 under the local N1 tables).  The SOG tests
+// use LocalModelContext (tests/sog_test_support.h), which installs the local model for any CPU.
+inline bool testContextInstallsLocalModel(const std::string &cpu) {
+    return cpu == "icestorm" || cpu == "firestorm" ||
+           cpu == "cortex-a720" || cpu == "cortex-a720ae" ||
+           cpu == "cortex-x1" || cpu == "cortex-x1c" ||
+           cpu == "cortex-a55" || cpu == "cortex-a520";
 }
 
 struct AArch64TestContext {
@@ -118,44 +135,7 @@ struct AArch64TestContext {
         MRI.reset(TheTarget->createMCRegInfo(TT));
         MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT, MCTargetOptions()));
         MCII.reset(TheTarget->createMCInstrInfo());
-        // This branch is what frontend.cpp's initTarget() does for EVERY CPU:
-        // install the locally re-generated sched-class tables from
-        // ModifiedTarget/AArch64/*.td, remap MCInstrDesc::SchedClass onto their
-        // numbering, and wrap the STI so resolveVariantSchedClass() reaches the
-        // locally generated resolver (without that wrapper no SchedWriteVariant
-        // in ModifiedTarget can resolve at all).
-        //
-        // The test harness historically took it only for icestorm/firestorm, so
-        // every other CPU here ran against libLLVM's STOCK model rather than the
-        // one the tool actually uses.  For "cortex-a720" that gap was material:
-        // stock LLVM maps cortex-a720 to NeoverseN2Model, so an A720 scheduling
-        // test would have been silently answered by N2's numbers - including
-        // N2's own zero-latency MOVs, which would have made the A720 sec. 4.12
-        // tests below pass whether or not AArch64SchedA720.td had been touched.
-        // cortex-a720/-a720ae are therefore added here.
-        //
-        // The remaining CPUs are deliberately left on stock tables for now:
-        // flipping them all over is a strictly larger change that alters results
-        // this suite already pins (MLPTest.AArch64IndexRegisterExclusion, on the
-        // default cortex-a76, computes MLP 4.0 rather than 2.0 under the local
-        // N1 tables).  That divergence is real and worth its own investigation,
-        // but it is not this change's subject.
-        // cortex-x1/-x1c are added for the same reason as the A720: stock LLVM
-        // maps them to its own NeoverseV1Model (ROB 256, IssueWidth 8, no
-        // load-pair latency fix), which is not the model the tool installs.
-        // cortex-a55 joins the list for the same reason: the A55 tests pin
-        // values of ModifiedTarget/AArch64/AArch64SchedA55.td (the Software
-        // Optimization Guide numbers), which libLLVM's stock CortexA55Model does
-        // not carry (e.g. it has no atomics at all and a 4-cycle LDR Q).  The
-        // two older A55 tests that want the stock model (MLPTest.A55*) still
-        // reset TC.STI to it explicitly.
-        // cortex-a520 joins for the same reason: tests/a520_sog_test.cpp pins values
-        // of ModifiedTarget/AArch64/AArch64SchedA520.td (docs/a520-sog.md); no older
-        // test uses a cortex-a520 context.
-        if (cpu == "icestorm" || cpu == "firestorm" ||
-            cpu == "cortex-a720" || cpu == "cortex-a720ae" ||
-            cpu == "cortex-x1" || cpu == "cortex-x1c" ||
-            cpu == "cortex-a55" || cpu == "cortex-a520") {
+        if (testContextInstallsLocalModel(cpu)) {
             const std::string llvm_cpu =
                 (cpu == "icestorm" || cpu == "firestorm") ? "apple-m1" : cpu;
             STI.reset(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));

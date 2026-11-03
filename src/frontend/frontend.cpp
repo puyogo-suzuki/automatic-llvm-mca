@@ -1,13 +1,13 @@
 #include "frontend/frontend.h"
-#include "a55/a55_issue_stage.h"
 #include "core/object_loader.h"
 #include "cpu/cpu_traits.h"
 #include "cpu/sched_model.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
-#include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/WithColor.h"
+#include "llvm/Support/raw_ostream.h"
+#include <fcntl.h>
+#include <unistd.h>
 
 using namespace llvm;
 
@@ -49,8 +49,9 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     // The MCInstrDesc array just handed to us is libLLVM's, so its SchedClass
     // indices use stock AArch64.td numbering, while installLocalSchedModel()
     // below installs sched-class tables re-generated with
-    // ModifiedTarget/AArch64/*.td - a different numbering, in which 1051 of the
-    // 9131 shared opcodes disagree.  Remap before anything reads a SchedClass.
+    // ModifiedTarget/AArch64/*.td - a different numbering, in which a large
+    // share of the 9135 opcodes disagree (docs/docs.md section 5.A).  Remap
+    // before anything reads a SchedClass.
     if (TI.MCII)
         llvm::remapSchedClassIndices(*TI.MCII, TI.CPU);
     TI.STI.reset(TI.TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
@@ -67,8 +68,6 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
         return false;
     }
 
-    TI.MCAContext = std::make_unique<mca::Context>(*TI.MRI, *TI.STI);
-
     const MCSchedModel &SM = TI.STI->getSchedModel();
     TI.WindowWidthVal = opts::WindowWidth;
     if (opts::WindowWidth.getNumOccurrences() == 0 && !opts::MCPU.empty()) {
@@ -84,11 +83,11 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     // (which also documents where each number comes from).  The Mop cap is a
     // SECOND front-end constraint independent of PO.DispatchWidth (the uop
     // cap): every one of these SOGs states "the dispatch stage can process up
-    // to N Mops per cycle and dispatch up to M uops per cycle", and since
-    // AArch64 averages ~1.1-1.3 uops/inst the Mop cap is the tighter of the
-    // two.  See frontend.h's MopDispatchWidth comment for why it can't come
-    // from llvm::MCSchedModel itself.  0 = not applied, see
-    // calculateIssueBound().
+    // to N Mops per cycle and dispatch up to M uops per cycle", with M = 2N, so
+    // the Mop cap is the tighter of the two whenever a region averages fewer
+    // than two uops per instruction (docs/docs.md section 4.E).  See
+    // frontend.h's MopDispatchWidth comment for why it can't come from
+    // llvm::MCSchedModel itself.  0 = not applied, see calculateIssueBound().
     const CpuTraits &Traits = getCpuTraits(TI.STI->getCPU());
     if (Traits.UopDispatchWidth)
         TI.PO.DispatchWidth = Traits.UopDispatchWidth;
@@ -106,10 +105,6 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
 
     return true;
 }
-
-#include <fcntl.h>
-#include <unistd.h>
-#include "llvm/Support/raw_ostream.h"
 
 ScopedSilence::ScopedSilence() {
     devNull = ::open("/dev/null", O_WRONLY);

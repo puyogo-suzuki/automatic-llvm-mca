@@ -41,8 +41,8 @@ struct FacileResult {
 // `MemInfos`, when non-empty, must be index-aligned with `SimInstrs` /
 // `MCInsts` and supplies the per-instruction memory-access descriptor
 // (MLPAnalyzer::getMemAccessInfo) used to add store->load memory RAW edges to
-// the precedence-constraint graph. Pass an empty ArrayRef to get the old
-// register-dependences-only behaviour. See the long note above
+// the precedence-constraint graph. Pass an empty ArrayRef for a graph with
+// register dependences only (--no-facile-memory-deps). See the long note above
 // addMemoryDependencies() in facile.cpp for why these edges are needed.
 //
 // `MopWidth`, when nonzero, is the CPU's SOG-documented macro-op (Mop)

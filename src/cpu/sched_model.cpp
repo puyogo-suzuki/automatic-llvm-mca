@@ -9,7 +9,8 @@
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64AddressingModes.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
 
-// Define the private member access rob structures
+// Private-member access to MCSubtargetInfo's sched model and tables (the
+// friend-injection technique of mca/private_access.h).
 template <typename Tag, typename Tag::type M>
 struct Rob {
   friend typename Tag::type get(Tag) { return M; }
@@ -80,7 +81,7 @@ bool isCoalescedROBSubtarget(const MCSubtargetInfo &STI) {
     return M == &FirestormModel || M == &IcestormModel;
 }
 
-std::unique_ptr<MCSubtargetInfo> wrapCustomSubtargetInfo(std::unique_ptr<MCSubtargetInfo> STI, StringRef CPUName) {
+std::unique_ptr<MCSubtargetInfo> wrapCustomSubtargetInfo(std::unique_ptr<MCSubtargetInfo> STI, StringRef /*CPUName*/) {
     if (!STI) return STI;
     return std::make_unique<CustomSubtargetInfo>(std::move(STI));
 }
@@ -90,7 +91,7 @@ std::unique_ptr<MCSubtargetInfo> wrapCustomSubtargetInfo(std::unique_ptr<MCSubta
 // the SchedClass index remap; leaving any other CPU (e.g. "generic") alone is
 // mandatory, because such a CPU keeps libLLVM's own stock MCSchedModel, whose
 // SchedClassTable is indexed with the stock numbering.
-bool usesLocalSchedTables(llvm::StringRef CPUName) {
+static bool usesLocalSchedTables(llvm::StringRef CPUName) {
     return getCpuTraits(CPUName).Model != CpuModel::None;
 }
 

@@ -328,8 +328,9 @@ TEST(MLPTest, SplitterDirectRetExclusion) {
 
 
 // --merge-same-header: two back-edges to the SAME header are one natural loop.
-// Layout mirrors mcf primal_bea_mpp: hdr=1, short early-continue back-edge at 3 -> 1,
-// full-body back-edge at 6 -> 1, plus an unrelated DIFFERENT-header inner loop [4,5].
+// Layout of a loop body with an early "continue": hdr=1, short early-continue back-edge
+// at 3 -> 1, full-body back-edge at 6 -> 1, plus an unrelated DIFFERENT-header inner
+// loop [4,5].
 static std::vector<RegionSpan> collectLoopSpans(std::vector<Instr> &instrs) {
     FunctionBoundaries empty_bounds;
     std::vector<RegionSpan> loops, bbs;

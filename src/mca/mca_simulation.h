@@ -11,8 +11,14 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MCA/Context.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/MCA/Instruction.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <memory>
+
+class ZeroAwareInstrBuilder;
 
 unsigned computeSteadyIterations(const llvm::MCSubtargetInfo &STI, size_t regionInstrCount, unsigned iterations);
 unsigned computeWarmupIterations(const llvm::MCSubtargetInfo &STI, size_t regionInstrCount);
@@ -24,6 +30,17 @@ McaMetrics analyzeMcaRegion(llvm::ArrayRef<Instr> instrs, const llvm::MCSubtarge
                             MLPWindowAssignmentKind assignKind, const MLPAnalyzer &analyzer,
                             bool ignoreLoopCarriedDep = false,
                             int overrideLoadLatency = -1, bool mlpWindowLoop = false);
+
+// Builds the mca::Instruction of each of `instrs` with `IB`, in order, and hands
+// it to `Accept` together with its source instruction.  An instruction that
+// InstrBuilder rejects is recorded with noteDroppedInstruction() and skipped.
+// On the coalesced-ROB subtargets (isCoalescedROBSubtarget(), cpu/sched_model.h)
+// the instruction's NumMicroOps is set to 1 before it is handed over; this writes
+// the InstrDesc, which InstrBuilder shares between instructions.
+void buildRegionInstructions(
+    ZeroAwareInstrBuilder &IB, const llvm::MCSubtargetInfo &STI, const llvm::MCInstrInfo &MCII,
+    llvm::ArrayRef<Instr> instrs,
+    llvm::function_ref<void(const Instr &, std::unique_ptr<llvm::mca::Instruction>)> Accept);
 
 // Instructions that llvm::mca::InstrBuilder refuses to model (typically because
 // the scheduling model marks their SchedWrite `Unsupported`) are left out of the

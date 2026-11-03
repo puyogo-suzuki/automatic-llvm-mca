@@ -12,11 +12,10 @@ using namespace llvm;
 namespace {
 
 // NOTE on ordering invariants: several helpers below (and walkRegions() itself) depend on
-// vectors of SimpleLoop being sorted by (h_idx asc, l_idx desc). A prior refactor (ee9a922)
-// once broke this by having a helper sort a by-value copy while the caller kept using its
-// own unsorted vector for a std::lower_bound gap lookup - silently wrong results with no
-// crash. When touching sort/ordering here, double-check which vector instance downstream
-// code actually reads.
+// vectors of SimpleLoop being sorted by (h_idx asc, l_idx desc). Sorting a by-value copy
+// while the caller keeps using its own unsorted vector for the std::lower_bound gap lookup
+// gives silently wrong results with no crash. When touching sort/ordering here,
+// double-check which vector instance downstream code actually reads.
 struct SimpleLoop {
     size_t h_idx;
     size_t l_idx;
@@ -63,8 +62,8 @@ std::vector<SimpleLoop> detectBackwardBranchLoops(ArrayRef<Instr> funcInstrs) {
 
     // Prefix count of forward branches/jumps, so "is there a forward branch in [a, b)"
     // becomes the O(1) check fwdBranchCount[b] - fwdBranchCount[a] > 0 below, instead of
-    // rescanning that range from scratch for every return found under every candidate
-    // loop header (which made this function up to O(f_size^3) on return-heavy functions).
+    // rescanning that range for every return found under every candidate loop header
+    // (O(f_size^3) on return-heavy functions).
     std::vector<size_t> fwdBranchCount(f_size + 1, 0);
     for (size_t t = 0; t < f_size; ++t) {
         fwdBranchCount[t + 1] = fwdBranchCount[t] + (isForwardBranch(funcInstrs[t]) ? 1 : 0);
@@ -111,8 +110,7 @@ constexpr int kChainLookbackWindow = 50;
 // Step 3: Detect abab interlocking chains and perform adaptive merging.
 // Precondition: `loops` must already be sorted by (h_idx asc, l_idx desc) - the same
 // order walkRegions() sorts raw_loops into before calling this, so it is not re-sorted
-// here (see the ee9a922 history note at the top of this file for why that invariant
-// matters). Takes `loops` by const reference since this function only reads it.
+// here (see the note on ordering invariants at the top of this file).
 std::vector<SimpleLoop> detectAndMergeAbabChains(const std::vector<SimpleLoop> &loops, int threshold) {
     size_t n_loops = loops.size();
     if (n_loops == 0) return {};
@@ -192,14 +190,13 @@ std::vector<SimpleLoop> detectAndMergeAbabChains(const std::vector<SimpleLoop> &
 // target address are, by the standard natural-loop definition (one loop per header,
 // all back-edges to it belong to that loop), ONE loop - not a set of concentric loops.
 // detectBackwardBranchLoops() emits one span per backward branch, so a loop body with an
-// early "continue" (e.g. `if (arc->ident <= BASIC) continue;`, which
-// compiles to a 6-instruction `add; cmp; b.ls; ldr; cmp; b.le <hdr>` back-edge) produced
-// a short same-header partial path that was then analyzed as if it repeated back-to-back. This keeps only the widest span per
-// header, unchanged, and drops
-// the strictly-contained same-header partial spans. It deliberately does NOT touch abab
+// early "continue" (a conditional back-edge to the header in the middle of the body)
+// gives a short same-header partial path, which would be analyzed as if it repeated
+// back-to-back. This keeps only the widest span per header, unchanged, and drops the
+// strictly-contained same-header partial spans. It deliberately does NOT touch abab
 // merging or its chain-depth decision (applied after detectAndMergeAbabChains, so every
-// kept span is byte-identical to before), nor genuinely nested loops with a DIFFERENT
-// header (those are real inner loops).
+// kept span is the same as without this step), nor genuinely nested loops with a
+// DIFFERENT header (those are real inner loops).
 std::vector<SimpleLoop> mergeSameHeaderLoops(const std::vector<SimpleLoop> &loops) {
     std::vector<SimpleLoop> out;
     out.reserve(loops.size());
@@ -215,6 +212,71 @@ std::vector<SimpleLoop> mergeSameHeaderLoops(const std::vector<SimpleLoop> &loop
         if (!dominated) out.push_back(l);
     }
     return out;
+}
+
+// Sorts by (h_idx asc, l_idx desc): the order the note at the top of this file
+// requires.
+void sortByHeader(std::vector<SimpleLoop> &loops) {
+    std::sort(loops.begin(), loops.end(), [](const SimpleLoop &a, const SimpleLoop &b) {
+        if (a.h_idx != b.h_idx) return a.h_idx < b.h_idx;
+        return a.l_idx > b.l_idx;
+    });
+}
+
+// Walk the non-loop "gaps" left between (and around) the selected loops of one
+// function (`in_loop` marks the instructions the selected loops cover). Each gap
+// is reported either standalone (onBasicBlock, when the function has no loops at
+// all) or attached to a loop for combined MCA analysis (onLoop): the loop chosen
+// is whichever detected loop (raw_loops, i.e. before abab and same-header
+// merging) starts right after the gap, since raw_loops is sorted
+// by h_idx (see the precondition comment on detectAndMergeAbabChains above) and
+// lower_bound finds it in O(log n); if no such loop exists (the gap is after the
+// last loop), fall back to the last loop in the function.
+void reportGapRegions(size_t f_start, const std::vector<bool> &in_loop,
+                      const std::vector<SimpleLoop> &raw_loops,
+                      const std::function<void(const RegionSpan &)> &onLoop,
+                      const std::function<void(const RegionSpan &)> &onBasicBlock) {
+    const size_t f_size = in_loop.size();
+    size_t gap_start = 0;
+    while (gap_start < f_size) {
+        if (in_loop[gap_start]) {
+            gap_start++;
+            continue;
+        }
+        size_t gap_end = gap_start;
+        while (gap_end < f_size && !in_loop[gap_end]) {
+            gap_end++;
+        }
+        size_t gap_size = gap_end - gap_start;
+
+        // Nearby loop to attach this gap's analysis to: the first loop starting at or
+        // after gap_end, or (if none starts after the gap) the last loop in the
+        // function. Null only when the whole function has no loops at all.
+        SimpleLoop const *nearby_loop = nullptr;
+        if (!raw_loops.empty()) {
+            auto it = std::lower_bound(raw_loops.begin(), raw_loops.end(), gap_end, [](const SimpleLoop &l, size_t val) {
+                return l.h_idx < val;
+            });
+            nearby_loop = (it != raw_loops.end()) ? &(*it) : &raw_loops.back();
+        }
+
+        if (nearby_loop) {
+            onLoop(RegionSpan{
+                f_start + gap_start,
+                gap_size,
+                f_start + nearby_loop->h_idx,
+                nearby_loop->size
+            });
+        } else {
+            onBasicBlock(RegionSpan{
+                f_start + gap_start,
+                gap_size,
+                f_start + gap_start,
+                gap_size
+            });
+        }
+        gap_start = gap_end;
+    }
 }
 
 } // namespace
@@ -235,10 +297,7 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries,
         auto funcInstrs = instrs.slice(f_start, f_size);
 
         std::vector<SimpleLoop> raw_loops = detectBackwardBranchLoops(funcInstrs);
-        std::sort(raw_loops.begin(), raw_loops.end(), [](const SimpleLoop &a, const SimpleLoop &b) {
-            if (a.h_idx != b.h_idx) return a.h_idx < b.h_idx;
-            return a.l_idx > b.l_idx;
-        });
+        sortByHeader(raw_loops);
         std::vector<SimpleLoop> selected_loops = detectAndMergeAbabChains(raw_loops, opts::ChainThreshold);
         if (opts::MergeSameHeader) {
             selected_loops = mergeSameHeaderLoops(selected_loops);
@@ -258,53 +317,7 @@ void walkRegions(ArrayRef<Instr> instrs, const FunctionBoundaries &boundaries,
             }
         }
 
-        // Walk the non-loop "gaps" left between (and around) the selected loops. Each gap
-        // is reported either standalone (onBasicBlock, when the function has no loops at
-        // all) or attached to a loop for combined MCA analysis (onLoop): the loop chosen
-        // is whichever selected loop starts right after the gap, since raw_loops is sorted
-        // by h_idx (see the precondition comment on detectAndMergeAbabChains above) and
-        // lower_bound finds it in O(log n); if no such loop exists (the gap is after the
-        // last loop), fall back to the last loop in the function.
-        size_t gap_start = 0;
-        while (gap_start < f_size) {
-            if (in_loop[gap_start]) {
-                gap_start++;
-                continue;
-            }
-            size_t gap_end = gap_start;
-            while (gap_end < f_size && !in_loop[gap_end]) {
-                gap_end++;
-            }
-            size_t gap_size = gap_end - gap_start;
-
-            // Nearby loop to attach this gap's analysis to: the first loop starting at or
-            // after gap_end, or (if none starts after the gap) the last loop in the
-            // function. Null only when the whole function has no loops at all.
-            SimpleLoop const *nearby_loop = nullptr;
-            if (!raw_loops.empty()) {
-                auto it = std::lower_bound(raw_loops.begin(), raw_loops.end(), gap_end, [](const SimpleLoop &l, size_t val) {
-                    return l.h_idx < val;
-                });
-                nearby_loop = (it != raw_loops.end()) ? &(*it) : &raw_loops.back();
-            }
-
-            if (nearby_loop) {
-                onLoop(RegionSpan{
-                    f_start + gap_start,
-                    gap_size,
-                    f_start + nearby_loop->h_idx,
-                    nearby_loop->size
-                });
-            } else {
-                onBasicBlock(RegionSpan{
-                    f_start + gap_start,
-                    gap_size,
-                    f_start + gap_start,
-                    gap_size
-                });
-            }
-            gap_start = gap_end;
-        }
+        reportGapRegions(f_start, in_loop, raw_loops, onLoop, onBasicBlock);
     }
 }
 

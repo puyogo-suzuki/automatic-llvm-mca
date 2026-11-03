@@ -92,8 +92,8 @@ def : WriteRes<WriteHint,    []> { let Latency = 1; }
 // [a78_ldp_hi] docs/a78-sog.md D-10: the second destination of a load pair is loaded by the same
 // access as the first one ("the maximum latency to load all the registers written by the
 // instruction", l.957-958) and takes no µOP of its own (the row's pipelines are those of the
-// first write).  WriteLDHi is the second write of the integer LDP W/X (latency 4, l.994-997); it
-// used to count one µOP.  LDPSW and the FP pairs use A78Write_5c_0Z.
+// first write).  WriteLDHi is the second write of the integer LDP W/X (latency 4, l.994-997).
+// LDPSW and the FP pairs use A78Write_5c_0Z.
 def : WriteRes<WriteLDHi,    []> { let Latency = 4; let NumMicroOps = 0; }
 
 //===----------------------------------------------------------------------===//
@@ -121,36 +121,19 @@ def N2Write_3c_1M0  : SchedWriteRes<[N2UnitM0]>  { let Latency = 3;
                                                    let ReleaseAtCycles = [3]; }
 def N2Write_5c_1M0  : SchedWriteRes<[N2UnitM0]>  { let Latency = 5;
                                                    let ReleaseAtCycles = [5]; }
-def N2Write_12c_1M0 : SchedWriteRes<[N2UnitM0]>  { let Latency = 12;
-                                                   let ReleaseAtCycles = [12]; }
-// def N2Write_12c_1M0 : SchedWriteRes<[N2UnitM0]>  { let Latency = 5; // Best latency from SOG (5 to 12 cycles)
-//                                                    let ReleaseAtCycles = [5]; }
-def N2Write_20c_1M0 : SchedWriteRes<[N2UnitM0]>  { let Latency = 20;
-                                                  let ReleaseAtCycles = [20]; }
-// def N2Write_20c_1M0 : SchedWriteRes<[N2UnitM0]>  { let Latency = 5; // Best latency from SOG (5 to 20 cycles)
-//                                                    let ReleaseAtCycles = [5]; }
 def N2Write_4c_1L   : SchedWriteRes<[N2UnitL]>   { let Latency = 4; }
 def N2Write_6c_1L   : SchedWriteRes<[N2UnitL]>   { let Latency = 6; }
 def N2Write_2c_1V   : SchedWriteRes<[N2UnitV]>   { let Latency = 2; }
 def N2Write_3c_1V   : SchedWriteRes<[N2UnitV]>   { let Latency = 3; }
 def N2Write_4c_1V   : SchedWriteRes<[N2UnitV]>   { let Latency = 4; }
-def N2Write_5c_1V   : SchedWriteRes<[N2UnitV]>   { let Latency = 5; }
-def N2Write_12c_1V  : SchedWriteRes<[N2UnitV]>   { let Latency = 12; }
 def N2Write_2c_1V0  : SchedWriteRes<[N2UnitV0]>  { let Latency = 2; }
 def N2Write_3c_1V0  : SchedWriteRes<[N2UnitV0]>  { let Latency = 3; }
 def N2Write_4c_1V0  : SchedWriteRes<[N2UnitV0]>  { let Latency = 4; }
-def N2Write_7c_1V0  : SchedWriteRes<[N2UnitV0]>  { let Latency = 7;
-                                                   let ReleaseAtCycles = [7]; }
-def N2Write_9c_1V0  : SchedWriteRes<[N2UnitV0]>  { let Latency = 9; }
 def N2Write_10c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 10; }
-// def N2Write_10c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 7; } // Best latency from SOG (7 to 10 cycles)
 def N2Write_12c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 12; }
 def N2Write_13c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 13; }
-// def N2Write_13c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 10; } // Best latency from SOG (10 to 13/11 to 13 cycles)
 def N2Write_15c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 15; }
-// def N2Write_15c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 7; } // Best latency from SOG (7 to 15 cycles)
 def N2Write_16c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 16; }
-// def N2Write_16c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 7; } // Best latency from SOG (7 to 17 cycles)
 def N2Write_20c_1V0 : SchedWriteRes<[N2UnitV0]>  { let Latency = 20; }
 def N2Write_2c_1V1  : SchedWriteRes<[N2UnitV1]>  { let Latency = 2; }
 def N2Write_3c_1V1  : SchedWriteRes<[N2UnitV1]>  { let Latency = 3; }
@@ -182,25 +165,9 @@ def N2Write_3c_1I_1M : SchedWriteRes<[N2UnitI, N2UnitM]> {
   let NumMicroOps = 2;
 }
 
-def N2Write_4c_1I_1L : SchedWriteRes<[N2UnitI, N2UnitL]> {
-  let Latency     = 4;
-  let NumMicroOps = 2;
-}
 
-def N2Write_5c_1I_1L : SchedWriteRes<[N2UnitI, N2UnitL]> {
-  let Latency     = 5;
-  let NumMicroOps = 2;
-}
 
-def N2Write_6c_1I_1L : SchedWriteRes<[N2UnitI, N2UnitL]> {
-  let Latency     = 6;
-  let NumMicroOps = 2;
-}
 
-def N2Write_7c_1I_1L : SchedWriteRes<[N2UnitI, N2UnitL]> {
-  let Latency     = 7;
-  let NumMicroOps = 2;
-}
 
 def N2Write_1c_1L01_1D : SchedWriteRes<[N2UnitL01, N2UnitD]> {
   let Latency     = 1;
@@ -227,50 +194,6 @@ def N2Write_4c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
   let NumMicroOps = 2;
 }
 
-// def N2Write_10c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-//   let Latency = 10;
-//   let NumMicroOps = 2;
-//   let ReleaseAtCycles = [5, 5];
-// }
-def N2Write_10c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-  let Latency = 7; // Best latency from SOG (7 to 10 cycles)
-  let NumMicroOps = 2;
-  let ReleaseAtCycles = [5, 5];
-}
-
-// def N2Write_13c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-//   let Latency = 13;
-//   let NumMicroOps = 2;
-//   let ReleaseAtCycles = [6, 7];
-// }
-def N2Write_13c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-  let Latency = 10; // Best latency from SOG (10 to 13/11 to 13 cycles)
-  let NumMicroOps = 2;
-  let ReleaseAtCycles = [6, 7];
-}
-
-// def N2Write_15c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-//   let Latency = 15;
-//   let NumMicroOps = 2;
-//   let ReleaseAtCycles = [7, 8];
-// }
-def N2Write_15c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-  let Latency = 7; // Best latency from SOG (7 to 15 cycles)
-  let NumMicroOps = 2;
-  let ReleaseAtCycles = [7, 8];
-}
-
-// def N2Write_16c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-//   let Latency = 16;
-//   let NumMicroOps = 2;
-//   let ReleaseAtCycles = [8, 8];
-// }
-def N2Write_16c_2V0 : SchedWriteRes<[N2UnitV0, N2UnitV0]> {
-  let Latency = 7; // Best latency from SOG (7 to 17 cycles)
-  let NumMicroOps = 2;
-  let ReleaseAtCycles = [8, 8];
-}
-
 def N2Write_4c_2V : SchedWriteRes<[N2UnitV, N2UnitV]> {
   let Latency     = 4;
   let NumMicroOps = 2;
@@ -286,10 +209,6 @@ def N2Write_4c_2L : SchedWriteRes<[N2UnitL, N2UnitL]> {
   let NumMicroOps = 2;
 }
 
-def N2Write_6c_2L : SchedWriteRes<[N2UnitL, N2UnitL]> {
-  let Latency     = 6;
-  let NumMicroOps = 2;
-}
 
 def N2Write_8c_1L_1V : SchedWriteRes<[N2UnitL, N2UnitV]> {
   let Latency     = 8;
@@ -374,15 +293,7 @@ def N2Write_1c_1L01_1D_1I : SchedWriteRes<[N2UnitL01, N2UnitD, N2UnitI]> {
   let NumMicroOps = 3;
 }
 
-def N2Write_2c_1L01_1V_1I : SchedWriteRes<[N2UnitL01, N2UnitV, N2UnitI]> {
-  let Latency     = 2;
-  let NumMicroOps = 3;
-}
 
-def N2Write_2c_1L01_2V : SchedWriteRes<[N2UnitL01, N2UnitV, N2UnitV]> {
-  let Latency     = 2;
-  let NumMicroOps = 3;
-}
 
 def N2Write_7c_1M_1M0_1V : SchedWriteRes<[N2UnitM, N2UnitM0, N2UnitV]> {
   let Latency     = 7;
@@ -409,44 +320,19 @@ def N2Write_4c_1L01_1S_1V : SchedWriteRes<[N2UnitL01, N2UnitS, N2UnitV]> {
   let NumMicroOps = 3;
 }
 
-def N2Write_6c_3L : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL]> {
-  let Latency     = 6;
-  let NumMicroOps = 3;
-}
 
-def N2Write_8c_1L_2V : SchedWriteRes<[N2UnitL, N2UnitV, N2UnitV]> {
-  let Latency     = 8;
-  let NumMicroOps = 3;
-}
 
 //===----------------------------------------------------------------------===//
 // Define generic 4 micro-op types
 
-def N2Write_2c_1L01_2V_1I : SchedWriteRes<[N2UnitL01, N2UnitV, N2UnitV,
-                                           N2UnitI]> {
-  let Latency     = 2;
-  let NumMicroOps = 4;
-}
 
 def N2Write_6c_4V0 : SchedWriteRes<[N2UnitV0, N2UnitV0, N2UnitV0, N2UnitV0]> {
   let Latency     = 6;
   let NumMicroOps = 4;
 }
 
-def N2Write_4c_4V : SchedWriteRes<[N2UnitV, N2UnitV, N2UnitV, N2UnitV]> {
-  let Latency     = 4;
-  let NumMicroOps = 4;
-}
 
-def N2Write_6c_4V : SchedWriteRes<[N2UnitV, N2UnitV, N2UnitV, N2UnitV]> {
-  let Latency     = 6;
-  let NumMicroOps = 4;
-}
 
-def N2Write_8c_2L_2V : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitV, N2UnitV]> {
-  let Latency     = 8;
-  let NumMicroOps = 4;
-}
 
 def N2Write_9c_2L_2V : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitV, N2UnitV]> {
   let Latency     = 9;
@@ -465,11 +351,6 @@ def N2Write_4c_2L01_2V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitV,
   let NumMicroOps = 4;
 }
 
-def N2Write_5c_2L01_2V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitV,
-                                        N2UnitV]> {
-  let Latency     = 5;
-  let NumMicroOps = 4;
-}
 
 def N2Write_8c_2M0_2V0 : SchedWriteRes<[N2UnitM0, N2UnitM0, N2UnitV0,
                                         N2UnitV0]> {
@@ -512,24 +393,11 @@ def N2Write_4c_2M0_2M : SchedWriteRes<[N2UnitM0, N2UnitM0, N2UnitM,
   let NumMicroOps = 4;
 }
 
-def N2Write_6c_2I_2L : SchedWriteRes<[N2UnitI, N2UnitI, N2UnitL, N2UnitL]> {
-  let Latency     = 6;
-  let NumMicroOps = 4;
-}
 
-def N2Write_7c_4L : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL, N2UnitL]> {
-  let Latency     = 7;
-  let NumMicroOps = 4;
-}
 
 //===----------------------------------------------------------------------===//
 // Define generic 5 micro-op types
 
-def N2Write_2c_1L01_2V_2I : SchedWriteRes<[N2UnitL01, N2UnitV, N2UnitV,
-                                           N2UnitI, N2UnitI]> {
-  let Latency     = 2;
-  let NumMicroOps = 5;
-}
 
 def N2Write_8c_2L_3V : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitV, N2UnitV,
                                       N2UnitV]> {
@@ -558,11 +426,6 @@ def N2Write_6c_3L01_3V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
   let NumMicroOps = 6;
 }
 
-def N2Write_4c_3L01_3V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
-                                        N2UnitV, N2UnitV, N2UnitV]> {
-  let Latency     = 4;
-  let NumMicroOps = 6;
-}
 
 def N2Write_10c_2L_2V_2S : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitV, N2UnitV,
                                           N2UnitS, N2UnitS]> {
@@ -588,11 +451,6 @@ def N2Write_7c_7V0 : SchedWriteRes<[N2UnitV0]> {
 //===----------------------------------------------------------------------===//
 // Define generic 8 micro-op types
 
-def N2Write_6c_8V : SchedWriteRes<[N2UnitV, N2UnitV, N2UnitV, N2UnitV,
-                                   N2UnitV, N2UnitV, N2UnitV, N2UnitV]> {
-  let Latency     = 6;
-  let NumMicroOps = 8;
-}
 
 def N2Write_2c_4L01_4V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
                                         N2UnitL01, N2UnitV, N2UnitV, N2UnitV,
@@ -601,12 +459,6 @@ def N2Write_2c_4L01_4V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
   let NumMicroOps = 8;
 }
 
-def N2Write_5c_4L01_4V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
-                                        N2UnitL01, N2UnitV, N2UnitV, N2UnitV,
-                                        N2UnitV]> {
-  let Latency     = 5;
-  let NumMicroOps = 8;
-}
 
 def N2Write_8c_4L_4V : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL, N2UnitL,
                                       N2UnitV, N2UnitV, N2UnitV, N2UnitV]> {
@@ -614,25 +466,6 @@ def N2Write_8c_4L_4V : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL, N2UnitL,
   let NumMicroOps = 8;
 }
 
-def N2Write_9c_4L_4V : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL, N2UnitL,
-                                      N2UnitV, N2UnitV, N2UnitV, N2UnitV]> {
-  let Latency     = 9;
-  let NumMicroOps = 8;
-}
-
-//===----------------------------------------------------------------------===//
-// Define generic 9 micro-op types
-
-// def N2Write_9c_9V0 : SchedWriteRes<[N2UnitV0]> {
-//   let Latency     = 9;
-//   let NumMicroOps = 9;
-//   let ReleaseAtCycles = [9];
-// }
-def N2Write_9c_9V0 : SchedWriteRes<[N2UnitV0]> {
-  let Latency     = 7; // Best latency from SOG (7 to 9 cycles)
-  let NumMicroOps = 9;
-  let ReleaseAtCycles = [7];
-}
 
 //===----------------------------------------------------------------------===//
 // Define generic 10 micro-op types
@@ -642,28 +475,6 @@ def N2Write_7c_5L01_5V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
                                         N2UnitV, N2UnitV, N2UnitV, N2UnitV]> {
   let Latency     = 7;
   let NumMicroOps = 10;
-}
-
-// def N2Write_10c_10V0 : SchedWriteRes<[N2UnitV0]> {
-//   let Latency     = 10;
-//   let NumMicroOps = 10;
-//   let ReleaseAtCycles = [10];
-// }
-def N2Write_10c_10V0 : SchedWriteRes<[N2UnitV0]> {
-  let Latency     = 7; // Best latency from SOG (7 to 10 cycles)
-  let NumMicroOps = 10;
-  let ReleaseAtCycles = [7];
-}
-
-//===----------------------------------------------------------------------===//
-// Define generic 12 micro-op types
-
-def N2Write_7c_6L01_6V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
-                                        N2UnitL01, N2UnitL01, N2UnitL01,
-                                        N2UnitV, N2UnitV, N2UnitV, N2UnitV,
-                                        N2UnitV, N2UnitV]> {
-  let Latency     = 7;
-  let NumMicroOps = 12;
 }
 
 //===----------------------------------------------------------------------===//
@@ -676,31 +487,6 @@ def N2Write_7c_5L01_5S_5V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitL01,
                                            N2UnitV, N2UnitV, N2UnitV]> {
   let Latency     = 7;
   let NumMicroOps = 15;
-}
-
-// def N2Write_15c_15V0 : SchedWriteRes<[N2UnitV0]> {
-//   let Latency     = 15;
-//   let NumMicroOps = 15;
-//   let ReleaseAtCycles = [15];
-// }
-def N2Write_15c_15V0 : SchedWriteRes<[N2UnitV0]> {
-  let Latency     = 7; // Best latency from SOG (7 to 15 cycles)
-  let NumMicroOps = 15;
-  let ReleaseAtCycles = [7];
-}
-
-//===----------------------------------------------------------------------===//
-// Define generic 16 micro-op types
-
-// def N2Write_16c_16V0 : SchedWriteRes<[N2UnitV0]> {
-//   let Latency     = 16;
-//   let NumMicroOps = 16;
-//   let ReleaseAtCycles = [16];
-// }
-def N2Write_16c_16V0 : SchedWriteRes<[N2UnitV0]> {
-  let Latency     = 7; // Best latency from SOG (7 to 17 cycles)
-  let NumMicroOps = 16;
-  let ReleaseAtCycles = [7];
 }
 
 //===----------------------------------------------------------------------===//
@@ -759,6 +545,11 @@ def A78Write_2c_1I_1L01_1D : SchedWriteRes<[N2UnitI, N2UnitL01, N2UnitD]> { let 
                                                                          let NumMicroOps = 3; }
 def A78Write_2c_1I_1L01_1V : SchedWriteRes<[N2UnitI, N2UnitL01, N2UnitV]> { let Latency = 2;
                                                                          let NumMicroOps = 3; }
+// [a78_stpq_wb] C-17, D-6: STP Q pre/post-index, "2 1 I, L01, V" (l.1516-1517, l.1522-1523): one per cycle
+// is expressed on the two L01 pipelines (two L01 slots), as the A76 and the X1 do and as D-6 says, and not
+// with a second V µOP; WriteAdr + 3 µOPs.
+def A78Write_2c_2L01_1V : SchedWriteRes<[N2UnitL01, N2UnitL01, N2UnitV]> { let Latency = 2;
+                                                                         let NumMicroOps = 3; }
 // [a78_asimd_ld] C-21: ASIMD loads (l.2060-2172).
 def A78Write_5c_3L      : SchedWriteRes<[N2UnitL, N2UnitL, N2UnitL]> { let Latency = 5;
                                                                        let NumMicroOps = 3; }
@@ -813,13 +604,7 @@ def N2Write_0or1c_1I : SchedWriteVariant<[
                       SchedVar<NeoverseZeroMove, [N2Write_0c]>,
                       SchedVar<NoSchedPred,      [N2Write_1c_1I]>]>;
 
-def N2Write_0or2c_1V : SchedWriteVariant<[
-                      SchedVar<NeoverseZeroMove, [N2Write_0c]>,
-                      SchedVar<NoSchedPred,      [N2Write_2c_1V]>]>;
 
-def N2Write_0or3c_1M0 : SchedWriteVariant<[
-                      SchedVar<NeoverseZeroMove, [N2Write_0c]>,
-                      SchedVar<NoSchedPred,      [N2Write_3c_1M0]>]>;
 
 def N2Write_Extr : SchedWriteVariant<[
                       SchedVar<A78IsExtrOneRegPred, [N2Write_1c_1I]>,  // [a78_extr]
@@ -854,17 +639,22 @@ def A78Wr_IMAL  : SchedWriteRes<[N2UnitM]> { let Latency = 2; }
 def A78Wr_IMULL : SchedWriteVariant<[
                     SchedVar<IsReg3ZeroPred, [N2Wr_IM]>,
                     SchedVar<NoSchedPred,    [A78Wr_IMAL]>]>;
-def N2Rd_IMA  : SchedReadAdvance<1, [N2Wr_IMA, A78Wr_IMAL]>;
+// [a78_mul_acc_fwd] docs/a78-sog.md U-5: "Multiply-accumulate pipelines support late-forwarding of
+// accumulate operands from similar µOPs" (note 2, l.789-791), the wording under which the
+// Cortex-A55, A520, A76 and A720 models forward the result of a zero-accumulator multiply (MUL,
+// MNEG, SMULL, UMULL, ... = N2Wr_IM) to the accumulator of a following multiply-accumulate.  N2Wr_IM
+// is added; before, a MUL result reached the accumulator after its full latency.
+def N2Rd_IMA  : SchedReadAdvance<1, [N2Wr_IMA, A78Wr_IMAL, N2Wr_IM]>;
 
 def N2Wr_FMA : SchedWriteRes<[N2UnitV]> { let Latency = 4; }
 def N2Rd_FMA : SchedReadAdvance<2, [WriteFMul, N2Wr_FMA]>;
 
 // [a78_asimd_acc] docs/a78-sog.md C-18: "ASIMD absolute diff accum SABA, UABA" and "... long
-// SABAL(2), UABAL(2)" are 3(1) 1 V1 (l.1559-1561); they were 4(1).
+// SABAL(2), UABAL(2)" are 3(1) 1 V1 (l.1559-1561).
 def N2Wr_VA : SchedWriteRes<[N2UnitV1]> { let Latency = 3; }
 def N2Rd_VA : SchedReadAdvance<2, [N2Wr_VA]>;
 
-// [a78_asimd_acc] "ASIMD dot product SDOT, UDOT 2(1) 2 V" (l.1597); it was 3(1).
+// [a78_asimd_acc] "ASIMD dot product SDOT, UDOT 2(1) 2 V" (l.1597).
 def N2Wr_VDOT : SchedWriteRes<[N2UnitV]> { let Latency = 2; }
 def N2Rd_VDOT : SchedReadAdvance<1, [N2Wr_VDOT]>;
 
@@ -872,13 +662,22 @@ def N2Wr_VMMA : SchedWriteRes<[N2UnitV]> { let Latency = 3; }
 def N2Rd_VMMA : SchedReadAdvance<2, [N2Wr_VMMA]>;
 
 def N2Wr_VMA : SchedWriteRes<[N2UnitV0]> { let Latency = 4; }
-def N2Rd_VMA : SchedReadAdvance<3, [N2Wr_VMA]>;
-
-// (N2Wr_VMAH / N2Rd_VMAH, the accumulator forwarding of SQRDMLAH/SQRDMLSH, removed:
-// [a78_asimd_acc] docs/a78-sog.md C-18.)
-
+// [a78_mul_acc_fwd] docs/a78-sog.md U-5: ASIMD "Multiply-accumulate pipelines support late-forwarding
+// of accumulate operands from similar µOPs" (sec. 3.15 note 1, l.1752-1754).  The ASIMD MUL is taken
+// as similar to MLA/MLS and SMULL/UMULL(2) to SMLAL/SMLSL/UMLAL/UMLSL(2), as on the Cortex-A55,
+// A520, A76, A720 and X1, and MLA and MLAL forward to each other, as the integer MADD and SMADDL
+// forms do (U-5, the lower estimate): every one of them reaches the accumulator of MLA/MLS and of the
+// SMLAL family with the advance 3 of the rows' "4(1)".  SQDMULH, SQRDMULH and SQDMULL keep their
+// writes: their accumulating rows (SQRDMLAH/SQRDMLSH, SQDMLAL/SQDMLSL "4 1 V0", l.1626-1633) print no
+// accumulate latency.
+def A78Wr_VMUL  : SchedWriteRes<[N2UnitV0]> { let Latency = 4; }
+def A78Wr_VMULL : SchedWriteRes<[N2UnitV0]> { let Latency = 3; }
 def N2Wr_VMAL : SchedWriteRes<[N2UnitV0]> { let Latency = 4; }
-def N2Rd_VMAL : SchedReadAdvance<3, [N2Wr_VMAL]>;
+def N2Rd_VMA : SchedReadAdvance<3, [N2Wr_VMA, A78Wr_VMUL, N2Wr_VMAL, A78Wr_VMULL]>;
+
+// SQRDMLAH/SQRDMLSH have no accumulator forwarding: [a78_asimd_acc] docs/a78-sog.md C-18.
+
+def N2Rd_VMAL : SchedReadAdvance<3, [N2Wr_VMA, A78Wr_VMUL, N2Wr_VMAL, A78Wr_VMULL]>;   // [a78_mul_acc_fwd]
 
 def N2Wr_VPA : SchedWriteRes<[N2UnitV1]> { let Latency = 4; }
 def N2Rd_VPA : SchedReadAdvance<3, [N2Wr_VPA]>;
@@ -1040,7 +839,7 @@ def : SchedAlias<WriteImm, N2Write_1c_1I>;
 
 // SDIV, UDIV
 // [a78_div_best] docs/a78-sog.md C-10, D-1, D-3: latency 5 and the divider held 5 cycles (the
-// best value of each range); it used to be the worst case, 12 / 20 with M0 held 12 / 20 cycles.
+// best value of each range).
 def : SchedAlias<WriteID32,  A78Write_5c_1M0_IDiv>;
 def : SchedAlias<WriteID64,  A78Write_5c_1M0_IDiv>;
 
@@ -1122,13 +921,12 @@ def : InstRW<[N2Write_2c_1M], (instregex "^BFM[WX]ri$")>;
 
 def : SchedAlias<WriteLD,    N2Write_4c_1L>;
 // [a78_reg_offset] docs/a78-sog.md C-12: "Load register, register offset, basic / scale by 4/8 /
-// extend / extend, scale by 4/8 ... 4 3 L" (l.980-991): no I µOP.  (The stock N2 class has one;
-// it used to be removed by a correction in the Facile C++.)
+// extend / extend, scale by 4/8 ... 4 3 L" (l.980-991): no I µOP (the stock N2 class has one).
 def : SchedAlias<WriteLDIdx, N2Write_4c_1L>;
 
 // [a78_reg_offset_h] docs/a78-sog.md C-12: "Load register, register offset, scale by 2" and
 // "..., extend, scale by 2" LDRH, LDRSH: "5 3 I, L" (l.985-986, l.992-993); without the scale
-// they are "basic" / "extend" (4 3 L).  They used to be 4 (I, L) whatever the scale.
+// they are "basic" / "extend" (4 3 L).
 def A78WriteLDRH : SchedWriteVariant<[
                      SchedVar<A78IsMemScaled, [A78Write_5c_1I_1L]>,
                      SchedVar<NoSchedPred,    [N2Write_4c_1L]>]>;
@@ -1144,9 +942,7 @@ def : InstRW<[WriteAdr, N2Write_4c_2L, WriteLDHi],
              (instregex "^LDPX(post|pre)$")>;
 
 // Load pair, signed immed offset, signed words
-// [a78_ldpsw] docs/a78-sog.md C-12: 5 3/2 I, L (l.998-999, l.1019-1020), both registers 5.  It
-// used to be five cycles of M0 and no load pipe (corrected afterwards by the Facile C++), the
-// second register 4.
+// [a78_ldpsw] docs/a78-sog.md C-12: 5 3/2 I, L (l.998-999, l.1019-1020), both registers 5.
 def : InstRW<[A78Write_5c_1I_2L, A78Write_5c_0Z], (instrs LDPSWi)>;
 // Load pair, immed post-index or immed pre-index, signed words
 def : InstRW<[WriteAdr, A78Write_5c_1I_2L, A78Write_5c_0Z],
@@ -1157,15 +953,13 @@ def : InstRW<[WriteAdr, A78Write_5c_1I_2L, A78Write_5c_0Z],
 
 def : SchedAlias<WriteST,    N2Write_1c_1L01_1D>;
 // [a78_reg_offset] docs/a78-sog.md C-13: "Store register, register offset, basic / scaled by 4/8 /
-// extend / extend, scale by 4/8 ... 1 2 L01, D" (l.1127-1136): no I µOP (it used to be removed by
-// the Facile C++).
+// extend / extend, scale by 4/8 ... 1 2 L01, D" (l.1127-1136): no I µOP.
 def : SchedAlias<WriteSTIdx, N2Write_1c_1L01_1D>;
 def : SchedAlias<WriteSTP,   N2Write_1c_1L01_1D>;
 def : SchedAlias<WriteAdr,   N2Write_1c_1I>; // copied from A57.
 
 // [a78_store_rows] docs/a78-sog.md C-13, I-3: "Store register, register offset, scaled by 2" and
-// "..., extend, scale by 1" (sic) STRH: "2 2 I, L01, D" (l.1131-1132, l.1137-1138).  It used to be
-// latency 1 (I, L01, D).
+// "..., extend, scale by 1" (sic) STRH: "2 2 I, L01, D" (l.1131-1132, l.1137-1138).
 def A78WriteSTRH : SchedWriteVariant<[
                      SchedVar<A78IsMemScaled, [A78Write_2c_1I_1L01_1D]>,
                      SchedVar<NoSchedPred,    [N2Write_1c_1L01_1D]>]>;
@@ -1238,33 +1032,28 @@ def : SchedAlias<WriteFDiv,  N2Write_7c_7V0>;
 //   ASIMD D-form F16 1/7 -> 7, D-form F32 2/7 -> 4, Q-form F16 1/10 (FDIV) / 1/11 (FSQRT)
 //   -> 10 / 11, Q-form F32 1/7 -> 7, Q-form F64 1/7 -> 7.
 // Best latency: 7, except Q-form F16 (FDIV 10, FSQRT 11).  [a78_dividers] the occupancy is on the
-// FP divide unit A78UnitFDiv; V0 is taken for one cycle (it used to be held for the occupancy).
-// The uOP counts are the ones the replaced N2 writes had (7, 10, 15, 9, 16 for the scalar forms,
-// 1 or 2 for ASIMD; docs/a78-sog.md U-2).
-def N2WriteFDS_7c2_7   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 7;  let ReleaseAtCycles = [1, 2]; }
-def N2WriteFDS_7c2_10  : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 10; let ReleaseAtCycles = [1, 2]; }
-def N2WriteFDS_7c2_9   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 9;  let ReleaseAtCycles = [1, 2]; }
-def N2WriteFDS_7c4_15  : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 15; let ReleaseAtCycles = [1, 4]; }
-def N2WriteFDS_7c4_16  : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 16; let ReleaseAtCycles = [1, 4]; }
-def N2WriteFDS_7c7_1   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 1;  let ReleaseAtCycles = [1, 7]; }
-def N2WriteFDS_7c7_2   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [1, 7]; }
-def N2WriteFDS_7c4_2   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let NumMicroOps = 2;  let ReleaseAtCycles = [1, 4]; }
-def N2WriteFDS_10c10_2 : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 10; let NumMicroOps = 2;  let ReleaseAtCycles = [1, 10]; }
-def N2WriteFDS_11c11_2 : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 11; let NumMicroOps = 2;  let ReleaseAtCycles = [1, 11]; }
+// FP divide unit A78UnitFDiv; V0 is taken for one cycle.
+// One uOP each, as the Cortex-A76 and the X1 (the SOG gives no uOP count, docs/a78-sog.md U-2); the
+// divide's iterations are expressed by the occupancy of the divide unit, not by extra uOPs.
+def N2WriteFDS_7c2   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 2]; }
+def N2WriteFDS_7c4   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 4]; }
+def N2WriteFDS_7c7   : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 7;  let ReleaseAtCycles = [1, 7]; }
+def N2WriteFDS_10c10 : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 10; let ReleaseAtCycles = [1, 10]; }
+def N2WriteFDS_11c11 : SchedWriteRes<[N2UnitV0, A78UnitFDiv]> { let Latency = 11; let ReleaseAtCycles = [1, 11]; }
 
 // FP divide, H-form
-def : InstRW<[N2WriteFDS_7c2_7],  (instrs FDIVHrr)>;
+def : InstRW<[N2WriteFDS_7c2],  (instrs FDIVHrr)>;
 // FP divide, S-form
-def : InstRW<[N2WriteFDS_7c2_10], (instrs FDIVSrr)>;
+def : InstRW<[N2WriteFDS_7c2], (instrs FDIVSrr)>;
 // FP divide, D-form
-def : InstRW<[N2WriteFDS_7c4_15], (instrs FDIVDrr)>;
+def : InstRW<[N2WriteFDS_7c4], (instrs FDIVDrr)>;
 
 // FP square root, H-form
-def : InstRW<[N2WriteFDS_7c2_7],  (instrs FSQRTHr)>;
+def : InstRW<[N2WriteFDS_7c2],  (instrs FSQRTHr)>;
 // FP square root, S-form
-def : InstRW<[N2WriteFDS_7c2_9],  (instrs FSQRTSr)>;
+def : InstRW<[N2WriteFDS_7c2],  (instrs FSQRTSr)>;
 // FP square root, D-form
-def : InstRW<[N2WriteFDS_7c4_16], (instrs FSQRTDr)>;
+def : InstRW<[N2WriteFDS_7c4], (instrs FSQRTDr)>;
 
 // FP multiply
 def : WriteRes<WriteFMul, [N2UnitV]> { let Latency = 3; }
@@ -1273,8 +1062,7 @@ def : WriteRes<WriteFMul, [N2UnitV]> { let Latency = 3; }
 def : InstRW<[N2Wr_FMA, ReadDefault, ReadDefault, N2Rd_FMA], (instregex "^FN?M(ADD|SUB)[HSD]rrr$")>;
 
 // FP round to integral
-// [a78_frint] docs/a78-sog.md C-14: "FP round to integral FRINTA, ... FRINTZ 2 1 V0" (l.1234-1237);
-// it was 3.
+// [a78_frint] docs/a78-sog.md C-14: "FP round to integral FRINTA, ... FRINTZ 2 1 V0" (l.1234-1237).
 def : InstRW<[N2Write_2c_1V0], (instregex "^FRINT[AIMNPXZ][HSD]r$",
                                           "^FRINT(32|64)[XZ][SD]r$")>;
 
@@ -1282,13 +1070,12 @@ def : InstRW<[N2Write_2c_1V0], (instregex "^FRINT[AIMNPXZ][HSD]r$",
 // -----------------------------------------------------------------------------
 
 // FP convert, from gen to vec reg
-// [a78_m0_pipelined] docs/a78-sog.md C-15: "3 1 M0" (l.1302): M0 one cycle (it was three; the Facile
-// C++ used to cap it).
+// [a78_m0_pipelined] docs/a78-sog.md C-15: "3 1 M0" (l.1302): M0 one cycle.
 def : InstRW<[A78Write_3c_1M0], (instregex "^[SU]CVTF[SU][WX][HSD]ri$")>;
 
 // FP convert, from vec to gen reg
 // [a78_fp_cvt] docs/a78-sog.md C-15: "FP convert, from vec to gen reg FCVTAS, ... FCVTZU 3 1 V0"
-// (l.1303-1307); the integer forms used to be on V (2 per cycle).  The fixed-point forms
+// (l.1303-1307).  The fixed-point forms
 // (FCVTZS/FCVTZU Rd, Fn, #fbits) are WriteFCvt below, 3 1 V0 as well.
 def : InstRW<[N2Write_3c_1V0], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
 
@@ -1296,13 +1083,13 @@ def : InstRW<[N2Write_3c_1V0], (instregex "^FCVT[AMNPZ][SU][SU][WX][HSD]r$")>;
 // FP convert, from vec to vec reg
 def : SchedAlias<WriteFCvt, N2Write_3c_1V0>;
 // [a78_fp_cvt] "FP convert, from vec to vec reg FCVT, FCVTXN 2 1 V0" (l.1301): the precision
-// conversions (WriteFCvt) were 3, the scalar FCVTXN 2 on V.
+// conversions and the scalar FCVTXN (not WriteFCvt above).
 def : InstRW<[N2Write_2c_1V0], (instregex "^FCVT[HSD][HSD]r$", "^FCVTXNv1i64$")>;
 // [a78_fp_cvt_scalar] docs/a78-sog.md D-4: FCVT[AMNPZ][SU], SCVTF, UCVTF with the operand and the
 // result in FP/ASIMD registers (scalar forms, integer and fixed-point) have no row of their own; the
 // rows of the same mnemonics give 3 1 (V0 from a vector register, M0 from a GPR, l.1302-1307) and
 // the ASIMD rows 3 1 V0 for two lanes, more for four and eight (l.1791-1808).  One lane is taken as
-// the two-lane row, as for the Cortex-A76.  They used to be 2 on V (the stock class).
+// the two-lane row, as for the Cortex-A76.
 def : InstRW<[N2Write_3c_1V0], (instregex "^FCVT[AMNPZ][SU]v1(i32|i64|f16)$",
                                           "^[SU]CVTFv1(i16|i32|i64)$",
                                           "^FCVTZ[SU][hsd]$", "^[SU]CVTF[hsd]$")>;
@@ -1316,29 +1103,28 @@ def : InstRW<[N2Write_2c_1V], (instrs FMOVHr, FMOVSr, FMOVDr)>;
 // FP transfer, from gen to low half of vec reg
 // [a78_zero_mov] docs/a78-sog.md C-4: "FMOV Hd/Sd/Dd, WZR/XZR" is not among the zero-latency MOVs
 // of the A78 (sec. 4.15, l.2829-2848); the stock NeoverseZeroMove variant made it latency 0 with no
-// pipeline.  [a78_m0_pipelined] C-15: "3 1 M0" (l.1310): M0 one cycle (it was three).
+// pipeline.  [a78_m0_pipelined] C-15: "3 1 M0" (l.1310): M0 one cycle.
 def : InstRW<[A78Write_3c_1M0], (instrs FMOVWHr, FMOVXHr, FMOVWSr, FMOVXDr)>;
 
 // FP transfer, from gen to high half of vec reg
 def : InstRW<[N2Write_5c_1M0_1V], (instrs FMOVXDHighr)>;
 
 // FP transfer, from vec to gen reg
-// [a78_fp_cvt] docs/a78-sog.md C-15: "FP transfer, from vec to gen reg FMOV 2 1 V1" (l.1314); it was
-// on V.  WriteFCopy is left with FMOV Wd/Xd, Hn/Sn/Dn and FMOV Xd, Vn.D[1] (the other direction has
+// [a78_fp_cvt] docs/a78-sog.md C-15: "FP transfer, from vec to gen reg FMOV 2 1 V1" (l.1314).
+// WriteFCopy is left with FMOV Wd/Xd, Hn/Sn/Dn and FMOV Xd, Vn.D[1] (the other direction has
 // the rows above).
 def : SchedAlias<WriteFCopy, N2Write_2c_1V1>;
 
 // FP load instructions
 // -----------------------------------------------------------------------------
 // [a78_fp_ld] docs/a78-sog.md C-16: Table 3-20 (l.1366-1419) gives latency 5 for the FP loads and 6
-// for the register-offset scaled H/Q forms; the Neoverse N2 rows had 6 and 7.
+// for the register-offset scaled H/Q forms; the Neoverse N2 rows have 6 and 7.
 
 // Load vector reg, literal, S/D/Q forms (5, L) / unscaled immed (5, L)
 def : InstRW<[A78Write_5c_1L], (instregex "^LDR[SDQ]l$",
                                           "^LDUR[BHSDQ]i$")>;
 // Load vector reg, immed post-index / pre-index (5, L, I)
-// [a78_fp_ld] the I of "L, I" is the base update (WriteAdr); the load itself used to take a
-// second I µOP.
+// [a78_fp_ld] the I of "L, I" is the base update (WriteAdr); the load itself takes no I µOP.
 def : InstRW<[WriteAdr, A78Write_5c_1L], (instregex "^LDR[BHSDQ](post|pre)$")>;
 // Load vector reg, unsigned immed (5, L)
 def : InstRW<[A78Write_5c_1L], (instregex "^LDR[BHSDQ]ui$")>;
@@ -1346,7 +1132,7 @@ def : InstRW<[A78Write_5c_1L], (instregex "^LDR[BHSDQ]ui$")>;
 // "scale, S/D-form" 5 L; "scale, H/Q-form" 6 I, L; "extend" 5 L; "extend, scale, S/D-form" 5 L;
 // "extend, scale, H/Q-form" 6 I, L.  The I of "basic" (the X index without the scale, which the
 // "extend" and "scale, S/D" rows, and the integer "basic" row, do not have) is taken as a misprint
-// and not modelled (I-4, decided 2026-11-01).  B has no scaled row: it is "basic" with an X index,
+// and not modelled (I-4).  B has no scaled row: it is "basic" with an X index,
 // "extend" with a W index.
 def A78WriteLDRHQroX : SchedWriteVariant<[
                          SchedVar<A78IsMemScaled, [A78Write_6c_1I_1L]>,
@@ -1358,13 +1144,13 @@ def : InstRW<[A78Write_5c_1L, ReadAdrBase], (instregex "^LDR[BSD]ro[WX]$")>;
 def : InstRW<[A78WriteLDRHQroX, ReadAdrBase], (instregex "^LDR[HQ]roX$")>;
 def : InstRW<[A78WriteLDRHQroW, ReadAdrBase], (instregex "^LDR[HQ]roW$")>;
 // [a78_ldp_hi] docs/a78-sog.md D-10: the second register of every FP load pair has the row's
-// latency 5 and no µOP (it was WriteLDHi: 4, one µOP).
+// latency 5 and no µOP (A78Write_5c_0Z, not WriteLDHi).
 // Load vector pair, immed offset, S/D-form (5, 3, L)
 def : InstRW<[A78Write_5c_1L, A78Write_5c_0Z], (instregex "^LDN?P[SD]i$")>;
 // Load vector pair, immed offset, Q-form (5, 3/2, L)
 def : InstRW<[A78Write_5c_2L, A78Write_5c_0Z], (instrs LDPQi, LDNPQi)>;
 // Load vector pair, immed post/pre-index, S/D-form (5, 3, I, L)
-// [a78_fp_ld] one I µOP, the base update (the load used to take one or two more).
+// [a78_fp_ld] one I µOP, the base update.
 def : InstRW<[WriteAdr, A78Write_5c_1L, A78Write_5c_0Z],
              (instregex "^LDP[SD](pre|post)$")>;
 // Load vector pair, immed post/pre-index, Q-form (5, 3/2, L, I)
@@ -1384,7 +1170,7 @@ def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase], (instregex "^STUR[BHSDQ]
 // Store vector reg, immed pre-index, B/H/S/D-form
 // Store vector reg, immed pre-index, Q-form
 // [a78_fp_st] docs/a78-sog.md C-17: "2 2 L01, V, I" (l.1465-1472): the I is the base update
-// (WriteAdr); the store itself used to take a second I µOP.
+// (WriteAdr); the store itself takes no I µOP.
 def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
              (instregex "^STR[BHSDQ](pre|post)$")>;
 
@@ -1403,8 +1189,7 @@ def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadAdrBase],
 
 // [a78_store_rows] docs/a78-sog.md C-17, I-5: "Store vector reg, register offset, scale, H-form"
 // and "..., extend, scale, H-form" 2 2 I, L01, V (l.1481-1482, l.1491-1492); "..., extend, scale,
-// Q-form" 2 2 I, L01, V (l.1495-1496), while "..., scale, Q-form" is L01, V (l.1485-1486).  The
-// scaled H forms and the scaled Q form with a W index used to have no I µOP.
+// Q-form" 2 2 I, L01, V (l.1495-1496), while "..., scale, Q-form" is L01, V (l.1485-1486).
 def A78WriteSTRHro : SchedWriteVariant<[
                        SchedVar<A78IsMemScaled, [A78Write_2c_1I_1L01_1V]>,
                        SchedVar<NoSchedPred,    [N2Write_2c_1L01_1V]>]>;
@@ -1415,8 +1200,7 @@ def : InstRW<[A78WriteSTRHro, ReadST, ReadAdrBase], (instregex "^STRHro[WX]$", "
 def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P[SD]i$")>;
 
 // Store vector pair, immed offset, Q-form
-// [a78_fp_st] docs/a78-sog.md C-17, I-6: "2 2 L01, V" (l.1510-1511): one V µOP, 2 per cycle (it
-// was two V µOPs, 1 per cycle).
+// [a78_fp_st] docs/a78-sog.md C-17, I-6: "2 2 L01, V" (l.1510-1511): one V µOP, 2 per cycle.
 def : InstRW<[N2Write_2c_1L01_1V, ReadST, ReadST, ReadAdrBase], (instrs STPQi, STNPQi)>;
 
 // Store vector pair, immed post-index, S-form
@@ -1430,9 +1214,8 @@ def : InstRW<[WriteAdr, N2Write_2c_1L01_1V, ReadST, ReadST, ReadAdrBase],
 // Store vector pair, immed post-index, Q-form
 // Store vector pair, immed pre-index, Q-form
 // [a78_fp_st] "2 1 I, L01, V" (l.1516-1517, l.1522-1523): the base update is WriteAdr (latency 1,
-// the "(1)" of the writeback notes, l.1537-1542); the post-index form used to give the base
-// register the store's latency 2, the pre-index form two I µOPs.
-def : InstRW<[WriteAdr, N2Write_2c_1L01_2V, ReadST, ReadST, ReadAdrBase], (instrs STPQpost, STPQpre)>;
+// the "(1)" of the writeback notes, l.1537-1542), for both forms.  [a78_stpq_wb]: one per cycle on L01.
+def : InstRW<[WriteAdr, A78Write_2c_2L01_1V, ReadST, ReadST, ReadAdrBase], (instrs STPQpost, STPQpre)>;
 
 // ASIMD integer instructions
 // -----------------------------------------------------------------------------
@@ -1461,8 +1244,7 @@ def : InstRW<[N2Write_4c_1V1_1V],
              (instregex "^(ADDV|[SU]ADDLV)v8(i8|i16)v$")>;
 
 // ASIMD arith, reduce, 16B
-// [a78_v_throughput] docs/a78-sog.md C-18: "4 1/2 V1" (l.1591-1592): V1 held 2 cycles (it was 1,
-// throughput 1).
+// [a78_v_throughput] docs/a78-sog.md C-18: "4 1/2 V1" (l.1591-1592): V1 held 2 cycles.
 def : InstRW<[A78Write_4c_1V1_2cyc], (instrs ADDVv16i8v, SADDLVv16i8v,
                                              UADDLVv16i8v)>;
 
@@ -1486,7 +1268,9 @@ def : InstRW<[N2Write_4c_1V1_1V], (instregex "^[SU](MAX|MIN)Vv8i8v$",
 def : InstRW<[N2Write_4c_2V1], (instregex "[SU](MAX|MIN)Vv16i8v$")>;
 
 // ASIMD multiply
-def : InstRW<[N2Write_4c_1V0], (instregex "^MULv", "^SQ(R)?DMULHv")>;
+// [a78_mul_acc_fwd] MUL: A78Wr_VMUL (4, V0; forwards to the MLA/MLS accumulator).
+def : InstRW<[A78Wr_VMUL], (instregex "^MULv")>;
+def : InstRW<[N2Write_4c_1V0], (instregex "^SQ(R)?DMULHv")>;
 
 // ASIMD multiply accumulate
 def : InstRW<[N2Wr_VMA, N2Rd_VMA], (instregex "^MLAv", "^MLSv")>;
@@ -1508,9 +1292,12 @@ def : InstRW<[N2Write_4c_1V0], (instregex "^SQDMLALv", "^SQDMLSLv", "^SQDML[AS]L
 def : InstRW<[N2Write_3c_1V0], (instregex "^PMULL?(v8i8|v16i8)$")>;
 
 // ASIMD multiply long
-// [a78_asimd_mull] docs/a78-sog.md C-18: "SMULL(2), UMULL(2), SQDMULL(2) 3 1 V0" (l.1638-1640); it
-// was on V (2 per cycle).  [a78_asimd_scalar] D-5: the scalar SQDMULL (i16/i32) as well.
-def : InstRW<[N2Write_3c_1V0], (instregex "^[SU]MULLv", "^SQDMULLv", "^SQDMULLi(16|32)$")>;
+// [a78_asimd_mull] docs/a78-sog.md C-18: "SMULL(2), UMULL(2), SQDMULL(2) 3 1 V0" (l.1638-1640).
+// [a78_asimd_scalar] D-5: the scalar SQDMULL (i16/i32) as well.
+// [a78_mul_acc_fwd] SMULL/UMULL(2): A78Wr_VMULL (3, V0; forwards to the SMLAL-family
+// accumulator).
+def : InstRW<[A78Wr_VMULL], (instregex "^[SU]MULLv")>;
+def : InstRW<[N2Write_3c_1V0], (instregex "^SQDMULLv", "^SQDMULLi(16|32)$")>;
 
 // ASIMD pairwise add and accumulate long
 def : InstRW<[N2Wr_VPA, N2Rd_VPA], (instregex "^[SU]ADALPv")>;
@@ -1578,7 +1365,7 @@ def : InstRW<[N2Write_3c_1V0], (instregex "^FCVTN(v2|v4)i32",
 // ASIMD FP convert, other, D-form F32 and Q-form F64
 // [a78_fp_cvt] docs/a78-sog.md C-19: the fixed-point vector forms (FCVTZS/FCVTZU/SCVTF/UCVTF
 // Vd.T, Vn.T, #fbits, "..._shift") are the same mnemonics and arrangements as these rows
-// (l.1791-1808); they used to fall to the default (2, V).
+// (l.1791-1808), not the default (2, V).
 def : InstRW<[N2Write_3c_1V0], (instregex "^[FSU]CVT[AMNPZ][SU]v2f(32|64)$",
                                           "^[SU]CVTFv2f(32|64)$",
                                           "^(FCVTZ[SU]|[SU]CVTF)v2i(32|64)_shift$")>;
@@ -1594,31 +1381,35 @@ def : InstRW<[N2Write_6c_4V0], (instregex "^[FSU]CVT[AMNPZ][SU]v8f16$",
                                           "^(FCVTZ[SU]|[SU]CVTF)v8i16_shift$")>;
 
 // ASIMD FP divide, D-form, F16
-def : InstRW<[N2WriteFDS_7c7_1], (instrs FDIVv4f16)>;
+def : InstRW<[N2WriteFDS_7c7], (instrs FDIVv4f16)>;
 
 // ASIMD FP divide, D-form, F32
-def : InstRW<[N2WriteFDS_7c4_2], (instrs FDIVv2f32)>;
+def : InstRW<[N2WriteFDS_7c4], (instrs FDIVv2f32)>;
 
 // ASIMD FP divide, Q-form, F16
-def : InstRW<[N2WriteFDS_10c10_2], (instrs FDIVv8f16)>;
+def : InstRW<[N2WriteFDS_10c10], (instrs FDIVv8f16)>;
 
 // ASIMD FP divide, Q-form, F32
-def : InstRW<[N2WriteFDS_7c7_2], (instrs FDIVv4f32)>;
+def : InstRW<[N2WriteFDS_7c7], (instrs FDIVv4f32)>;
 
 // ASIMD FP divide, Q-form, F64
-def : InstRW<[N2WriteFDS_7c7_2], (instrs FDIVv2f64)>;
+def : InstRW<[N2WriteFDS_7c7], (instrs FDIVv2f64)>;
 
 // ASIMD FP max/min, reduce, F32 and D-form F16
 // [a78_v_throughput] docs/a78-sog.md C-19: "4 1 V" (l.1831-1833): V held 2 cycles in total (one µOP
-// of one cycle gave 2 per cycle).
+// of one cycle would give 2 per cycle).
 def : InstRW<[A78WriteV<4, 1, 2>], (instregex "^(FMAX|FMIN)(NM)?Vv4(i16|i32)v$")>;
 
 // ASIMD FP max/min, reduce, Q-form F16
-// [a78_v_throughput] "6 2/3 V" (l.1834-1836): V held 3 cycles in total (it was 2, throughput 1).
+// [a78_v_throughput] "6 2/3 V" (l.1834-1836): V held 3 cycles in total.
 def : InstRW<[A78WriteV<6, 2, 3>], (instregex "^(FMAX|FMIN)(NM)?Vv8i16v$")>;
 
 // ASIMD FP multiply
 def : InstRW<[N2Wr_VFM], (instregex "^FMULv", "^FMULXv")>;
+// [a78_asimd_scalar] docs/a78-sog.md C-19, D-5: the scalar FMULX (Hd/Sd/Dd, FMULX16/32/64), missed by
+// "^FMULXv", takes the row of its mnemonic, "ASIMD FP multiply FMUL, FMULX 3 2 V" (l.1837), with
+// the write of the scalar FMUL (WriteFMul, forwarded to the FMADD accumulator).
+def : InstRW<[WriteFMul], (instregex "^FMULX(16|32|64)$")>;
 
 // ASIMD FP multiply accumulate
 def : InstRW<[N2Wr_VFMA, N2Rd_VFMA], (instregex "^FMLAv", "^FMLSv")>;
@@ -1641,19 +1432,19 @@ def : InstRW<[N2Write_4c_2V0],
 def : InstRW<[N2Write_6c_4V0], (instregex "^FRINT[AIMNPXZ]v8f16$")>;
 
 // ASIMD FP square root, D-form, F16
-def : InstRW<[N2WriteFDS_7c7_1], (instrs FSQRTv4f16)>;
+def : InstRW<[N2WriteFDS_7c7], (instrs FSQRTv4f16)>;
 
 // ASIMD FP square root, D-form, F32
-def : InstRW<[N2WriteFDS_7c4_2], (instrs FSQRTv2f32)>;
+def : InstRW<[N2WriteFDS_7c4], (instrs FSQRTv2f32)>;
 
 // ASIMD FP square root, Q-form, F16
-def : InstRW<[N2WriteFDS_11c11_2], (instrs FSQRTv8f16)>;
+def : InstRW<[N2WriteFDS_11c11], (instrs FSQRTv8f16)>;
 
 // ASIMD FP square root, Q-form, F32
-def : InstRW<[N2WriteFDS_7c7_2], (instrs FSQRTv4f32)>;
+def : InstRW<[N2WriteFDS_7c7], (instrs FSQRTv4f32)>;
 
 // ASIMD FP square root, Q-form, F64
-def : InstRW<[N2WriteFDS_7c7_2], (instrs FSQRTv2f64)>;
+def : InstRW<[N2WriteFDS_7c7], (instrs FSQRTv2f64)>;
 
 // ASIMD BFloat16 (BF16) instructions
 // -----------------------------------------------------------------------------
@@ -1700,12 +1491,11 @@ def : InstRW<[N2Write_3c_1V0], (instrs BFCVT)>;
 def : InstRW<[N2Write_2c_1V], (instrs MOVID, MOVIv2d_ns)>;
 
 // ASIMD duplicate, gen reg
-// [a78_m0_pipelined] docs/a78-sog.md C-20: "3 1 M0" (l.1937): M0 one cycle (it was three).
+// [a78_m0_pipelined] docs/a78-sog.md C-20: "3 1 M0" (l.1937): M0 one cycle.
 def : InstRW<[A78Write_3c_1M0], (instregex "^DUPv.+gpr")>;
 
 // ASIMD transfer, element to gen reg
-// [a78_fp_cvt] docs/a78-sog.md C-20: "UMOV, SMOV 2 1 V1" (l.1988-1989); they were on V (the stock
-// WriteV class).
+// [a78_fp_cvt] docs/a78-sog.md C-20: "UMOV, SMOV 2 1 V1" (l.1988-1989).
 def : InstRW<[N2Write_2c_1V1], (instregex "^[SU]MOVvi")>;
 
 // ASIMD extract narrow, saturating
@@ -1734,25 +1524,28 @@ def : InstRW<[N2Write_6c_4V0], (instrs FRECPEv8f16, FRSQRTEv8f16)>;
 def : InstRW<[N2Write_3c_1V0], (instregex "^FRECPXv")>;
 
 // ASIMD reciprocal step
-def : InstRW<[N2Write_4c_1V], (instregex "^FRECPSv", "^FRSQRTSv")>;
+// [a78_asimd_scalar] docs/a78-sog.md C-20, D-5: the scalar FRECPS/FRSQRTS (16/32/64), missed by the
+// "v" patterns, take "ASIMD reciprocal step FRECPS, FRSQRTS 4 2 V" (l.1961).
+def : InstRW<[N2Write_4c_1V], (instregex "^FRECPSv", "^FRSQRTSv",
+                                         "^FRECPS(16|32|64)$", "^FRSQRTS(16|32|64)$")>;
 
 // ASIMD table lookup, 3 table regs
 def : InstRW<[N2Write_4c_2V], (instrs TBLv8i8Three, TBLv16i8Three)>;
 
 // ASIMD table lookup, 4 table regs
 // [a78_v_throughput] docs/a78-sog.md C-20: "4 2/3 V" (l.1968-1969): V held 3 cycles in total (four
-// µOPs of one cycle gave 1/2).
+// µOPs of one cycle would give 1/2).
 def : InstRW<[A78WriteV<4, 4, 3>], (instrs TBLv8i8Four, TBLv16i8Four)>;
 
 // ASIMD table lookup extension, 2 table reg
 def : InstRW<[N2Write_4c_2V], (instrs TBXv8i8Two, TBXv16i8Two)>;
 
 // ASIMD table lookup extension, 3 table reg
-// [a78_v_throughput] "6 2/3 V" (l.1984-1985): V held 3 cycles (it was 4, throughput 1/2).
+// [a78_v_throughput] "6 2/3 V" (l.1984-1985): V held 3 cycles.
 def : InstRW<[A78WriteV<6, 4, 3>], (instrs TBXv8i8Three, TBXv16i8Three)>;
 
 // ASIMD table lookup extension, 4 table reg
-// [a78_v_throughput] "6 2/5 V" (l.1986-1987): V held 5 cycles (it was 8, throughput 1/4).
+// [a78_v_throughput] "6 2/5 V" (l.1986-1987): V held 5 cycles.
 def : InstRW<[A78WriteV<6, 8, 5>], (instrs TBXv8i8Four, TBXv16i8Four)>;
 
 // ASIMD transfer, gen reg to element
@@ -1760,9 +1553,8 @@ def : InstRW<[N2Write_5c_1M0_1V], (instregex "^INSvi(8|16|32|64)gpr$")>;
 
 // ASIMD load instructions
 // -----------------------------------------------------------------------------
-// [a78_asimd_ld] docs/a78-sog.md C-21: Table 3-30 (l.2065-2172).  The N2 rows were one cycle
-// slower than the A78 rows for LD1 (5, four registers D 5 and Q 6), LD1 one lane / LD1R and LD2 (7),
-// and one cycle faster for LD4 multiple Q-form (10).  LD1 four registers D-form ("5 3/2") and LD4
+// [a78_asimd_ld] docs/a78-sog.md C-21: Table 3-30 (l.2065-2172); the A78 latencies differ from the
+// stock N2 rows for LD1, LD1 one lane / LD1R, LD2 and LD4 multiple Q-form.  LD1 four registers D-form ("5 3/2") and LD4
 // multiple Q-form ("10 1/4") also have [a78_ls_throughput] (D-6).  LD3 and the other LD4 rows
 // match.  The writeback forms add WriteAdr ("(1) +I", l.2172).
 
@@ -1900,9 +1692,8 @@ def : InstRW<[WriteAdr, N2Write_8c_4L_4V],  (instregex "LD4Rv(16b|8h|4s|2d)_POST
 // ASIMD store instructions
 // -----------------------------------------------------------------------------
 // [a78_asimd_st] docs/a78-sog.md C-22: Table 3-32 (l.2248-2314).  [a78_ls_throughput] D-6: the rows
-// with A78WriteSTV reach the SOG throughput by holding the L01 pipes 2/T cycles; with one cycle per
-// µOP they were up to twice as fast as the SOG (e.g. ST2 multiple Q-form 1 per cycle, SOG 1/2).
-// ST2 multiple Q-form was latency 4 (SOG 5), ST3 one lane 6 (SOG 5).
+// with A78WriteSTV reach the SOG throughput by holding the L01 pipes 2/T cycles (one cycle per µOP
+// would be up to twice as fast as the SOG, e.g. ST2 multiple Q-form 1 per cycle, SOG 1/2).
 // [a78_from_a55_store_data] B-1: the data Vt reads ReadST, the base Rn ReadAdrBase; for the
 // one-lane forms the lane index takes the read in between (ReadDefault).
 

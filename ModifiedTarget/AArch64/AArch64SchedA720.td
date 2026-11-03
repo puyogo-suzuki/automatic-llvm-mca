@@ -19,12 +19,12 @@ def CortexA720Model : SchedMachineModel {
   // Source: Cardyak's Microarchitecture Cheat Sheet (unofficial, secondary; the author
   // notes information on the 2023 Arm cores is scarce).  Another secondary source
   // (a 2026 blog) says 160, which is also the value stock LLVM's N2 model (the model
-  // LLVM assigns to cortex-a720) carries, and which this file used before.
+  // LLVM assigns to cortex-a720) carries.
   // Sets the MLP window width (and MicroOpQueueSize) for the A720.
   // docs/a720-sog.md U-1.
   let MicroOpBufferSize = 192;
   // L1 hit latency: SOG Table 4-4 "Level-1 Cache Hit 4 core cycles" (l.3259) and the load tables
-  // (4, l.792-850).  Was 3.  Not read by the --facile path (the load rows carry the latency).
+  // (4, l.792-850).  Not read by the --facile path (the load rows carry the latency).
   let LoadLatency = 4;
   let MispredictPenalty = 11;   // not from the SOG; not read by the --facile path (U-1)
   let CompleteModel = 0;
@@ -38,13 +38,12 @@ def CortexA720Model : SchedMachineModel {
 //===----------------------------------------------------------------------===//
 // Define Cortex-A720 execution pipelines matching SOG Section 2.1 (13 Issue Pipelines)
 
-// 2026-10-30 (user instruction, SOG-only values):
-// the pipelines are now defined as the SOG's pipeline symbols (Table 3-1, a720sog.txt l.588-600) with
-// ProcResGroups instead of independent ProcResource counters (before: A720UnitI was a separate
-// ProcResource<4> and A720UnitMul a separate ProcResource<2>, not sharing any unit with I0/I1/M0/M1).
+// The pipelines are the SOG's pipeline symbols (Table 3-1, a720sog.txt l.584-596); the groups of
+// pipelines (I, M, L, ...) are ProcResGroups over the same units, not independent counters.
 //   B = Branch 0/1; S = Integer single-cycle 0/1; M = Integer single/multicycle 0/1, M0 = multicycle 0;
 //   I = S + M; L01 = Load/Store 0/1; L = L01 + Load 2; ID = integer store data 0/1; V = FP/ASIMD 0/1.
-// "Text line references below: lN = line N of automatic-llvm-mca/tmp/a720sog.txt."
+// Text line references below: lN = line N of a text extraction of the guide (not part of the
+// repository).
 let SchedModel = CortexA720Model in {
 def A720UnitB0 : ProcResource<1> { let BufferSize = 16; }
 def A720UnitB1 : ProcResource<1> { let BufferSize = 16; }
@@ -69,7 +68,7 @@ def A720UnitV  : ProcResGroup<[A720UnitV0, A720UnitV1]> { let BufferSize = 48; }
 // the divide's occupancy while M0 itself is taken one cycle: "Integer divides are performed using
 // an iterative algorithm and block any subsequent divide operations until complete" (sec. 3.5
 // note 1, l.693) names later divides, not every M0 uOP; "Each issue pipeline can accept one uOP
-// per cycle" (l.477).  The decision of the Cortex-A76 and Cortex-A78 audits.
+// per cycle" (l.477).  The same reading as for the Cortex-A76 and Cortex-A78.
 def A720UnitIDiv : ProcResource<1>;
 }
 
@@ -221,8 +220,7 @@ def : WriteRes<WriteIM64, [A720UnitM0]> { let Latency = 2; }
 // [a720_div_best] docs/a720-sog.md C-10, D-1: "Divide, W-form SDIV, UDIV 5 to 12 1/12 to 1/5 M0",
 // "Divide, X-form 5 to 20 1/20 to 1/5 M0" (l.683-684), note 1 "Early termination is possible,
 // depending upon the data values" (l.694): the best case, latency 5 and the divider held 5 cycles
-// (1/5), for both forms.  [a720_dividers] D-3: M0 one cycle, the divider (A720UnitIDiv) 5.  Was
-// latency 8 / 12 with M0 held 8 / 12 cycles (a point inside the range, not a SOG value).
+// (1/5), for both forms.  [a720_dividers] D-3: M0 one cycle, the divider (A720UnitIDiv) 5.
 def : WriteRes<WriteID32, [A720UnitM0, A720UnitIDiv]> { let Latency = 5; let ReleaseAtCycles = [1, 5]; }
 def : WriteRes<WriteID64, [A720UnitM0, A720UnitIDiv]> { let Latency = 5; let ReleaseAtCycles = [1, 5]; }
 
@@ -232,7 +230,7 @@ def : WriteRes<WriteBrReg, [A720UnitB]> { let Latency = 1; }
 // Loads 4, 3/cycle, L (l.790-838); stores 1, 2/cycle, L01 + ID (l.870-899)
 // [a720_store_uops] docs/a720-sog.md C-7: "Stores uOPs are split into address and data uOPs"
 // (l.867-868; FP and ASIMD stores l.1110, l.1740): two uOPs, the address on L01 and the data on ID
-// (V for FP/ASIMD stores).  Was one.
+// (V for FP/ASIMD stores).
 def : WriteRes<WriteLD, [A720UnitLS]> { let Latency = 4; }
 def : WriteRes<WriteST, [A720UnitL01, A720UnitSD]> { let Latency = 1; let NumMicroOps = 2; }
 def : WriteRes<WriteSTP, [A720UnitL01, A720UnitSD]> { let Latency = 1; let NumMicroOps = 2; }
@@ -242,16 +240,15 @@ def : WriteRes<WriteSTIdx, [A720UnitL01, A720UnitSD]> { let Latency = 1; let Num
 def : WriteRes<WriteSTX, [A720UnitL01, A720UnitSD]> { let Latency = 1; let NumMicroOps = 2; }
 
 // [a720_ldp_hi] docs/a720-sog.md D-10: the second destination of a load pair has the row's
-// latency, no pipeline and no uOP (the generic write; the LDP rows below use their own).  Was L
-// for one more cycle and one uOP.
+// latency, no pipeline and no uOP (the generic write; the LDP rows below use their own).
 def : WriteRes<WriteLDHi, []> { let Latency = 4; let NumMicroOps = 0; }
 // [a720_sys] docs/a720-sog.md D-12: the SOG has no rows for MRS, MSR, barriers and other system
 // instructions (sec. 4.10 lists execution constraints without cycle counts, l.3080-3145).  Lowest
-// estimate: latency 1, no pipeline (as the Cortex-A78 model).  Was latency 10 on S0 / on L.
+// estimate: latency 1, no pipeline (as the Cortex-A78 model).
 def : WriteRes<WriteSys, []> { let Latency = 1; }
 def : WriteRes<WriteBarrier, []> { let Latency = 1; }
 // [a720_nop] docs/a720-sog.md C-3: NOP and the other hints (BTI, ...) take no execution resource,
-// the decision made for the Cortex-A55, A520, A76 and A78.  Was S0 for one cycle.
+// the decision made for the Cortex-A55, A520, A76 and A78.
 def : WriteRes<WriteHint, []> { let Latency = 1; }
 
 // FP: FABS/FADD/FSUB/FMIN/FMAX/FNEG/FCSEL 2, 2/cycle, V (l.963-996); FCMP/FCCMP 2, 2/cycle, V (l.965)
@@ -287,7 +284,7 @@ def : ReadAdvance<ReadID, 0>;
 // that store data is read one cycle late, and applied it to the Cortex-A76 and A78 for
 // consistency; it is applied here likewise.  ReadST is attached to the data operands of every
 // store form below (the exclusives excepted).  It acts only on Facile's store -> load memory
-// edges.  Was 0.
+// edges.
 def : ReadAdvance<ReadST, 1>;
 def : ReadAdvance<ReadExtrHi, 0>;
 def : ReadAdvance<ReadAdrBase, 0>;
@@ -426,7 +423,7 @@ def : InstRW<[A720Write_13c2_1V0], (instrs FDIVv2f64, FSQRTv2f64)>;
 
 
 //===----------------------------------------------------------------------===//
-// 2026-10-30: SOG instruction groups (lN = line of automatic-llvm-mca/tmp/a720sog.txt)
+// SOG instruction groups (lN = SOG text line)
 
 def A720Wr_1c_S    : SchedWriteRes<[A720UnitS]>  { let Latency = 1; }
 def A720Wr_1c_I    : SchedWriteRes<[A720UnitI]>  { let Latency = 1; }
@@ -445,9 +442,9 @@ def A720Wr_ArithShift : SchedWriteVariant<[SchedVar<IsCheapLSL,  [A720Wr_1c_I]>,
                                            SchedVar<NoSchedPred, [A720Wr_2c_M]>]>;
 def : InstRW<[A720Wr_ArithShift], (instregex "^(ADD|SUB)S?[WX]rs$")>;
 // ALU, extend and shift (extended register) 2, M (l.642).
-// [a720_ext] docs/a720-sog.md C-9: every extended-register form.  The variant on RegExtendedPred
-// used before tested "extend operand != 0", which is false only for UXTB #0 - a real extend - so it
-// gave `add x0, x1, w2, uxtb` the "ALU, basic" row 1 I.  Identity extends (UXTX/LSL #0, the
+// [a720_ext] docs/a720-sog.md C-9: every extended-register form, UXTB included.  No variant on
+// RegExtendedPred: it tests "extend operand != 0", which is false for UXTB #0 - a real extend -
+// and would give `add x0, x1, w2, uxtb` the "ALU, basic" row 1 I.  Identity extends (UXTX/LSL #0, the
 // `add x0, sp, x1` spelling): U-4.
 def : InstRW<[A720Wr_2c_M], (instregex "^(ADD|SUB)S?[WX]rx(64)?$")>;
 // Logical, shift, flagset ANDS/BICS 2, M (l.661); unshifted = ALU basic, flagset 1, I (l.638)
@@ -472,7 +469,7 @@ def : InstRW<[A720Wr_3c_M], (instrs SMULHrr, UMULHrr)>;
 // [a720_crc] docs/a720-sog.md C-26: "CRC checksum ops CRC32, CRC32C 2 1 M0" with note 1 "late
 // forwarding of the result from a producer uOP to a consumer uOP.  This results in a 1 cycle
 // reduction in latency as seen by the consumer" (l.1875-1878).  The accumulated CRC (Rn) reads one
-// cycle late from a CRC producer.  Was WriteISReg, 1 on I.
+// cycle late from a CRC producer.
 def A720Wr_CRC : SchedWriteRes<[A720UnitM0]> { let Latency = 2; }
 def A720Rd_CRC : SchedReadAdvance<1, [A720Wr_CRC]>;
 def : InstRW<[A720Wr_CRC, A720Rd_CRC], (instregex "^CRC32C?[BHWX]rr$")>;
@@ -480,8 +477,8 @@ def : InstRW<[A720Wr_CRC, A720Rd_CRC], (instregex "^CRC32C?[BHWX]rr$")>;
 // [a720_pac] docs/a720-sog.md C-11: Table 3-5 (l.712-750).  AUT* 1 2 M; PAC* 4 2 M; XPAC* 1 2 M;
 // BLRAA/BRAA/RETAA forms 2 2 M, B; LDRAA/LDRAB 5 2 M, L, I, note 2 "Only Immed pre-index with
 // write back use I pipes" (the base update, WriteAdr).  Note 1 (AUTH fail) is not modelled (D-1).
-// Before: PACIASP/AUTIASP and the other hint-space forms took the hint row (S0), PACIA/AUTIA took
-// WriteI, and BLRAA, BRAA, RETAA, LDRAA, XPACD/XPACI had no scheduling data at all (dropped).
+// The hint-space forms (PACIASP, AUTIASP, ...) take these rows, not the hint row; BLRAA, BRAA,
+// RETAA, LDRAA and XPACD/XPACI, which the stock classes leave without scheduling data, are listed.
 def A720Wr_1c_M   : SchedWriteRes<[A720UnitM]> { let Latency = 1; }
 def A720Wr_4c_M   : SchedWriteRes<[A720UnitM]> { let Latency = 4; }
 def A720Wr_2c_M_B : SchedWriteRes<[A720UnitM, A720UnitB]> { let Latency = 2; }
@@ -504,18 +501,22 @@ def : InstRW<[WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)ui$", "^
 def : InstRW<[WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P(W|X)i$")>;
 def : InstRW<[WriteAdr, WriteST, ReadST, ReadAdrBase], (instregex "^STR(BB|HH|W|X)(pre|post)$")>;
 def : InstRW<[WriteAdr, WriteSTP, ReadST, ReadST, ReadAdrBase], (instregex "^STP(W|X)(pre|post)$")>;
+// The release exclusive stores keep their stock writes (WriteSTX) and read ReadST on the data, as the
+// A55, A520, A76, A78 and X1 do; STXR/STXP have none.
+def : InstRW<[WriteSTX, ReadST, ReadAdrBase], (instregex "^STLXR(B|H|W|X)$")>;
+def : InstRW<[WriteSTX, ReadST, ReadST, ReadAdrBase], (instregex "^STLXP(W|X)$")>;
 
 // Loads (l.790-856).  Literal 5, L + S (l.790).  Load pair X-form / LDPSW 4, 3/2 per cycle (l.840-856):
 // L group held 2 cycles.
 def A720Wr_LD5_L_S : SchedWriteRes<[A720UnitLS, A720UnitS]> { let Latency = 5; }
 def : InstRW<[A720Wr_LD5_L_S], (instregex "^LDR(W|X|SW)l$", "^PRFMl$")>;
 def A720Wr_LDP_X   : SchedWriteRes<[A720UnitLS]> { let Latency = 4; let ReleaseAtCycles = [2]; }
-// [a720_ldp_hi] D-10: the second destination of a pair: the row's latency, no uOP (was one uOP).
+// [a720_ldp_hi] D-10: the second destination of a pair: the row's latency, no uOP.
 def A720Wr_LDHi_0  : SchedWriteRes<[]> { let Latency = 4; let NumMicroOps = 0; }
 def A720Wr_LD_W    : SchedWriteRes<[A720UnitLS]> { let Latency = 4; }
 def : InstRW<[A720Wr_LD_W, A720Wr_LDHi_0], (instregex "^LDN?PWi$")>;
 def : InstRW<[A720Wr_LDP_X, A720Wr_LDHi_0], (instregex "^LDN?PXi$")>;
-// LDPSW: 4, 3/2, "I, L" (l.842) - the I pipe was missing
+// LDPSW: 4, 3/2, "I, L" (l.842)
 def A720Wr_LDPSW : SchedWriteRes<[A720UnitLS, A720UnitI]> { let Latency = 4; let ReleaseAtCycles = [2, 1]; }
 def : InstRW<[A720Wr_LDPSW, A720Wr_LDHi_0], (instrs LDPSWi)>;
 def : InstRW<[WriteAdr, A720Wr_LD_W, A720Wr_LDHi_0], (instregex "^LDPW(pre|post)$")>;
@@ -542,10 +543,9 @@ def : InstRW<[A720Wr_FST, ReadST, ReadST, ReadAdrBase], (instregex "^STN?P[SDQ]i
 // STR Q, register offset: "scale, Q-form" and "extend, scale, Q-form" I, L01, V (l.1151-1152,
 // l.1161-1162); "basic, Q-form" and "extend, Q-form" L01, V (l.1134-1135, l.1155-1156).
 // [a720_strq_ro] docs/a720-sog.md C-18: "scale" is the S bit of the addressing mode
-// (AArch64_AM::getMemDoShift), as for the Cortex-A76 and A78.  The stock ScaledIdxPred used before
-// is "extend is not UXTX/LSL, or scaled", but the extend operand of a register-offset load/store
-// holds the signed flag (0/1), not an AArch64_AM extend type, so the predicate was true for every
-// form and gave the unscaled Q stores an I uOP.
+// (AArch64_AM::getMemDoShift), as for the Cortex-A76 and A78.  Not the stock ScaledIdxPred
+// ("extend is not UXTX/LSL, or scaled"): the extend operand of a register-offset load/store holds
+// the signed flag (0/1), not an AArch64_AM extend type, so that predicate is true for every form.
 def A720IsMemScaled : MCSchedPredicate<CheckMemScaled>;
 def A720Wr_FST_I : SchedWriteRes<[A720UnitL01, A720UnitV, A720UnitI]> { let Latency = 2; let NumMicroOps = 3; }
 def A720Wr_STRQro : SchedWriteVariant<[SchedVar<A720IsMemScaled, [A720Wr_FST_I]>, SchedVar<NoSchedPred, [A720Wr_FST]>]>;
@@ -553,7 +553,7 @@ def : InstRW<[A720Wr_STRQro, ReadST, ReadAdrBase], (instrs STRQroW, STRQroX)>;
 // Pre/post-index: the I of "L01, V, I" is the base update (WriteAdr).
 // [a720_str_pre] docs/a720-sog.md C-18, I-3: "Store vector reg, immed pre-index, B/H/S/D-form STR
 // 3 2 L01, V, I" (l.1124-1125; checked in the PDF, p.27), against 2 for the post-index and the
-// Q-form pre-index rows.  As printed.  Was 2.
+// Q-form pre-index rows.  As printed.
 def A720Wr_FST3 : SchedWriteRes<[A720UnitL01, A720UnitV]> { let Latency = 3; let NumMicroOps = 2; }
 def : InstRW<[WriteAdr, A720Wr_FST3, ReadST, ReadAdrBase], (instregex "^STR[BHSD]pre$")>;
 def : InstRW<[WriteAdr, A720Wr_FST, ReadST, ReadAdrBase], (instregex "^STR[BHSD]post$", "^STRQ(pre|post)$")>;
@@ -574,7 +574,6 @@ def A720Wr_4c_V1  : SchedWriteRes<[A720UnitV1]> { let Latency = 4; }
 def A720Wr_5c_V1V : SchedWriteRes<[A720UnitV1, A720UnitV]> { let Latency = 5; }
 def A720Wr_6c_V1r2: SchedWriteRes<[A720UnitV1]> { let Latency = 6; let ReleaseAtCycles = [2]; }
 def A720Wr_2c_V0  : SchedWriteRes<[A720UnitV0]> { let Latency = 2; }
-def A720Wr_4c_V0  : SchedWriteRes<[A720UnitV0]> { let Latency = 4; }
 def A720Wr_4c_V0r2: SchedWriteRes<[A720UnitV0]> { let Latency = 4; let ReleaseAtCycles = [2]; }
 def A720Wr_6c_V0r4: SchedWriteRes<[A720UnitV0]> { let Latency = 6; let ReleaseAtCycles = [4]; }
 def A720Wr_3c_V   : SchedWriteRes<[A720UnitV]>  { let Latency = 3; }
@@ -678,21 +677,19 @@ def : InstRW<[A720Wr_4c_V0r2], (instregex "^(FCVTZ[SU]|[SU]CVTF)v(4i16|4i32)_shi
 def : InstRW<[A720Wr_6c_V0r4], (instregex "^(FCVTZ[SU]|[SU]CVTF)v8i16_shift$")>;
 
 // [a720_frecpe_scalar] docs/a720-sog.md C-22: "ASIMD reciprocal and square root estimate, D-form F32
-// and scalar forms FRECPE, FRSQRTE 3 1 V0" (l.1551-1553): the scalar H forms too.  They were 4, V0
-// held 2 cycles (the D-form F16 row).
+// and scalar forms FRECPE, FRSQRTE 3 1 V0" (l.1551-1553): the scalar H forms too.
 def : InstRW<[A720Wr_3c_V0], (instrs FRECPEv1f16, FRSQRTEv1f16)>;
 
 // [a720_fp_cvt_scalar] docs/a720-sog.md D-4: FP conversions with the operand and the result in FP
 // registers, scalar H form (`fcvtzs h0, h1`, `scvtf h0, h1`, also with #fbits).  No row names them;
 // the S and D scalar forms take the "D-form F32 and Q-form F64" row (3 1 V0, l.1373-1383) above,
 // and the H forms take the same row, the lowest the SOG gives for these mnemonics, as for the
-// Cortex-A76 and A78 (D-4 there).  They were 4 / V0 held 2 (FCVT*, *CVTF h) and 2 on V (*CVTF
-// v1i16, no row).
+// Cortex-A76 and A78 (D-4 there).
 def : InstRW<[A720Wr_3c_V0], (instregex "^FCVT[AMNPZ][SU]v1f16$", "^[SU]CVTFv1i16$", "^(FCVTZ[SU]|[SU]CVTF)h$")>;
 
 // [a720_asimd_scalar] docs/a720-sog.md D-5: the scalar forms of the ASIMD mnemonics take the row of
-// their mnemonic (Table 3-15, l.1272-1330), as for the Cortex-A76 and A78.  They were the default
-// 2 on V; FMULX scalar was 2 on V (ASIMD FP multiply FMULX 3 2 V, l.1439).
+// their mnemonic (Table 3-15, l.1272-1330), as for the Cortex-A76 and A78; FMULX scalar takes
+// "ASIMD FP multiply FMULX 3 2 V" (l.1439).
 def : InstRW<[A720Wr_2c_V1], (instrs SHLd, SSHRd, USHRd, SLId, SRId)>;
 def : InstRW<[A720Wr_4c_V1], (instregex "^[SU]RSHRd$", "^(SQSHL|UQSHL|SQSHLU)[bhsd]$",
                                         "^(SQSHRN|SQRSHRN|UQSHRN|UQRSHRN|SQSHRUN|SQRSHRUN)[bhs]$")>;
