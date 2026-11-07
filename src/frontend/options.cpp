@@ -43,17 +43,11 @@ namespace opts {
     cl::opt<std::string> UpdateMlp("update-mlp", cl::desc("CSV file containing previous MCA results to reuse"), cl::init(""));
     cl::opt<bool> Facile("facile", cl::desc("Enable Facile static analytical throughput prediction (AArch64)"), cl::init(false));
     cl::opt<bool> FacileReason("facile-reason", cl::desc("Output dominant bottleneck reason (inst, exec, prec) for Facile analysis"), cl::init(false));
-    cl::opt<bool> NoFacileMemoryDeps("no-facile-memory-deps",
-        cl::desc("Disable store->load memory RAW edges in the --facile precedence-constraint "
-                 "(Maximum Cycle Ratio) graph, restoring the register-dependences-only "
-                 "behaviour. The edges are on by default: the graph already carries "
-                 "loop-carried REGISTER recurrences, so omitting loop-carried MEMORY "
-                 "recurrences was an inconsistency that made the model blind to any value "
-                 "that round-trips through memory across a backedge (e.g. a scalar "
-                 "carried via a stack slot instead of a register). A missing precedence bound is masked by "
-                 "IssueWidth on narrow cores and only becomes visible on the widest core of "
-                 "a pair, which is why it presented as a FireStorm-specific "
-                 "under-prediction. This flag exists to A/B the effect."),
+    cl::opt<bool> FacileMemoryDeps("facile-memory-deps",
+        cl::desc("Add store->load memory RAW edges (may-alias rule, docs/docs.md section 4.G) to "
+                 "the --facile precedence-constraint (Maximum Cycle Ratio) graph, within an "
+                 "iteration and, for loops, across the backedge. Off by default: the graph then "
+                 "has register dependences only."),
         cl::init(false));
     cl::opt<int> ChainThreshold("chain-threshold", cl::desc("Max chain threshold for merged loop region analysis"), cl::init(5));
     cl::opt<bool> MergeSameHeader("merge-same-header", cl::desc("Keep only the widest backward-branch span per loop header (natural-loop definition: all back-edges to one header are one loop); drops same-header partial-path spans such as an early-continue back-edge. Applied after abab merging, never changes a kept span. See region_splitter.cpp mergeSameHeaderLoops."), cl::init(false));

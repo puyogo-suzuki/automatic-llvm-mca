@@ -143,8 +143,8 @@ For `--facile`, every region gets `EstimatedCycles = max(IssueBound, PortBound, 
 * `calculatePrecedenceBound`: the maximum cycle ratio of the dependence graph. Register edges have
   the latency of the producing def minus the consumer's `ReadAdvance`, floored at 1, and 0 for the
   zero-latency MOVs (`getEdgeLatency`, [C-4](#c-4), [C-6](#c-6)); a store with a base update has a
-  second node for the update ([C-7](#c-7)); store -> load memory edges have the store's latency
-  ([D-7](#d-7)).
+  second node for the update ([C-7](#c-7)); store -> load memory edges, added only with `--facile-memory-deps` (off by default,
+  [docs.md](docs.md) 4.G), have the store's latency ([D-7](#d-7)).
   Loop-carried edges (register and memory) are added only when the region is a loop, or with
   `--ignore-loop-carried disable` ([docs.md](docs.md) 4.J); for a region that is not a loop the bound is 0.
 
@@ -285,7 +285,7 @@ and 3.19 (l.1455, l.2245): "split into store address and store data µOPs at dis
 (p.53, l.2554-2564): forwarding needs the load to start at the start or the middle of the older
 store (not for LDP of two 32-bit registers), loads larger than 8 bytes from at most two stores,
 smaller ones from one. Implementation (shared Facile code, [docs.md](docs.md) sections 4.F and 4.G):
-the base update of a store is a node of its own that does not wait for the data, and a store ->
+the base update of a store is a node of its own that does not wait for the data, and, with `--facile-memory-deps`, a store ->
 load edge is left out when the two register-offset accesses are provably disjoint. The size rules
 are not checked; the latency of the forwarding is not stated ([D-7](#d-7)).
 
@@ -377,7 +377,7 @@ for "I, L" ([I-7](#i-7)). Measured: `ldrh w1, [x0, x1, lsl #1]` + branch 5.0; `l
 | **Store register, register offset, scaled by 2; extend, scale by 1 (sic, [I-3](#i-3)): STRH** | 2 / 2 / I, L01, D | `A78WriteSTRH`: scaled -> `A78Write_2c_1I_1L01_1D`, else `N2Write_1c_1L01_1D` (`[a78_store_rows]`) |
 | Store pair, immed offset; post-index; pre-index: STP, STNP | 1 / 2 / L01, D (+ I) | `WriteSTP` = `N2Write_1c_1L01_1D` (+ `WriteAdr`) |
 
-A store's latency matters only on Facile's store -> load edges ([D-7](#d-7)). The data operand reads
+A store's latency matters only on Facile's store -> load edges ([D-7](#d-7)), which exist only with `--facile-memory-deps`. The data operand reads
 `ReadST` ([B-1](#b-1)). Release and exclusive
 stores: [U-7](#u-7). Test: `Stores`.
 
@@ -647,7 +647,7 @@ with other L users is limited together, with V users it is not.
 SOG sec. 4.6 (l.2554-2564) gives the conditions of forwarding but no latency; the store tables give
 store latencies (1 for integer stores, 2 or more for FP and ASIMD stores, "the minimum latency seen
 by an operation dependent on" the store). Implementation (shared Facile code,
-`addMemoryDependencies`, [docs.md](docs.md) section 4): a store -> load edge has the store's
+`addMemoryDependencies`, [docs.md](docs.md) section 4.G): by default Facile adds no store -> load edge; with `--facile-memory-deps` a store -> load edge has the store's
 latency, then the load's own latency applies; i.e. forwarding is taken to be no slower than an L1
 hit.
 
@@ -915,9 +915,9 @@ is applied to the A78 likewise. Implementation: `ReadAdvance<ReadST, 1>`, and `R
 the data operands of every store form (integer STR/STUR/STTR/STLR/STLLR, register offset, pre/post,
 STP/STNP, STLXR/STLXP; FP STR/STUR/STP of every addressing mode; the `Vt` of ST1-ST4, with the lane
 index of the one-lane forms reading `ReadDefault` in between); STXR/STXP have none. Effect: only
-Facile's store -> load memory edges, and only for producers of latency 2 or more. Measured: `ldr x1,
+Facile's store -> load memory edges (`--facile-memory-deps`; none by default), and only for producers of latency 2 or more. Measured with `--facile-memory-deps`: `ldr x1,
 [x0]; str x1, [x0]` + branch 4.0. To be revisited when an A78 statement or measurement
-appears. Test: `BorrowedStoreDataNeededLater`.
+appears. Tests: `BorrowedStoreDataNeededLater`, `MemoryEdgesOffByDefault`.
 
 ---
 

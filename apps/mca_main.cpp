@@ -154,13 +154,14 @@ static McaMetrics analyzeFacileRegion(const TargetInfo &TI, ArrayRef<Instr> regi
     std::vector<std::unique_ptr<mca::Instruction>> SimInstrs;
     std::vector<const MCInst *> MCInsts;
     // Index-aligned with SimInstrs/MCInsts: the memory-access
-    // descriptor facile uses for store->load precedence edges.
+    // descriptor facile uses for store->load precedence edges (filled only
+    // with --facile-memory-deps; empty means register edges only).
     std::vector<MemAccessInfo> MemInfos;
     buildRegionInstructions(IB, *TI.STI, *TI.MCII, region_instrs,
                             [&](const Instr &I, std::unique_ptr<mca::Instruction> Inst) {
         SimInstrs.push_back(std::move(Inst));
         MCInsts.push_back(&I.Inst);
-        if (!opts::NoFacileMemoryDeps) {
+        if (opts::FacileMemoryDeps) {
             const MCInstrDesc &MCID = TI.MCII->get(I.Inst.getOpcode());
             MemInfos.push_back(TI.Analyzer->getMemAccessInfo(I.Inst, MCID, *TI.MRI, *TI.MCII));
         }

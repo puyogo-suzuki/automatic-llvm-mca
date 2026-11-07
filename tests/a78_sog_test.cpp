@@ -7,8 +7,9 @@
 //    ModifiedTarget/AArch64/AArch64SchedNeoverseN2.td (latency per def, uops, resource cycles);
 //  * a78Facile(): the Facile prediction (src/facile/facile.cpp) of a loop body as mca_tool
 //    --dependency ooo --facile computes it for cortex-a78 (uop width 12, Mop width 6, the A78
-//    fusion table and zero-latency MOVs from cpu_traits.cpp, store -> load memory edges on), with
-//    the expected value worked out by hand from the SOG in each comment.
+//    fusion table and zero-latency MOVs from cpu_traits.cpp, store -> load memory edges off as in
+//    mca_tool, on only where a test passes MemoryEdges = true), with the expected value worked out
+//    by hand from the SOG in each comment.
 //
 // The context is a LocalModelContext (tests/sog_test_support.h), not
 // AArch64TestContext("cortex-a78") alone: that constructor leaves cortex-a78 on libLLVM's stock
@@ -23,8 +24,12 @@ constexpr const char *kCpu = "cortex-a78";
 using A78InstInfo = SogInstInfo;
 
 A78InstInfo a78Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
-facile::FacileResult a78Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
-double a78Cycles(const std::string &Body) { return a78Facile(Body).EstimatedCycles; }
+facile::FacileResult a78Facile(const std::string &Body, bool MemoryEdges = false) {
+    return sogFacile(kCpu, Body, MemoryEdges);
+}
+double a78Cycles(const std::string &Body, bool MemoryEdges = false) {
+    return a78Facile(Body, MemoryEdges).EstimatedCycles;
+}
 
 constexpr double kTol = kSogFacileTol;
 
@@ -464,10 +469,27 @@ TEST(A78SogTest, CryptoAndCrc) {
 // B-1 Store data read one cycle late (NOT SOG-based; the A55/A520/A76 decision).
 // ---------------------------------------------------------------------------
 TEST(A78SogTest, BorrowedStoreDataNeededLater) {
+    // The value reaches the next iteration through memory: the cycle needs the store -> load
+    // memory edge, i.e. MemoryEdges = true (mca_tool --facile-memory-deps).  By default there is
+    // no such edge and no cycle (MemoryEdgesOffByDefault below).
     // ldr -> str data: 4 - 1 (advance); str -> ldr memory edge: the store's latency 1 (D-7): 3 + 1.
     // FP: 5 - 1 + 2.
-    EXPECT_NEAR(a78Cycles("ldr x1, [x0]\nstr x1, [x0]"), 4.0, kTol);
-    EXPECT_NEAR(a78Cycles("ldr q1, [x0]\nstr q1, [x0]"), 6.0, kTol);
+    EXPECT_NEAR(a78Cycles("ldr x1, [x0]\nstr x1, [x0]", true), 4.0, kTol);
+    EXPECT_NEAR(a78Cycles("ldr q1, [x0]\nstr q1, [x0]", true), 6.0, kTol);
+}
+
+// The store -> load memory edge is opt-in (mca_tool --facile-memory-deps, docs/docs.md section 4.G).
+// Without it a value that goes through memory forms no recurrence: the estimate of a load / store
+// round trip is the issue / port bound of the register-only graph; with it the edge closes the cycle.
+TEST(A78SogTest, MemoryEdgesOffByDefault) {
+    for (const char *Body : {"ldr x1, [x0]\nstr x1, [x0]", "ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]"}) {
+        const facile::FacileResult Off = a78Facile(Body);
+        const facile::FacileResult On = a78Facile(Body, true);
+        EXPECT_DOUBLE_EQ(Off.PrecedenceBound, 0.0) << Body;
+        EXPECT_DOUBLE_EQ(Off.EstimatedCycles, std::max(Off.IssueBound, Off.PortBound)) << Body;
+        EXPECT_GT(On.PrecedenceBound, Off.EstimatedCycles) << Body;
+        EXPECT_DOUBLE_EQ(On.EstimatedCycles, On.PrecedenceBound) << Body;
+    }
 }
 
 // D-12 [a78_pac_hint]: the HINT-space pointer-authentication instructions are NOPs on the A78

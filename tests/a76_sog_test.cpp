@@ -7,8 +7,8 @@
 //    ModifiedTarget/AArch64/AArch64SchedNeoverseN1.td (latency per def, uops, resource cycles);
 //  * a76Facile(): the Facile prediction (src/facile/facile.cpp) of a loop body as mca_tool
 //    --dependency ooo --facile computes it for cortex-a76 (uop width 8, Mop width 4 from
-//    cpu_traits.cpp, store -> load memory edges on), with the expected value worked out by hand
-//    from the SOG in each comment.
+//    cpu_traits.cpp, store -> load memory edges off as in mca_tool, on only where a test passes
+//    MemoryEdges = true), with the expected value worked out by hand from the SOG in each comment.
 //
 // The context is a LocalModelContext (tests/sog_test_support.h), not
 // AArch64TestContext("cortex-a76") alone: that constructor leaves cortex-a76 on libLLVM's stock
@@ -23,8 +23,12 @@ constexpr const char *kCpu = "cortex-a76";
 using A76InstInfo = SogInstInfo;
 
 A76InstInfo a76Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
-facile::FacileResult a76Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
-double a76Cycles(const std::string &Body) { return a76Facile(Body).EstimatedCycles; }
+facile::FacileResult a76Facile(const std::string &Body, bool MemoryEdges = false) {
+    return sogFacile(kCpu, Body, MemoryEdges);
+}
+double a76Cycles(const std::string &Body, bool MemoryEdges = false) {
+    return a76Facile(Body, MemoryEdges).EstimatedCycles;
+}
 
 constexpr double kTol = kSogFacileTol;
 
@@ -399,11 +403,28 @@ TEST(A76SogTest, CryptoAndCrc) {
 // through memory from a load to the next iteration's load costs 3 + 1 (store) instead of 4 + 1.
 // ---------------------------------------------------------------------------
 TEST(A76SogTest, BorrowedStoreDataNeededLater) {
-    EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nstr x1, [x0]"), 4.0, kTol);
-    EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nstp x1, x2, [x0]"), 4.0, kTol);
-    EXPECT_NEAR(a76Cycles("ldr d1, [x0]\nfadd d1, d1, d2\nstr d1, [x0]"), 8.0, kTol);  // 5 + 2 - 1 + 2
+    // The value reaches the next iteration through memory: the cycle needs the store -> load
+    // memory edge, i.e. MemoryEdges = true (mca_tool --facile-memory-deps).  By default there is
+    // no such edge and no cycle (MemoryEdgesOffByDefault below).
+    EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nstr x1, [x0]", true), 4.0, kTol);
+    EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nstp x1, x2, [x0]", true), 4.0, kTol);
+    EXPECT_NEAR(a76Cycles("ldr d1, [x0]\nfadd d1, d1, d2\nstr d1, [x0]", true), 8.0, kTol);  // 5 + 2 - 1 + 2
     // A 1-cycle producer is not changed (Facile's 1-cycle floor): 4 + 1 + 1.
-    EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]"), 6.0, kTol);
+    EXPECT_NEAR(a76Cycles("ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]", true), 6.0, kTol);
+}
+
+// The store -> load memory edge is opt-in (mca_tool --facile-memory-deps, docs/docs.md section 4.G).
+// Without it a value that goes through memory forms no recurrence: the estimate of a load / store
+// round trip is the issue / port bound of the register-only graph; with it the edge closes the cycle.
+TEST(A76SogTest, MemoryEdgesOffByDefault) {
+    for (const char *Body : {"ldr x1, [x0]\nstr x1, [x0]", "ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]"}) {
+        const facile::FacileResult Off = a76Facile(Body);
+        const facile::FacileResult On = a76Facile(Body, true);
+        EXPECT_DOUBLE_EQ(Off.PrecedenceBound, 0.0) << Body;
+        EXPECT_DOUBLE_EQ(Off.EstimatedCycles, std::max(Off.IssueBound, Off.PortBound)) << Body;
+        EXPECT_GT(On.PrecedenceBound, Off.EstimatedCycles) << Body;
+        EXPECT_DOUBLE_EQ(On.EstimatedCycles, On.PrecedenceBound) << Body;
+    }
 }
 
 // C-3: the HINT-space pointer-authentication instructions are NOPs on the A76 (Armv8.2-A, no

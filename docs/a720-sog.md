@@ -139,8 +139,8 @@ For `--facile`, every region gets `EstimatedCycles = max(IssueBound, PortBound, 
 * `calculatePrecedenceBound`: the maximum cycle ratio of the dependence graph. Register edges have
   the latency of the producing def minus the consumer's `ReadAdvance`, floored at 1, and 0 for the
   zero-latency instructions (`getEdgeLatency`, [C-4](#c-4), [C-6](#c-6)); a store with a base update
-  has a second node for the update ([C-7](#c-7)); store -> load memory edges have the store's latency
-  ([D-7](#d-7)).
+  has a second node for the update ([C-7](#c-7)); store -> load memory edges, added only with `--facile-memory-deps` (off by default,
+  [docs.md](docs.md) 4.G), have the store's latency ([D-7](#d-7)).
   Loop-carried edges (register and memory) are added only when the region is a loop, or with
   `--ignore-loop-carried disable` ([docs.md](docs.md) 4.J); for a region that is not a loop the bound is 0.
 
@@ -287,7 +287,7 @@ Implementation: every store write has two µOPs (address on L01, data on ID or V
 adds an I (STR Q scaled, [C-18](#c-18)); a pre/post-index store adds the base update (`WriteAdr`).
 The µOP count acts on the issue bound (only when the average exceeds two µOPs per
 instruction) and on the MLP window ([U-1](#u-1)). Shared Facile code ([docs.md](docs.md) 4.F, 4.G):
-the base update of a store is a node of its own that does not wait for the data, and a store -> load
+the base update of a store is a node of its own that does not wait for the data, and, with `--facile-memory-deps`, a store -> load
 edge is left out when the two register-offset accesses are provably disjoint. The size rules are not
 checked; the latency of the forwarding is not stated ([D-7](#d-7)). Test: `Stores`, `FpLoadsAndStores`, `AsimdLoadsAndStores`.
 
@@ -377,7 +377,7 @@ the A720 path). Acquire and exclusive loads: [U-7](#u-7). Test: `Loads`.
 Every row is 1 / 2 / L01, ID, plus I for the post- and pre-index forms of STR and STP; register
 offset forms (also STRH scaled by 2) have no I. Model: `WriteST`, `WriteSTP`, `WriteSTIdx` = 1, L01 +
 ID, two µOPs ([C-7](#c-7)), + `WriteAdr` for pre/post-index. A store's latency matters only on
-Facile's store -> load edges ([D-7](#d-7)). The data operand reads `ReadST` ([B-1](#b-1)). Release
+Facile's store -> load edges ([D-7](#d-7)), which exist only with `--facile-memory-deps`. The data operand reads `ReadST` ([B-1](#b-1)). Release
 and exclusive stores: [U-7](#u-7). Measured (test): four `str` 2.0 per iteration. Test: `Stores`.
 
 ### 3.3 Instruction tables, FP and ASIMD
@@ -614,7 +614,7 @@ other L users is limited together.
 **D-7. Store-to-load forwarding latency.**
 SOG sec. 4.5 (l.2925-2934) gives the conditions of forwarding but no latency; the store tables give
 store latencies (1 for integer stores, 2 or 3 for FP stores, 2 or 4 for ASIMD stores). Implementation
-(shared Facile code, `addMemoryDependencies`, [docs.md](docs.md) section 4): a store -> load edge has
+(shared Facile code, `addMemoryDependencies`, [docs.md](docs.md) section 4.G): by default Facile adds no store -> load edge; with `--facile-memory-deps` a store -> load edge has
 the store's latency, then the load's own latency applies; i.e. forwarding is taken to be no slower than
 an L1 hit.
 
@@ -799,7 +799,7 @@ throughput column (V0 held 4, 2, 8, 4, 2 cycles) ([docs.md](docs.md) 4.I).
 **I-3. FP store, pre-index, B/H/S/D: latency 3.**
 Sec. 3.15 (p.27, l.1124-1125, checked in the PDF): "Store vector reg, immed pre-index, B/H/S/D-form
 STR 3 2 L01, V, I", against 2 for the post-index forms and the Q-form pre-index (l.1120-1127).
-Implementation: as printed (C-18). Effect: only on store -> load edges.
+Implementation: as printed (C-18). Effect: only on store -> load edges (`--facile-memory-deps`).
 
 <a id="i-4"></a>
 **I-4. LDPSW post/pre-index: "I, L" like the offset form.**
@@ -837,8 +837,9 @@ Shared LLVM behaviour; not changed.
 
 <a id="x-3"></a>
 **X-3. No store -> load memory edge for ASIMD structure stores.**
-Facile's `addMemoryDependencies` adds no edge from ST1-ST4 to a later load of the same address
-(measured: `ldr q1, [x0]; st1 {v1.16b}, [x0]` + branch 0.67 per iteration on the A720 and the A78,
+By default Facile adds no store -> load edge at all ([docs.md](docs.md) 4.G). With
+`--facile-memory-deps`, `addMemoryDependencies` still adds no edge from ST1-ST4 to a later load of the same
+address (measured with that option: `ldr q1, [x0]; st1 {v1.16b}, [x0]` + branch 0.67 per iteration on the A720 and the A78,
 against 7.0 and 6.0 with `str q1, [x0]`). Shared code; not changed. The `ReadST` of their data
 operands ([B-1](#b-1)) therefore shows only in the model data.
 
@@ -858,9 +859,9 @@ form (integer STR/STUR/STTR/STLR/STLLR, register offset, pre/post, STP/STNP; FP 
 addressing mode; the `Vt` of ST1-ST4, with the lane index of the one-lane forms reading `ReadDefault`
 in between); STXR/STXP have none; the release forms STLXR/STLXP read `ReadST` on the data (with their stock
 writes), as the other cores do. Effect: only Facile's store -> load memory
-edges, and only for producers of latency 2 or more. Measured: `ldr x1, [x0]; str x1, [x0]` + branch
+edges (`--facile-memory-deps`; none by default), and only for producers of latency 2 or more. Measured with `--facile-memory-deps`: `ldr x1, [x0]; str x1, [x0]` + branch
 4.0; with Q registers 7.0. To be revisited when an A720 statement or measurement
-appears. Test: `BorrowedStoreDataNeededLater`.
+appears. Tests: `BorrowedStoreDataNeededLater`, `MemoryEdgesOffByDefault`.
 
 ---
 

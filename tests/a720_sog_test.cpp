@@ -8,7 +8,8 @@
 //  * a720Facile(): the Facile prediction (src/facile/facile.cpp) of a loop body as mca_tool
 //    --dependency ooo --facile computes it for cortex-a720 (uop width 10, Mop width 5, the A720
 //    fusion table and zero-latency instructions from cpu_traits.cpp, store -> load memory edges
-//    on), with the expected value worked out by hand from the SOG in each comment.
+//    off as in mca_tool, on only where a test passes MemoryEdges = true), with the expected value
+//    worked out by hand from the SOG in each comment.
 //
 // AArch64TestContext("cortex-a720") already installs the local model (tests/test_support.h).
 
@@ -21,8 +22,12 @@ constexpr const char *kCpu = "cortex-a720";
 using A720InstInfo = SogInstInfo;
 
 A720InstInfo a720Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
-facile::FacileResult a720Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
-double a720Cycles(const std::string &Body) { return a720Facile(Body).EstimatedCycles; }
+facile::FacileResult a720Facile(const std::string &Body, bool MemoryEdges = false) {
+    return sogFacile(kCpu, Body, MemoryEdges);
+}
+double a720Cycles(const std::string &Body, bool MemoryEdges = false) {
+    return a720Facile(Body, MemoryEdges).EstimatedCycles;
+}
 
 constexpr double kTol = kSogFacileTol;
 
@@ -437,12 +442,15 @@ TEST(A720SogTest, SystemInstructions) {
 // B-1 Store data read one cycle late (NOT SOG-based; the A55/A520/A76/A78 decision).
 // ---------------------------------------------------------------------------
 TEST(A720SogTest, BorrowedStoreDataNeededLater) {
+    // The value reaches the next iteration through memory: the cycle needs the store -> load
+    // memory edge, i.e. MemoryEdges = true (mca_tool --facile-memory-deps).  By default there is
+    // no such edge and no cycle (MemoryEdgesOffByDefault below).
     // ldr -> str data: 4 - 1 (advance); str -> ldr memory edge: the store's latency 1 (D-7): 3 + 1.
     // FP: 6 - 1 + 2.
-    EXPECT_NEAR(a720Cycles("ldr x1, [x0]\nstr x1, [x0]"), 4.0, kTol);
-    EXPECT_NEAR(a720Cycles("ldr q1, [x0]\nstr q1, [x0]"), 7.0, kTol);
-    // ST1-ST4 get no store -> load memory edge in Facile (shared code, docs/a720-sog.md X-3), so the
-    // ReadST of their Vt shows only in the model data:
+    EXPECT_NEAR(a720Cycles("ldr x1, [x0]\nstr x1, [x0]", true), 4.0, kTol);
+    EXPECT_NEAR(a720Cycles("ldr q1, [x0]\nstr q1, [x0]", true), 7.0, kTol);
+    // ST1-ST4 get no store -> load memory edge in Facile even with the memory edges on (shared code,
+    // docs/a720-sog.md X-3), so the ReadST of their Vt shows only in the model data:
     ASSERT_FALSE(a720Desc("st1 {v1.16b}, [x0]").ReadAdvances.empty());
     EXPECT_EQ(a720Desc("st1 {v1.16b}, [x0]").ReadAdvances.front(), "0:1(w0)");
     // The release exclusive stores read ReadST on the data (STXR/STXP do not).
@@ -451,4 +459,18 @@ TEST(A720SogTest, BorrowedStoreDataNeededLater) {
     EXPECT_EQ(a720Desc("stlxp w2, x1, x3, [x0]").ReadAdvances,
               (std::vector<std::string>{"0:1(w0)", "1:1(w0)", "2:0(w0)"}));
     EXPECT_TRUE(a720Desc("stxr w2, x1, [x0]").ReadAdvances.empty());
+}
+
+// The store -> load memory edge is opt-in (mca_tool --facile-memory-deps, docs/docs.md section 4.G).
+// Without it a value that goes through memory forms no recurrence: the estimate of a load / store
+// round trip is the issue / port bound of the register-only graph; with it the edge closes the cycle.
+TEST(A720SogTest, MemoryEdgesOffByDefault) {
+    for (const char *Body : {"ldr x1, [x0]\nstr x1, [x0]", "ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]"}) {
+        const facile::FacileResult Off = a720Facile(Body);
+        const facile::FacileResult On = a720Facile(Body, true);
+        EXPECT_DOUBLE_EQ(Off.PrecedenceBound, 0.0) << Body;
+        EXPECT_DOUBLE_EQ(Off.EstimatedCycles, std::max(Off.IssueBound, Off.PortBound)) << Body;
+        EXPECT_GT(On.PrecedenceBound, Off.EstimatedCycles) << Body;
+        EXPECT_DOUBLE_EQ(On.EstimatedCycles, On.PrecedenceBound) << Body;
+    }
 }

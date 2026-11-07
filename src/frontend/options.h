@@ -23,7 +23,7 @@ namespace opts {
     extern llvm::cl::opt<std::string> UpdateMlp;
     extern llvm::cl::opt<bool> Facile;
     extern llvm::cl::opt<bool> FacileReason;
-    extern llvm::cl::opt<bool> NoFacileMemoryDeps;
+    extern llvm::cl::opt<bool> FacileMemoryDeps;
     extern llvm::cl::opt<int> ChainThreshold;
     extern llvm::cl::opt<bool> MergeSameHeader;
     extern llvm::cl::opt<bool> CountOnly;

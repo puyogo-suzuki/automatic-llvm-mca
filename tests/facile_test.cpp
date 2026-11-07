@@ -1,4 +1,5 @@
 #include "sog_test_support.h"
+#include "frontend/options.h"
 
 // ============================================================================
 // Facile Predictor Unit & Corner Case Tests
@@ -53,6 +54,27 @@ TEST(FacileTest, MemoryLoopCarriedRecurrence) {
     EXPECT_EQ(WithMem.FacileReason, "prec");
 }
 
+
+// The store -> load memory edges are opt-in: mca_tool adds them only with --facile-memory-deps, and
+// runFacile only with FacileOptions::MemoryEdges.  A store followed by a load of the same address whose
+// value feeds the store again is a recurrence only through memory, so without the edges the estimate
+// is the register-only one (no cycle: the issue / port bound); with them the edge closes the cycle.
+TEST(FacileTest, MemoryEdgesAreOptIn) {
+    initLLVMAArch64();
+    EXPECT_FALSE(opts::FacileMemoryDeps.getValue());
+    EXPECT_FALSE(FacileOptions().MemoryEdges);
+    AArch64TestContext TC("cortex-a78");
+    const std::string Code = "str x1, [x0]\nldr x1, [x0]\n";
+    auto Default = runFacile(TC, Code);
+    auto Off = runFacileAArch64(TC, Code);
+    auto On = runFacileAArch64Mem(TC, Code);
+    EXPECT_DOUBLE_EQ(Default.PrecedenceBound, 0.0);
+    EXPECT_DOUBLE_EQ(Default.EstimatedCycles, Off.EstimatedCycles);
+    EXPECT_DOUBLE_EQ(Default.EstimatedCycles, std::max(Default.IssueBound, Default.PortBound));
+    EXPECT_GT(On.PrecedenceBound, Default.EstimatedCycles);
+    EXPECT_DOUBLE_EQ(On.EstimatedCycles, On.PrecedenceBound);
+    EXPECT_EQ(On.FacileReason, "prec");
+}
 
 // A register tuple (LD1-LD4 destination, ST1-ST4 source) is a producer and a consumer of EACH of its
 // registers: a recurrence through the second register of "ld1 {v0, v1}" is as long as one through

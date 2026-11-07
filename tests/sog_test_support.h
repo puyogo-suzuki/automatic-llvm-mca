@@ -123,7 +123,8 @@ inline void sogDump(const std::string &Cpu, const char *EnvVar) {
 struct FacileOptions {
     unsigned UopWidth = 0;      // 0: the model's IssueWidth
     unsigned MopWidth = 0;      // 0: no Mop cap
-    bool MemoryEdges = false;   // pass the MemAccessInfo of every instruction (store -> load edges)
+    bool MemoryEdges = false;   // pass the MemAccessInfo of every instruction (store -> load edges,
+                                // mca_tool --facile-memory-deps); off by default, as in mca_tool
     bool LoopCarried = true;
 };
 
@@ -158,16 +159,18 @@ inline facile::FacileResult runFacile(const AArch64TestContext &TC, const std::s
 }
 
 // Facile prediction for the loop body `Body` (one instruction per line, no loop branch), with the
-// widths (cpu_traits.cpp), fusion and memory edges of `mca_tool --mcpu <Cpu> --dependency ooo
-// --facile`.
-inline facile::FacileResult sogFacile(const std::string &Cpu, const std::string &Body) {
+// widths (cpu_traits.cpp) and fusion of `mca_tool --mcpu <Cpu> --dependency ooo --facile`.  Like
+// mca_tool, it adds no store -> load memory edge unless `MemoryEdges` is true (`mca_tool
+// --facile-memory-deps`).
+inline facile::FacileResult sogFacile(const std::string &Cpu, const std::string &Body,
+                                      bool MemoryEdges = false) {
     initLLVMAArch64();
     LocalModelContext TC(Cpu);
     const CpuTraits &T = getCpuTraits(Cpu);
     FacileOptions O;
     O.UopWidth = T.UopDispatchWidth;
     O.MopWidth = T.MopDispatchWidth;
-    O.MemoryEdges = true;
+    O.MemoryEdges = MemoryEdges;
     return runFacile(TC, Body, O);
 }
 

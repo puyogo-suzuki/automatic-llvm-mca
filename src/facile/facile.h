@@ -42,8 +42,9 @@ struct FacileResult {
 // `MCInsts` and supplies the per-instruction memory-access descriptor
 // (MLPAnalyzer::getMemAccessInfo) used to add store->load memory RAW edges to
 // the precedence-constraint graph. Pass an empty ArrayRef for a graph with
-// register dependences only (--no-facile-memory-deps). See the long note above
-// addMemoryDependencies() in facile.cpp for why these edges are needed.
+// register dependences only, which is what mca_tool does unless
+// --facile-memory-deps is given. See the note above addMemoryDependencies() in
+// facile.cpp for the may-alias rule and the edge latency.
 //
 // `MopWidth`, when nonzero, is the CPU's SOG-documented macro-op (Mop)
 // decode/dispatch cap in Mops/cycle - a SECOND, independent front-end bound

@@ -355,36 +355,29 @@ std::vector<std::vector<DependencyEdge>> buildDependencyGraph(
 // ---------------------------------------------------------------------------
 // Memory (store -> load) RAW dependences.
 //
-// WHY THIS EXISTS.  buildDependencyGraph() above tracks only REGISTER RAW
-// dependences, and it deliberately extends the published Facile model by
-// adding *inter-iteration* (loop-carried) register edges in its Pass 2, so
-// that calculatePrecedenceBound() computes a Maximum-Cycle-Ratio recurrence
-// bound on steady-state loop throughput rather than a single basic block's
-// critical path.  Once loop-carried register recurrences are modelled,
-// omitting loop-carried MEMORY recurrences is an inconsistency: a value that
-// round-trips through memory (store in iteration k, load in iteration k+1) is
-// just as much a recurrence, and bounds throughput just as hard.  Facile as
-// published assumes basic blocks are compute-bound and that "loads and stores
-// may or may not alias" is unknowable (sec. 3.3), which is defensible for
-// single-block throughput but not for the loop-recurrence bound this tool
-// actually computes.
+// WHEN THESE EDGES ARE ADDED.  Only when the caller passes a non-empty
+// MemInfos array to computeFacilePrediction(); mca_tool does that only with
+// --facile-memory-deps, which is off by default.  Without it the
+// precedence-constraint graph has the register RAW dependences of
+// buildDependencyGraph() only, and a value that goes through memory (a store
+// followed by a load of the same address) adds no edge.
 //
-// WHY IT MATTERS MOST ON WIDE CORES.  EstimatedCycles =
-// max(IssueBound, PortBound, PrecedenceBound).  A
-// missing precedence bound is invisible on a narrow core, because IssueBound
-// (uops / issue width) is larger anyway and still wins the max; it becomes
-// visible exactly on the WIDEST core of a pair, whose IssueBound is smallest.
-// A dynamic-programming inner loop with a memory-carried D-state recurrence is
-// the textbook case; such a block carries the serial recurrence
+// WHAT THEY ADD.  buildDependencyGraph() above has, besides the edges within
+// one iteration, loop-carried (inter-iteration) register edges, so that
+// calculatePrecedenceBound() computes a Maximum-Cycle-Ratio recurrence bound
+// on steady-state loop throughput.  With the option, a value that goes
+// through memory gets the corresponding edges: store -> later load within an
+// iteration, and, for loops, store in iteration k -> load in iteration k+1.
+// A loop such as
 //     str w2, [x5, x0, lsl #2]   ; dc[k]        (iteration k)
 //     ...
 //     ldr w3, [x5, x1]           ; dc[k-1]      (iteration k+1)
 //     add w3, w3, w2  /  cmp  /  csel  /  cmp  /  csel  /  str
-// i.e. a memory round trip plus a 5-deep flag/select chain, which no register
-// edge can see because the value never stays in a register across the
-// backedge.  Such a recurrence bounds the block from below regardless of the
-// issue width, so it becomes visible exactly on the widest core, where the
-// IssueBound is smallest: the bottleneck is a dependence, not a port.
+// then has a recurrence of a memory round trip plus the flag/select chain,
+// which no register edge represents because the value does not stay in a
+// register across the backedge.  The edges can only raise the precedence
+// bound; EstimatedCycles = max(IssueBound, PortBound, PrecedenceBound) changes
+// only where that bound is the largest of the three.
 //
 // MAY-ALIAS RULE.  Deliberately the same conservative-but-cheap rule the MLP
 // analyser's SeenStoreAddrs already uses, with no new tunable:

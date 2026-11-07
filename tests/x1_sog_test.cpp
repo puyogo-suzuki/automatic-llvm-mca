@@ -7,8 +7,9 @@
 //    ModifiedTarget/AArch64/AArch64SchedNeoverseV1.td (latency per def, uops, resource cycles);
 //  * x1Facile(): the Facile prediction (src/facile/facile.cpp) of a loop body as mca_tool
 //    --dependency ooo --facile computes it for cortex-x1 (uop width 16, Mop width 8, the X1
-//    fusion table and zero-latency MOVs from cpu_traits.cpp, store -> load memory edges on), with
-//    the expected value worked out by hand from the SOG in each comment.
+//    fusion table and zero-latency MOVs from cpu_traits.cpp, store -> load memory edges off as in
+//    mca_tool, on only where a test passes MemoryEdges = true), with the expected value worked out
+//    by hand from the SOG in each comment.
 //
 // AArch64TestContext("cortex-x1") already installs the local model (tests/test_support.h).
 
@@ -21,8 +22,12 @@ constexpr const char *kCpu = "cortex-x1";
 using X1InstInfo = SogInstInfo;
 
 X1InstInfo x1Desc(const std::string &Asm) { return sogDesc(kCpu, Asm); }
-facile::FacileResult x1Facile(const std::string &Body) { return sogFacile(kCpu, Body); }
-double x1Cycles(const std::string &Body) { return x1Facile(Body).EstimatedCycles; }
+facile::FacileResult x1Facile(const std::string &Body, bool MemoryEdges = false) {
+    return sogFacile(kCpu, Body, MemoryEdges);
+}
+double x1Cycles(const std::string &Body, bool MemoryEdges = false) {
+    return x1Facile(Body, MemoryEdges).EstimatedCycles;
+}
 
 constexpr double kTol = kSogFacileTol;
 
@@ -449,8 +454,25 @@ TEST(X1SogTest, PointerAuthenticationHints) {
 // B-1 Store data is read one cycle late (not SOG-based).
 // ---------------------------------------------------------------------------
 TEST(X1SogTest, BorrowedStoreDataNeededLater) {
-    EXPECT_NEAR(x1Cycles("ldr x1, [x0]\nstr x1, [x0]"), 4.0, kTol);   // 4 - 1 + 1
-    EXPECT_NEAR(x1Cycles("ldr q1, [x0]\nstr q1, [x0]"), 7.0, kTol);   // 6 - 1 + 2
+    // The value reaches the next iteration through memory: the cycle needs the store -> load
+    // memory edge, i.e. MemoryEdges = true (mca_tool --facile-memory-deps).  By default there is
+    // no such edge and no cycle (MemoryEdgesOffByDefault below).
+    EXPECT_NEAR(x1Cycles("ldr x1, [x0]\nstr x1, [x0]", true), 4.0, kTol);   // 4 - 1 + 1
+    EXPECT_NEAR(x1Cycles("ldr q1, [x0]\nstr q1, [x0]", true), 7.0, kTol);   // 6 - 1 + 2
     EXPECT_FALSE(x1Desc("str x1, [x2]").ReadAdvances.empty());
     EXPECT_FALSE(x1Desc("st1 {v0.s}[1], [x1]").ReadAdvances.empty());
+}
+
+// The store -> load memory edge is opt-in (mca_tool --facile-memory-deps, docs/docs.md section 4.G).
+// Without it a value that goes through memory forms no recurrence: the estimate of a load / store
+// round trip is the issue / port bound of the register-only graph; with it the edge closes the cycle.
+TEST(X1SogTest, MemoryEdgesOffByDefault) {
+    for (const char *Body : {"ldr x1, [x0]\nstr x1, [x0]", "ldr x1, [x0]\nadd x1, x1, #1\nstr x1, [x0]"}) {
+        const facile::FacileResult Off = x1Facile(Body);
+        const facile::FacileResult On = x1Facile(Body, true);
+        EXPECT_DOUBLE_EQ(Off.PrecedenceBound, 0.0) << Body;
+        EXPECT_DOUBLE_EQ(Off.EstimatedCycles, std::max(Off.IssueBound, Off.PortBound)) << Body;
+        EXPECT_GT(On.PrecedenceBound, Off.EstimatedCycles) << Body;
+        EXPECT_DOUBLE_EQ(On.EstimatedCycles, On.PrecedenceBound) << Body;
+    }
 }
