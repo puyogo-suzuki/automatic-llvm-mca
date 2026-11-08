@@ -102,7 +102,7 @@ inline std::vector<Instr> parseAsm(const T &TC, const std::string& asm_code) {
     return instrs;
 }
 
-// The CPUs for which AArch64TestContext installs the scheduling model mca_tool uses (what
+// The CPUs (canonical names, canonicalCpuName()) for which AArch64TestContext installs the scheduling model mca_tool uses (what
 // initializeFrontend() in frontend.cpp does for every CPU: install the sched-class tables generated from
 // ModifiedTarget/AArch64/*.td, remap MCInstrDesc::SchedClass onto their numbering, and wrap the STI
 // so that resolveVariantSchedClass() reaches the local resolver).  Stock LLVM maps cortex-a720 to
@@ -135,15 +135,10 @@ struct AArch64TestContext {
         MRI.reset(TheTarget->createMCRegInfo(TT));
         MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT, MCTargetOptions()));
         MCII.reset(TheTarget->createMCInstrInfo());
-        if (testContextInstallsLocalModel(cpu)) {
-            const std::string llvm_cpu =
-                (cpu == "icestorm" || cpu == "firestorm") ? "apple-m1" : cpu;
-            STI.reset(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
-            if (STI) {
-                llvm::remapSchedClassIndices(*MCII, cpu);
-                llvm::installLocalSchedModel(*STI, cpu);
-                STI = llvm::wrapCustomSubtargetInfo(std::move(STI), cpu);
-            }
+        // `cpu` may be an alias ("ice", "fire"); resolved as initializeFrontend() does.
+        const std::string canon = canonicalCpuName(cpu).str();
+        if (testContextInstallsLocalModel(canon)) {
+            STI = llvm::createLocalSubtargetInfo(*TheTarget, TT, canon, *MCII);
         } else {
             STI.reset(TheTarget->createMCSubtargetInfo(TT, cpu, ""));
         }

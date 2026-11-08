@@ -5,6 +5,7 @@
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/TargetRegistry.h"
 #include <iterator>
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64AddressingModes.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
@@ -129,4 +130,30 @@ void installLocalSchedModel(llvm::MCSubtargetInfo &STI, llvm::StringRef CPUName)
     STI.*get(MCSubtargetInfo_WriteLatencyTable()) = AArch64WriteLatencyTable;
     STI.*get(MCSubtargetInfo_ReadAdvanceTable()) = AArch64ReadAdvanceTable;
 }
+
+std::unique_ptr<MCSubtargetInfo> createLocalSubtargetInfo(const Target &T, const Triple &TT,
+                                                          StringRef CPUName, MCInstrInfo &MCII) {
+    // The MCInstrDesc array of `MCII` is libLLVM's, so its SchedClass indices use
+    // stock AArch64.td numbering, while installLocalSchedModel() installs
+    // sched-class tables re-generated with ModifiedTarget/AArch64/*.td - a
+    // different numbering (docs/docs.md section 5.A).  Remap before anything
+    // reads a SchedClass.
+    remapSchedClassIndices(MCII, CPUName);
+    std::unique_ptr<MCSubtargetInfo> STI(T.createMCSubtargetInfo(TT, llvmCpuName(CPUName), ""));
+    if (!STI)
+        return STI;
+    installLocalSchedModel(*STI, CPUName);
+    return wrapCustomSubtargetInfo(std::move(STI), CPUName);
+}
+}
+
+llvm::StringRef canonicalCpuName(const llvm::MCSubtargetInfo &STI) {
+    const llvm::MCSchedModel *M = &STI.getSchedModel();
+    if (M == &llvm::FirestormModel) return "firestorm";
+    if (M == &llvm::IcestormModel) return "icestorm";
+    return STI.getCPU();
+}
+
+const CpuTraits &getCpuTraits(const llvm::MCSubtargetInfo &STI) {
+    return ::getCpuTraits(canonicalCpuName(STI));
 }

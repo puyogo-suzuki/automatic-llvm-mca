@@ -38,7 +38,7 @@ double getInstLatency(const llvm::mca::Instruction &Inst) {
 // ("WHY THIS IS GATED ON THE TARGET") explains why this must be asked
 // per-target rather than by just trusting any Latency==0 write.
 bool isZeroLatencyMovTarget(const llvm::MCSubtargetInfo &STI) {
-    return getCpuTraits(STI.getCPU()).ZeroLatencyMov;
+    return getCpuTraits(STI).ZeroLatencyMov;
 }
 
 // ---------------------------------------------------------------------------

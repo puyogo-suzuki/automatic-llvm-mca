@@ -33,9 +33,10 @@ public:
     static std::unique_ptr<MLPAnalyzer> create(const llvm::MCSubtargetInfo &STI);
 
     // In-flight limits that end the MLP window for this core (see
-    // WindowResources).  Set by the frontend from the --mcpu name; NOT derived
-    // from MCSubtargetInfo::getCPU(), which reports LLVM's own CPU name
-    // ("apple-a14" for both firestorm and icestorm).  Default: not enabled.
+    // WindowResources).  Set by the frontend from the canonical CPU name
+    // (canonicalCpuName() in cpu/cpu_traits.h); NOT derived from
+    // MCSubtargetInfo::getCPU(), which reports LLVM's own CPU name ("apple-a14"
+    // for both firestorm and icestorm).  Default: not enabled.
     void setWindowResources(const WindowResources &r) { windowRes_ = r; }
     const WindowResources &windowResources() const { return windowRes_; }
 

@@ -37,28 +37,18 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
         return false;
     }
 
-    TI.CPU = opts::MCPU.empty() ? "generic" : std::string(opts::MCPU);
-    std::string llvm_cpu = TI.CPU;
-    if (TI.CPU == "icestorm" || TI.CPU == "firestorm") {
-        llvm_cpu = "apple-m1";
-    }
+    // The one place a --mcpu spelling is resolved (cpu_traits.h): every
+    // per-CPU decision below and in the analyses is keyed by TI.CPU.
+    TI.CPU = canonicalCpuName(opts::MCPU.empty() ? StringRef("generic") : StringRef(opts::MCPU)).str();
     TI.MRI.reset(TI.TheTarget->createMCRegInfo(TT));
     MCTargetOptions MCOPT;
     TI.MAI.reset(TI.TheTarget->createMCAsmInfo(*TI.MRI, TT, MCOPT));
     TI.MCII.reset(TI.TheTarget->createMCInstrInfo());
-    // The MCInstrDesc array just handed to us is libLLVM's, so its SchedClass
-    // indices use stock AArch64.td numbering, while installLocalSchedModel()
-    // below installs sched-class tables re-generated with
-    // ModifiedTarget/AArch64/*.td - a different numbering, in which a large
-    // share of the 9135 opcodes disagree (docs/docs.md section 5.A).  Remap
-    // before anything reads a SchedClass.
+    // Remaps MCII's SchedClass indices onto the local tables (a large share of
+    // the 9135 opcodes disagree with libLLVM's numbering, docs/docs.md section
+    // 5.A) and installs the local sched model.
     if (TI.MCII)
-        llvm::remapSchedClassIndices(*TI.MCII, TI.CPU);
-    TI.STI.reset(TI.TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
-    if (TI.STI) {
-        llvm::installLocalSchedModel(*TI.STI, TI.CPU);
-        TI.STI = llvm::wrapCustomSubtargetInfo(std::move(TI.STI), TI.CPU);
-    }
+        TI.STI = llvm::createLocalSubtargetInfo(*TI.TheTarget, TT, TI.CPU, *TI.MCII);
     TI.Ctx = std::make_unique<MCContext>(TT, TI.MAI.get(), TI.MRI.get(), TI.STI.get());
     TI.DisAsm.reset(TI.TheTarget->createMCDisassembler(*TI.STI, *TI.Ctx));
     TI.MCIA.reset(TI.TheTarget->createMCInstrAnalysis(TI.MCII.get()));
@@ -88,7 +78,7 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
     // than two uops per instruction (docs/docs.md section 4.E).  See
     // frontend.h's MopDispatchWidth comment for why it can't come from
     // llvm::MCSchedModel itself.  0 = not applied, see calculateIssueBound().
-    const CpuTraits &Traits = getCpuTraits(TI.STI->getCPU());
+    const CpuTraits &Traits = getCpuTraits(TI.CPU);
     if (Traits.UopDispatchWidth)
         TI.PO.DispatchWidth = Traits.UopDispatchWidth;
     TI.PO.AssumeNoAlias = true;
@@ -101,7 +91,7 @@ bool initializeFrontend(int argc, char **argv, const char *Overview,
 
     TI.Analyzer = MLPAnalyzer::create(*TI.STI);
     if (TI.Analyzer)
-        TI.Analyzer->setWindowResources(getCpuTraits(TI.CPU).MlpWindow);
+        TI.Analyzer->setWindowResources(Traits.MlpWindow);
 
     return true;
 }

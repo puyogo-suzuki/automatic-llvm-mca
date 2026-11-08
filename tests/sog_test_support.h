@@ -27,11 +27,12 @@ constexpr double kSogInOrderTol = 0.1;
 // stock model (cortex-a76, cortex-a78, cortex-a78c, ...).
 struct LocalModelContext : AArch64TestContext {
     explicit LocalModelContext(const std::string &Cpu) : AArch64TestContext(Cpu) {
-        if (testContextInstallsLocalModel(Cpu))
+        const std::string Canon = canonicalCpuName(Cpu).str();
+        if (testContextInstallsLocalModel(Canon))
             return;
-        llvm::remapSchedClassIndices(*MCII, Cpu);
-        llvm::installLocalSchedModel(*STI, Cpu);
-        STI = llvm::wrapCustomSubtargetInfo(std::move(STI), Cpu);
+        llvm::remapSchedClassIndices(*MCII, Canon);
+        llvm::installLocalSchedModel(*STI, Canon);
+        STI = llvm::wrapCustomSubtargetInfo(std::move(STI), Canon);
     }
 };
 
@@ -166,7 +167,7 @@ inline facile::FacileResult sogFacile(const std::string &Cpu, const std::string 
                                       bool MemoryEdges = false) {
     initLLVMAArch64();
     LocalModelContext TC(Cpu);
-    const CpuTraits &T = getCpuTraits(Cpu);
+    const CpuTraits &T = getCpuTraits(canonicalCpuName(Cpu));
     FacileOptions O;
     O.UopWidth = T.UopDispatchWidth;
     O.MopWidth = T.MopDispatchWidth;

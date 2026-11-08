@@ -78,7 +78,7 @@ This will produce the main tool `build/mca_tool`, the secondary tools `build/mlp
 *   `mlp-objdump` — Disassembles text sections and prints per-basic-block MLP/baseCPI next to each instruction address.
 *   `--facile` — Enable Facile static analytical throughput prediction (AArch64). Calculates analytical throughput bounds for Issue, Execution Ports, and Precedence Constraints without cycle-by-cycle simulation overhead.
 *   `--facile-memory-deps` — (Optional, off by default) Add store→load memory RAW edges to the `--facile` precedence graph; without it the graph has register dependences only. See "Memory dependences in the precedence graph" below.
-*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `cortex-x1`, `firestorm`, `icestorm`).
+*   `--mcpu <cpu>` — (Optional) Specify a target CPU (e.g., `cortex-a55`, `cortex-a720`, `cortex-x1`, `firestorm`, `icestorm`; `fire` and `ice` are accepted as aliases of the two Apple cores).
 *   `--mtriple <triple>` — (Optional) Specify a target triple (e.g., `aarch64-linux-gnu`).
 *   `--window-width <W>` — (Optional) Window width for MLP estimation (default: 4 without `--mcpu`; with `--mcpu`, a value taken from the CPU's scheduling model, see `initializeFrontend()` in `src/frontend/frontend.cpp`).
 *   `--dependency <mode>` — (Optional) MLP dependency mode (`none`, `io`, `ooo`, `dependency`; default `none`).

@@ -158,7 +158,7 @@ McaMetrics analyzeMcaRegion(ArrayRef<Instr> instrs, const MCSubtargetInfo &STI, 
     mca::Context MCAContext(MRI, STI);
     mca::InstrumentManager IM(STI, MCII);
     ZeroAwareInstrBuilder IB(STI, MCII, MRI, MCIA, IM, 0);
-    const CpuModel Model = getCpuTraits(STI.getCPU()).Model;
+    const CpuModel Model = getCpuTraits(STI).Model;
     const bool IsA55 = (Model == CpuModel::A55);
     const bool IsA520 = (Model == CpuModel::A520);
     std::vector<mca::SourceMgr::UniqueInst> Sequence;

@@ -1,4 +1,5 @@
 #include "core/object_loader.h"
+#include "cpu/cpu_traits.h"
 #include "cpu/sched_model.h"
 #include <iostream>
 #include <string>
@@ -109,18 +110,11 @@ int main(int argc, char **argv) {
     MCTargetOptions MCOPT;
     std::unique_ptr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT, MCOPT));
     std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
-    // libLLVM's MCInstrDesc::SchedClass uses stock numbering; the sched tables
-    // installed below are the locally generated ones.  See remapSchedClassIndices().
-    llvm::remapSchedClassIndices(*MCII, MCPU);
-    std::string llvm_cpu = MCPU;
-    if (MCPU == "ice" || MCPU == "icestorm" || MCPU == "fire" || MCPU == "firestorm") {
-        llvm_cpu = "apple-m1";
-    }
-    std::unique_ptr<MCSubtargetInfo> STI(TheTarget->createMCSubtargetInfo(TT, llvm_cpu, ""));
-    if (STI) {
-        llvm::installLocalSchedModel(*STI, MCPU);
-        STI = llvm::wrapCustomSubtargetInfo(std::move(STI), MCPU);
-    }
+    // The same subtarget set-up as mca_tool (initializeFrontend()): canonical
+    // CPU name, SchedClass remap, local sched model.
+    std::unique_ptr<MCSubtargetInfo> STI;
+    if (MCII)
+        STI = llvm::createLocalSubtargetInfo(*TheTarget, TT, canonicalCpuName(MCPU), *MCII);
     std::unique_ptr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(TT, 0, *MAI, *MCII, *MRI));
 
     if (!MRI || !MAI || !MCII || !STI || !IP) {

@@ -1,5 +1,6 @@
 #include "facile/fusion.h"
 #include "cpu/cpu_traits.h"
+#include "cpu/sched_model.h"
 #include "llvm-source/llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCTargetDesc.h"
 #include <string>
 
@@ -342,7 +343,7 @@ std::vector<bool> computeFusedMask(const llvm::MCSubtargetInfo &STI,
                                    const llvm::MCInstrInfo &MCII,
                                    llvm::ArrayRef<std::unique_ptr<llvm::mca::Instruction>> SimInstrs,
                                    llvm::ArrayRef<const llvm::MCInst *> MCInsts) {
-    switch (getCpuTraits(STI.getCPU()).Fusion) {
+    switch (getCpuTraits(STI).Fusion) {
     case FusionTable::A78:  return computeA78FusedMask(MCII, SimInstrs, MCInsts, /*HasSelectFusion=*/true);
     case FusionTable::X1:   return computeA78FusedMask(MCII, SimInstrs, MCInsts, /*HasSelectFusion=*/false);
     case FusionTable::A720: return computeA720FusedMask(MCII, SimInstrs, MCInsts);

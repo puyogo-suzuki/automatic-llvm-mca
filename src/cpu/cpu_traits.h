@@ -71,8 +71,29 @@ struct CpuTraits {
     bool ZeroLatencyMov = false;
 };
 
+// CPU names.  Every --mcpu spelling is resolved ONCE, by the frontend, to a
+// canonical name (canonicalCpuName()), and everything per-CPU is keyed by that
+// name: getCpuTraits(), the local sched model (installLocalSchedModel(),
+// remapSchedClassIndices()), the MLP window limits, and - through
+// getCpuTraits(const MCSubtargetInfo &) in sched_model.h - Facile's fusion table
+// and zero-latency moves and the MCA driver's in-order pipelines.
+//
+// The canonical name is the --mcpu string itself, except for the short Apple
+// aliases "ice" -> "icestorm" and "fire" -> "firestorm".  CPU variants that LLVM
+// knows by their own name (cortex-a78c, cortex-x1c, the -ae parts, ...) are
+// canonical names of their own and share their core's row in the table.
+llvm::StringRef canonicalCpuName(llvm::StringRef MCPU);
+
+// The CPU name handed to Target::createMCSubtargetInfo() for a canonical name.
+// LLVM has no per-core Apple CPU, so "icestorm" and "firestorm" both become
+// "apple-m1"; LLVM resolves that alias to "apple-a14", which is what
+// MCSubtargetInfo::getCPU() then reports for both cores.  Every other name is
+// passed unchanged.
+llvm::StringRef llvmCpuName(llvm::StringRef CanonicalCPU);
+
 // Unknown CPU names (including "generic") get a default-constructed CpuTraits.
-// Keyed by the CPU name as MCSubtargetInfo::getCPU() reports it.
-const CpuTraits &getCpuTraits(llvm::StringRef CPU);
+// Keyed by the canonical name (canonicalCpuName()); an alias such as "ice" is
+// not a key.
+const CpuTraits &getCpuTraits(llvm::StringRef CanonicalCPU);
 
 #endif // CPU_TRAITS_H

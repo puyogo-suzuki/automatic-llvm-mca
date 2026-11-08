@@ -21,6 +21,9 @@
 
 struct TargetInfo {
     std::string TripleName;
+    // Canonical CPU name of --mcpu (canonicalCpuName() in cpu/cpu_traits.h),
+    // "generic" without --mcpu.  Not the name LLVM's subtarget was created with
+    // (llvmCpuName()).
     std::string CPU;
     const llvm::Target *TheTarget = nullptr;
     std::unique_ptr<llvm::MCRegisterInfo> MRI;
@@ -39,7 +42,7 @@ struct TargetInfo {
     // cycle" - LLVM's scheduling model has no concept of a macro-op stage at
     // all, so this cannot be expressed via the .td tables and must be
     // supplied out-of-band, the same way every other CPU-specific fact is kept in
-    // cpu_traits.cpp (keyed off STI->getCPU()) rather than in any .td field.
+    // cpu_traits.cpp (keyed by the canonical CPU name) rather than in any .td field.
     // 0 = not known for this CPU; calculateIssueBound() then skips the bound.
     unsigned MopDispatchWidth = 0;
     int WindowWidthVal = 4;

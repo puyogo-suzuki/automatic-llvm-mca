@@ -91,6 +91,17 @@ llvm::StringMap<CpuTraits> buildTable() {
 
 } // namespace
 
+llvm::StringRef canonicalCpuName(llvm::StringRef MCPU) {
+    if (MCPU == "ice") return "icestorm";
+    if (MCPU == "fire") return "firestorm";
+    return MCPU;
+}
+
+llvm::StringRef llvmCpuName(llvm::StringRef CanonicalCPU) {
+    if (CanonicalCPU == "icestorm" || CanonicalCPU == "firestorm") return "apple-m1";
+    return CanonicalCPU;
+}
+
 const CpuTraits &getCpuTraits(llvm::StringRef CPU) {
     static const llvm::StringMap<CpuTraits> Table = buildTable();
     static const CpuTraits Default;
