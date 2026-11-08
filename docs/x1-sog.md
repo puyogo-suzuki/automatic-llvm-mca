@@ -29,7 +29,7 @@ Contents
 | N, not compatible | none open |
 | D, deliberate deviation or interpretation | [D-1](#d-1) to [D-13](#d-13) |
 | U, unclear in the SOG | [U-1](#u-1) to [U-12](#u-12) |
-| I, inconsistent within the SOG | [I-1](#i-1) to [I-8](#i-8) |
+| I, inconsistent within the SOG | [I-1](#i-1) to [I-9](#i-9) |
 | X, outside the X1 path | [X-1](#x-1) to [X-3](#x-3) |
 | B, taken over from the Cortex-A55 / A520 / A76 / A78 / A720 (not SOG-based) | [B-1](#b-1) |
 
@@ -218,7 +218,10 @@ Implementation: `cpu_traits.cpp` `UopDispatchWidth = 16`, `MopDispatchWidth = 8`
 `calculateIssueBound` takes the larger of uops / 16 and instructions / 8. The per-type limits of
 sec. 4.1 (l.2476-2481: four µOPs for S or B, four for M, two each for M0, V0, V1, six for L) are not
 modelled; none is below the issue rate of the pipelines concerned (four S/B, two M, one M0, one V0,
-one V1, three L), so none can bind in a steady state. Test: `DispatchAndPipelines`.
+one V1, three L), so none can bind in a steady state. The list is word for word the A78's: it names
+V0 and V1 only (two µOPs each, l.2479-2480) and says nothing about V2 or V3, and the model adds no
+limit for them, for the same reason (two µOPs per cycle is above the one-µOP issue rate of each
+pipeline). Test: `DispatchAndPipelines`.
 
 <a id="c-2"></a>
 **C-2. Fifteen issue pipelines.**
@@ -539,7 +542,12 @@ LD3R 8 / 4/3, LD3 Q 8 / 1; LD4 D, one lane, LD4R 8 / 1.
 |---|---|---|
 | **LD4 multiple, Q-form, B/H/S; D** | 9 / 1/2 / L, V | `X1WriteLDV<9, 8, 6, 4>`: 8 µOPs, L held 6 cycles, V 4 (`[x1_ls_throughput]`, [D-6](#d-6)) |
 
-Writeback forms add `WriteAdr` (1, I), "(ASIMD load, writeback form) I" (l.2187). Measured: `ld4
+Writeback forms add `WriteAdr` (1, I), "(ASIMD load, writeback form) I" (l.2187). The X1 SOG gives
+no update latency for this row: the latency column is "-" (l.2187, likewise the AArch32 row, l.2242),
+and note 1 (l.2244-2245) ends "performed in parallel with the load µOP" without the A78's "(update
+latency shown in parentheses)". The 1 cycle is taken from the AArch32 FP load writeback row "(1) +I"
+(l.1438) and the A78 SOG ("(1) +I", [a78-sog.md](a78-sog.md) C-21): where the X1 SOG is unclear,
+the A78 decision is followed ([section 1.1](#11-source)). Measured: `ld4
 {v0.16b-v3.16b}, [x0]` + branch 2.0. Sec. 4.18:
 [U-2](#u-2). Test: `AsimdLoadsAndStores`.
 
@@ -554,7 +562,12 @@ each L01 µOP holds one L01 cycle and the throughput is reached.
 |---|---|---|
 | **ST4 one lane, B/H; S** | 6 / 4/3 / V, L01 | `X1WriteSTV<6, 6, 2, 2>`: L01 and V01 2 cycles each, 1 per cycle (`[x1_ls_throughput]`, [D-6](#d-6)) |
 
-Writeback "(1) +I" (l.2329, l.2375): `WriteAdr`. The data operands read `ReadST` ([B-1](#b-1)). Test: `AsimdLoadsAndStores`.
+Writeback: `WriteAdr` (1, I). The AArch64 row is "(ASIMD store, writeback form) - - - I" (l.2329), with
+no update latency; only the AArch32 row prints "(1) +I" (l.2375), and note 1 (l.2377-2378) ends
+"performed in parallel with the store µOP" without the A78's "(update latency shown in
+parentheses)". The 1 cycle is taken from that AArch32 row and from the A78 SOG ("(1) Add I",
+[a78-sog.md](a78-sog.md) C-22): where the X1 SOG is unclear, the A78 decision is followed
+([section 1.1](#11-source)). The data operands read `ReadST` ([B-1](#b-1)). Test: `AsimdLoadsAndStores`.
 
 <a id="c-23"></a>
 **C-23. Sec. 3.20, cryptography (p.49, l.2382-2399).**
@@ -804,7 +817,9 @@ x1` + branch 3.0; `mul v0.4s, v0.4s, v1.4s; mla v0.4s, v2.4s, v3.4s` + branch 5.
 (`[x1_aes]`)
 SOG sec. 4.14 (l.2841-2845) lists them as fused, sec. 4.7 (l.2604-2605): dependent pairs "exhibit
 higher performance when they are adjacent in the program code and both instructions use the same
-destination register"; no number. Current handling: no fusion and no forwarding; each AES
+destination register"; no number. Note 1 of the cryptography tables refers to these pairs for the
+AArch64 AES row as well as the AArch32 one (l.2386, l.2408, l.2433-2435; it names "Section 4.6",
+[I-9](#i-9)). Current handling: no fusion and no forwarding; each AES
 instruction 2 / 2 / V01 — same as A78 U-6. The stock V1 read advance of 2 (which Facile would not
 apply, [C-23](#c-23)) is not in the model. How to
 settle: hardware measurement.
@@ -918,11 +933,23 @@ Implementation: as printed (one L01 and one V01 µOP, [C-17](#c-17)), same as A7
 **I-8. Misprints and references.**
 Tables 3-26 and 3-27 are titled "ASIMD integer instructions" for the ASIMD floating-point tables
 (l.1777, l.1871); "VCVTAU" in AArch64 rows (l.1802, l.1808; FCVTAU meant); "AAarch32" (l.544);
-"L0,1 D" (l.1133; L01, D meant); "Q2F" (l.2812); sec. 4.14 and Table 3-35 note 1 refer to "Section
-4.6" for AES (l.2435, l.2842-2843; 4.7 meant); LDPSW pre/post-index is "I, L" like the offset form
+"L0,1 D" (l.1133; L01, D meant); "Q2F" (l.2812); LDPSW pre/post-index is "I, L" like the offset form
 (l.1002-1003, l.1023-1024), while every other pre/post-index integer load adds the I of the base
-update (the model gives the pre/post-index LDPSW `WriteAdr` as well, i.e. two I µOPs).
-Implementation: the evident meaning, same as A78 I-7.
+update (the model gives the pre/post-index LDPSW `WriteAdr` as well, i.e. two I µOPs). The AES
+section reference: [I-9](#i-9). Implementation: the evident meaning, same as A78 I-7.
+
+<a id="i-9"></a>
+**I-9. AES pairs: "Section 4.6" for the AES section 4.7.**
+The note on the AES rows, "Adjacent AESE/AESMC instruction pairs and adjacent AESD/AESIMC
+instruction pairs will exhibit the performance characteristics described in Section 4.6" (note 1,
+printed after Table 3-35, l.2433-2435), and sec. 4.14, "AESE + AESMC (see Section 4.6 on AES Encryption/Decryption)"
+and "AESD + AESIMC (see Section 4.6 ...)" (l.2842-2843), point to sec. 4.6, which is "Store to Load
+Forwarding" (l.2575); the AES section is 4.7, "AES encryption/decryption" (p.53, l.2589). In the X1
+SOG the note is attached to the AArch64 AES row as well ("Crypto AES ops AESD, AESE, AESIMC, AESMC 2
+2 V01 1", Table 3-34, l.2386, which has no notes block of its own) and to the AArch32 row
+(l.2408). Implementation: sec. 4.7 is read as
+meant; the decision of [U-6](#u-6) (AES pairs are neither masked nor given a forwarding) is
+unchanged. Same as A78 I-8.
 
 ---
 

@@ -29,7 +29,7 @@ Contents
 | N, not compatible | none open |
 | D, deliberate deviation or interpretation | [D-1](#d-1) to [D-12](#d-12) |
 | U, unclear in the SOG | [U-1](#u-1) to [U-12](#u-12) |
-| I, inconsistent within the SOG | [I-1](#i-1) to [I-7](#i-7) |
+| I, inconsistent within the SOG | [I-1](#i-1) to [I-8](#i-8) |
 | X, outside the A78 path | [X-1](#x-1) to [X-2](#x-2) |
 | B, taken over from the Cortex-A55 / Cortex-A520 / Cortex-A76 (not SOG-based) | [B-1](#b-1) |
 
@@ -773,7 +773,9 @@ to settle: hardware measurement. Test: `DivideAndMultiply`, `Asimd`.
 **U-6. AESE/AESMC and AESD/AESIMC pairs.**
 SOG sec. 4.14 (l.2821-2825) lists them as fused, sec. 4.7 (l.2584-2585): dependent pairs "exhibit
 higher performance when they are adjacent in the program code and both instructions use the same
-destination register"; no number. Current handling: no fusion and no forwarding (the N2 model has
+destination register"; no number. Note 1 of the cryptography tables refers to these pairs for the
+AArch32 AES row only (l.2400, l.2414-2416; it names "Section 4.6", [I-8](#i-8)); the AArch64 row has
+no note (l.2371). Current handling: no fusion and no forwarding (the N2 model has
 no read advance between AES instructions, so there is nothing to remove, unlike the X1, [x1-sog.md](x1-sog.md)
 C-23); each AES instruction 2 / 2 / V, `aese; aesmc` + branch 4.0. How to settle: hardware
 measurement.
@@ -876,10 +878,22 @@ stock N2 row. How to settle: hardware measurement.
 **I-7. Misprints and references.**
 Table 3-26 and 3-27 are titled "ASIMD integer instructions" for the ASIMD floating-point tables
 (l.1772, l.1873); "VCVTAU" in AArch64 rows (l.1797, l.1803; FCVTAU meant); "AAarch32" (l.540);
-"Q2F" (l.2786); sec. 4.14 and Table 3-35 note 1 refer to "Section 4.6" for AES (l.2416, l.2822-2823;
-4.7 meant); LDPSW pre/post-index is "I, L" like the offset form (l.998-999, l.1019-1020), while every
-other pre/post-index integer load adds the I of the base update (the model gives the pre/post-index
-LDPSW `WriteAdr` as well, i.e. two I µOPs). Implementation: the evident meaning.
+"Q2F" (l.2786); LDPSW pre/post-index is "I, L" like the offset form (l.998-999, l.1019-1020), while
+every other pre/post-index integer load adds the I of the base update (the model gives the
+pre/post-index LDPSW `WriteAdr` as well, i.e. two I µOPs). The AES section reference: [I-8](#i-8).
+Implementation: the evident meaning.
+
+<a id="i-8"></a>
+**I-8. AES pairs: "Section 4.6" for the AES section 4.7.**
+The note on the AES rows, "Adjacent AESE/AESMC instruction pairs and adjacent AESD/AESIMC
+instruction pairs will exhibit the performance characteristics described in Section 4.6" (note 1,
+printed after Table 3-35, l.2414-2416), and sec. 4.14, "AESE + AESMC (see Section 4.6 on AES
+Encryption/Decryption)" and "AESD + AESIMC (see Section 4.6 ...)" (l.2822-2823), point to sec. 4.6,
+which is "Store to Load Forwarding" (l.2554); the AES section is 4.7, "AES encryption/decryption"
+(p.53, l.2568). In the A78 SOG only the AArch32 AES row carries the note ("Crypto AES ops AESD, AESE,
+AESIMC, AESMC 2 2 V 1", Table 3-35, l.2400); the AArch64 row has "-" in the Notes column (Table
+3-34, l.2371). Implementation: sec. 4.7 is read as meant; the decision of [U-6](#u-6) (AES pairs are
+neither masked nor given a forwarding) is unchanged.
 
 ---
 
